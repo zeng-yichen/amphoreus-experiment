@@ -1,0 +1,299 @@
+[0:04] Melissa McMillan: I need a draft. Hey, Satchel, how's it going? Can you hear me okay? I can't hear you. Testing, testing. Can you hear me?
+[1:01] Sachil V: For whatever reason, my laptop microphone is not
+[1:05] Melissa McMillan: working.
+[1:05] Sachil V: So this is
+[1:06] Melissa McMillan: my
+[1:07] Sachil V: Bluetooth earphones might be slightly less quality, but we'll go from
+[1:11] Melissa McMillan: there. No worries. No worries. We've all been there before.
+[1:15] Sachil V: How's your day
+[1:15] Melissa McMillan: going so
+[1:16] Sachil V: far? Yeah, I'm sure not bad. Just diving into everything. How about
+[1:20] Melissa McMillan: you? Very well. Plenty to do today and tomorrow, but always excited to get through content. I would like to spend some time today looking at the post that you have had time to qa.
+[1:37] Sachil V: Sure,
+[1:38] Melissa McMillan: yeah. Through the edits together live and get some feedback on. On this first batch of posts. In general, I know you maybe read some of the others but haven't had a chance to fully QA them. So
+[1:49] Sachil V: if you
+[1:49] Melissa McMillan: don't have
+[1:50] Sachil V: a time
+[1:51] Melissa McMillan: yet, that's fine, but wanted to share my screen and walk through some of that together. Does that sound good?
+[1:58] Sachil V: Sure. Yeah, sounds
+[1:59] Melissa McMillan: good. All right, so here we go. You can see my screen. Okay, right?
+[2:05] Sachil V: Yes, I can see it now.
+[2:06] Melissa McMillan: Fantastic. All right, so the AI Sigma post. Look here with CRO CEO COO VP
+[2:16] Sachil V: Clino, I assume here you were meeting. You guys are meeting Chief Revenue officer.
+[2:21] Melissa McMillan: That, you know, that's the only CRO language that I personally.
+[2:26] Sachil V: Okay,
+[2:26] Melissa McMillan: okay. In this space there's another one.
+[2:29] Sachil V: So I mean, funny enough, when I first read that, I read that as a contract research organization because that's
+[2:34] Melissa McMillan: who
+[2:35] Sachil V: we've been like, that's more common in our industry. So I was
+[2:38] Melissa McMillan: like.
+[2:40] Sachil V: I was first interpreting. Yeah, yeah. Does this mean like working as a CRO for a biotech? Possibly, but there is. I'm pretty sure it's cheap revenue based
+[2:48] Melissa McMillan: on the rest
+[2:49] Sachil V: of the
+[2:50] Melissa McMillan: sentence. Super niche spaces, you know, like
+[2:53] Sachil V: biotech. Yeah,
+[2:55] Melissa McMillan: the ones that we've never heard of.
+[2:56] Sachil V: But yeah,
+[2:57] Melissa McMillan: yeah. Suggestions here. You know,
+[2:59] Sachil V: you've
+[3:00] Melissa McMillan: got. COO VP at Clinox. Definitely happy to replace with one of those. That's an easy one. But
+[3:06] Sachil V: do you
+[3:06] Melissa McMillan: have a strong sense of which one would maybe be the best of those options?
+[3:13] Sachil V: The thing is, it kind of depends on the firm because on the smaller side, it really is getting more into the CEO COO side. But in a medium, even in a medium size, it. It actually is more of a VP cleanups conversation first and then kind of, you know, you kind of bring the CEOs into that because then the CEOs are a little more focused on internal processes rather than technology part.
+[3:38] Melissa McMillan: So
+[3:38] Sachil V: it's a split between the small to medium. Well,
+[3:43] Melissa McMillan: we could
+[3:43] Sachil V: do
+[3:44] Melissa McMillan: two. Perhaps we could always do like a slash,
+[3:47] Sachil V: you know.
+[3:48] Melissa McMillan: Yeah,
+[3:50] Sachil V: yeah,
+[3:51] Melissa McMillan: yeah. Something like that. We're sensitive to your target. Right,
+[3:55] Sachil V: so.
+[3:55] Melissa McMillan: Right. Maybe closer aligned to your target
+[3:59] Sachil V: then. Yeah, yeah. And in that sense, probably COO to VP Clean ops would be.
+[4:07] Melissa McMillan: Okay. Let's do that. Yeah. Good to do these live together for the first kind of rounds. Sure,
+[4:13] Sachil V: sure.
+[4:14] Melissa McMillan: Clinops. Is that correct?
+[4:17] Sachil V: Yeah,
+[4:17] Melissa McMillan: yeah.
+[4:19] Sachil V: And you can also make it one word. I think it goes either way, frankly. Yeah,
+[4:25] Melissa McMillan: yeah. Perfect. Awesome. Thank you. Thank you.
+[4:28] Sachil V: And
+[4:29] Melissa McMillan: we also had this comment here. Not in potential value, but accuracy and execution are a different story. Can you break down a little bit?
+[4:38] Sachil V: Sure. So I think we actually had this conversation in our. One of the initial kind of get togethers on AI in the industry. And I think based on my perception, also just a little bit of research, I think the distinction is that AI stigma doesn't exist that much in terms of, hey, we can get something good out of this. You don't have to sell the value to them. However, there is a stigma when it comes to getting what you actually want out of. So actually implementing the solution in a way where people can use it in their processes. So accuracy, meaning just accuracy of the output and then execution, meaning actually implementing the system.
+[5:16] Melissa McMillan: So. So
+[5:17] Sachil V: there is almost universal acceptance in the potential value, but the real value achieved is there is a little bit of a stigma.
+[5:27] Melissa McMillan: All right, let's figure out a way to get a succinct. Maybe just like.
+[5:32] Sachil V: Yeah,
+[5:32] Melissa McMillan: yeah, definitely understand where you're coming from.
+[5:36] Sachil V: Want
+[5:37] Melissa McMillan: to make sure I think about this in the right way. So basically, I don't know if I would say everyone, so maybe not really. Let's just start from there. Not in potential value of using an AI tool. I'm just kind of spitting
+[5:53] Sachil V: like this.
+[5:56] Melissa McMillan: But I mean, you said accuracy and execution. Execution are a different story. But I feel like there's put that. But realized potential. Might
+[6:16] Sachil V: be anyway. I mean, accuracy is kind of a
+[6:20] Melissa McMillan: subset of
+[6:20] Sachil V: execution
+[6:21] Melissa McMillan: anyways.
+[6:22] Sachil V: So
+[6:23] Melissa McMillan: one
+[6:23] Sachil V: like one word makes sense.
+[6:25] Melissa McMillan: Okay, so now we've got. Is there still an AI stigma in clinical trials? Not really. Not in potential value of using an AI tool. But realized potential is a different story. How do we feel about that?
+[6:38] Sachil V: I would say we can remove the not really now
+[6:39] Melissa McMillan: and
+[6:40] Sachil V: just go straight into non potential value.
+[6:44] Melissa McMillan: Okay. Feel good about that?
+[6:46] Sachil V: Yeah, yeah, I think that makes sense.
+[6:50] Melissa McMillan: And then you also called out remove based on previous change. So are we talking about this? Do we want to maybe just say like the real challenges are as follows or like the real challenges are.
+[7:03] Sachil V: Oh, yeah, I was just thinking we'll say real challenges are. Now that we've kind of changed the previous
+[7:08] Melissa McMillan: part.
+[7:09] Sachil V: Yeah. We just dive straight into them.
+[7:11] Melissa McMillan: Okay. And then these first couple we feel good about.
+[7:17] Sachil V: Yeah, yeah,
+[7:18] Melissa McMillan: I think. Yep. And then this one, you had some thoughts. So audience for this industry, that's an easy one. We can just kind of ditch that again, is a bit challenging. So we'll just say it is
+[7:32] Sachil V: challenging. It's
+[7:33] Melissa McMillan: challenging.
+[7:33] Sachil V: Yeah.
+[7:34] Melissa McMillan: So
+[7:34] Sachil V: now I
+[7:35] Melissa McMillan: just try to
+[7:35] Sachil V: apply Occam's razor when I can.
+[7:38] Melissa McMillan: Absolutely make sense. Just like, you know, learning your voice early stages.
+[7:45] Sachil V: We're really. Yeah,
+[7:46] Melissa McMillan: yeah, no worries. So now that in multiple conversations you'll say, oh, this looks promising, or we really like the concept of it. But again, doing that due diligence on top of the added layer of compliance and auditing is challenging. How do you feel about the way that looks and sounds? That all still feel accurate?
+[8:05] Sachil V: Yeah,
+[8:05] Melissa McMillan: yeah, yeah,
+[8:07] Sachil V: exactly. The commenter.
+[8:08] Melissa McMillan: Yeah. And then with the vendor saturation. So this first paragraph, you said the potential value. Can you walk me through what you mean here? Because I wasn't super clear like were we will be adding that language somewhere or like.
+[8:23] Sachil V: So now. Yeah, I think tying back to what we said in the earlier statement on AI stigma. So the basically following that same theme, the potential value is what is lucrative and that's why people are engaging with AI vendors. But again,
+[8:39] Melissa McMillan: the, you know, the
+[8:41] Sachil V: realized value execution is the challenge.
+[8:46] Melissa McMillan: Potential value. Okay,
+[8:50] Sachil V: that makes
+[8:51] Melissa McMillan: sense. So the potential value is extremely lucrative right now,
+[8:55] Sachil V: just like it's lucrative for industry
+[8:58] Melissa McMillan: or
+[8:58] Sachil V: for sponsors. Same thing for AI vendors. Right. They see that. That is,
+[9:01] Melissa McMillan: you
+[9:02] Sachil V: know, there's value and that's why they are hooking it up and trying to get in.
+[9:06] Melissa McMillan: Great. Okay. So then the next paragraph that follows. I wonder if we might want to tighten that up or rephrase anything there. The challenge is finding out what differentiates the key players who understand workflows within this industry from just another document generator. Do you feel okay about that? Is there anything that maybe would make that a little
+[9:23] Sachil V: tighter? I think that that part makes sense. I did have a note here thinking, is this where we want
+[9:30] Melissa McMillan: to
+[9:31] Sachil V: slightly bring up the accuracy element? Because one of the common pitfalls of hooking to an LLM API is your accuracy will only be as good as whatever the base training is.
+[9:41] Melissa McMillan: Right.
+[9:43] Sachil V: Whatever
+[9:43] Melissa McMillan: finished
+[9:44] Sachil V: product.
+[9:49] Melissa McMillan: I'm just getting a first thought. So the challenge of finding out what differentiates the key players who understand workflows within this industry from just another document generator and issues with access accuracy.
+[10:03] Sachil V: I
+[10:03] Melissa McMillan: don't know. Challenges finding out what differentiates key players who understand workflows from within this industry from just another document. Maybe I would say like as well as separate idea as well as issues with accuracy. I might even say something to the effect of like due to the niche specifics, due to, I don't know, anything jump to my. Niche industry specifics. Does that feel like it captures what we're trying to capture here?
+[10:51] Sachil V: In a way,
+[10:55] Melissa McMillan: I'm
+[10:55] Sachil V: thinking it may actually work better in the first part rather than the second. So by that I mean the challenge is finding out what differentiates the key players who understand workflows within this industry and something effective. Tackle the accuracy problem from just another rather than just another document generator, if that makes
+[11:18] Melissa McMillan: sense.
+[11:19] Sachil V: Okay,
+[11:24] Melissa McMillan: I like that. Do you think there might be value in still keeping and tackle the accuracy problem due to niche industry specifics? All
+[11:34] Sachil V: right, so
+[11:35] Melissa McMillan: let's
+[11:35] Sachil V: see.
+[11:35] Melissa McMillan: Yeah, one more time. The challenge is finding out what differentiates the key players who understand workflows within this industry. And I feel like I don't like
+[11:45] Sachil V: that.
+[11:46] Melissa McMillan: Yeah, we got a fixing there. Challenge is finding out what differentiates the key players who understand workflows within without within this industry and are able to tackle the accuracy problem. Maybe that arises with most AI. What do you think about that?
+[12:21] Sachil V: I think maybe we can say the challenge is finding out what differentiates the key players who build towards workflows within this industry and tackle the accuracy problem and then it kind of
+[12:33] Melissa McMillan: flows
+[12:33] Sachil V: more
+[12:34] Melissa McMillan: directly
+[12:35] Sachil V: build towards.
+[12:37] Melissa McMillan: For. Towards workflows within this industry and are able
+[12:41] Sachil V: to
+[12:41] Melissa McMillan: tackle.
+[12:44] Sachil V: And then you can just say directly and
+[12:46] Melissa McMillan: tackle.
+[12:47] Sachil V: Because
+[12:47] Melissa McMillan: I think that
+[12:48] Sachil V: flow then works with. So key players who build towards workflows within this industry and tackle the accuracy problem because then that kind of goes hand in hand.
+[12:57] Melissa McMillan: Great. Okay, let's do this one more time. Let me make sure this one feels good. The challenge is finding out what differentiates the key players who build towards workflows within this industry and tackle the accuracy problem that arises with most AI due to niche industry specifics. I want to. I feel like I need to add some punctuation in there.
+[13:16] Sachil V: Let's see.
+[13:19] Melissa McMillan: Dash and hey, even is going to be tackles. Let me read this here. No, tackle and tackle will be accuracy problem that arises. Okay. Okay. I feel like that might be. That might be solid. How do you feel?
+[13:37] Sachil V: I would say.
+[13:44] Melissa McMillan: I
+[13:45] Sachil V: think. I would argue that
+[13:46] Melissa McMillan: it's
+[13:48] Sachil V: relatively straightforward, the accuracy, where the accuracy problem comes from. So I would say we don't have to necessarily put due to niche industry specifics
+[14:00] Melissa McMillan: only
+[14:00] Sachil V: because.
+[14:02] Melissa McMillan: Sorry. We want to keep arises with most AI though.
+[14:07] Sachil V: We can even take that out,
+[14:08] Melissa McMillan: honestly. All right, let's see. More succinct is always
+[14:14] Sachil V: good.
+[14:14] Melissa McMillan: Yeah, yeah. You know.
+[14:17] Sachil V: So
+[14:17] Melissa McMillan: let's see. The challenge is finding out what differentiates the key players who build toward workflows within this industry and tackle the accuracy problem that arises or just impact all the accuracy problems.
+[14:28] Sachil V: Yeah,
+[14:29] Melissa McMillan: yeah,
+[14:29] Sachil V: I
+[14:29] Melissa McMillan: think that
+[14:29] Sachil V: works.
+[14:30] Melissa McMillan: Cool. Okay. I'm glad we reworked that one. That one was a little bit doozy, but I feel
+[14:34] Sachil V: like we went. Yeah, yeah, no worries. We always go from adding a little more and then, you know, cutting
+[14:38] Melissa McMillan: out. Right. The editing
+[14:41] Sachil V: and
+[14:41] Melissa McMillan: then challenge number three, burnout from failed solutions. So I didn't see any comments on this one, but I just want to walk through it together and make sure we feel good.
+[14:49] Sachil V: So
+[14:49] Melissa McMillan: here's what we'll talk about. A lot of teams already have already tried AI solutions. They took big swings and some tools felt flat. I like that. I feel like that's catchy. Yeah, yeah. Oftentimes they simply don't service what we were needing it to. Let's rephrase that just a touch. They simply don't service what we needed it to. I feel like it's a little better. Oftentimes they simply don't service what we needed it to. They'll very quickly bring in an AI solution that perhaps solves some things here and there. But does it connect to the 80 to the other 80 things that happen internally? It only solves 20 and it's a hassle to connect the 20 it solves to the 80 that it doesn't
+[15:36] Sachil V: actually. So a couple things I think. One is from the earlier challenges, I think we were taking a third person like approach to the post and then on this
+[15:52] Melissa McMillan: one
+[15:53] Sachil V: I was a little confused. I think we switched to as if we were. Oh, if I was the person.
+[15:58] Melissa McMillan: Okay, okay. If I'm in this role,
+[16:01] Sachil V: this is what. Yeah,
+[16:02] Melissa McMillan: yeah.
+[16:06] Sachil V: So then I guess going back to challenge one and two, do we take that like personal Persona? Because I thought maybe in certain parts we were switching to a third person Persona and then switching back to the first person.
+[16:22] Melissa McMillan: Let me see here. If I was this person, ideally you want it.
+[16:30] Sachil V: Yeah, right, right there. So ideally you want it. So then we're taking the third person Persona and saying ideally you would want the solution when it would be like I would want if I was the one in this situation. Does that make
+[16:41] Melissa McMillan: sense? Yes, but where is
+[16:44] Sachil V: it? So in challenge number one, paragraph
+[16:47] Melissa McMillan: two. Thank you. Ideally you want it, but for it to work with your current processes when you're engaged on some chunks,
+[16:55] Sachil V: that would all
+[16:56] Melissa McMillan: be.
+[16:56] Sachil V: I. If I'm taking the Persona of. I like
+[16:59] Melissa McMillan: that. Okay, so ideally I want it
+[17:05] Sachil V: and that'll be to work with my current processes
+[17:08] Melissa McMillan: while
+[17:08] Sachil V: I'm doing. While we are doing
+[17:10] Melissa McMillan: day to
+[17:10] Sachil V: day
+[17:10] Melissa McMillan: jobs, work with my current prophecies while doing my day to day job. Sets of challenge.
+[17:21] Sachil V: Yeah,
+[17:24] Melissa McMillan: doing that due diligence is challenging. Okay, so AI awareness because it's easy to look it up, blah, blah, challenges, finding out what differentiates. Okay, that's generally.
+[17:36] Sachil V: Yeah,
+[17:36] Melissa McMillan: yeah, don't talk about it a lot. A lot of teams have already tried AI solutions, so that's fine. Being more general.
+[17:42] Sachil V: Oftentimes
+[17:45] Melissa McMillan: AI solutions, they don't connect either. Okay, I think that's fine. Being general. Oh, and then you're constantly. I feel like this being like your as opposed to like I'm makes sense because in this one we're kind of getting a little more big picture. But anything else we would want to change here.
+[18:07] Sachil V: So one thing for the beginning of it, we say here's what people don't talk about. I didn't put a comment here, but I'm not actually sure how much it's talked about or not.
+[18:18] Melissa McMillan: So
+[18:19] Sachil V: maybe it would be good just to verify is it talked about or not, because I don't want to assume that they don't talk about it when they do.
+[18:27] Melissa McMillan: What if we
+[18:27] Sachil V: say, yeah, yeah, it's a little safer to say that. Yeah,
+[18:32] Melissa McMillan: great. And then oftentimes it simply don't service. Oh. And they're constantly thinking about, despite these challenges, the teams that aren't implementing AI are losing time, money, competitive advantage, team figuring out. Okay, I feel like that's fine. And then what was the comment here again? Okay, so we've got a specific number we're going to throw
+[18:54] Sachil V: in. Yeah, this is just. I've been putting it throughout the post, mainly because it's something that has been backed by a study. Just an average. So 141k average for phase two amendment, 535k average for phase three
+[19:06] Melissa McMillan: amendment. Do we want to cite that source?
+[19:10] Sachil V: Sure,
+[19:10] Melissa McMillan: sure. Yeah. Do what I did last time.
+[19:13] Sachil V: Where. Yeah, yeah, it's. I would have to look at it. I know it's
+[19:18] Melissa McMillan: Tufts
+[19:19] Sachil V: csdd. It's one of the. I would say definitely better places to source. Let me, let me pull out the link.
+[19:32] Melissa McMillan: Awesome. And if you want to even just slack it to me.
+[19:35] Sachil V: Yeah, yeah,
+[19:36] Melissa McMillan: grab that. Monday. Let me double check my calendar. That Monday is. In fact,
+[20:08] Sachil V: I don't have the direct link right now, but I've seen it multiple times, so I'll just give you the. That's
+[20:20] Melissa McMillan: okay. Yeah. That is Monday Tufts csdd.
+[20:25] Sachil V: Yeah.
+[20:27] Melissa McMillan: Okay. Csdd. That's what
+[20:29] Sachil V: it was. Csdd. Yeah.
+[20:33] Melissa McMillan: Okay. And do we need like a year or anything?
+[20:37] Sachil V: Let me check,
+[20:39] Melissa McMillan: like, if it was published in 2025.
+[20:53] Sachil V: It was 2024.
+[20:56] Melissa McMillan: Okay, perfect. Awesome. That looks good. Let's take a quick break. Peek at the one for Tuesday. This one's an ABM post. I don't know that you'll have a lot of. A lot of edits on that one yet without spending a little bit more time Async.
+[21:14] Sachil V: But
+[21:15] Melissa McMillan: at least
+[21:15] Sachil V: in
+[21:15] Melissa McMillan: terms here, anything jump out in terms of something that you might not feel is aligned,
+[21:41] Sachil V: I think. Yeah, it looks fine. So to understand the. One of the points behind this post is we actually then ping these companies as well. Is
+[21:49] Melissa McMillan: that part of it? Yeah, exactly.
+[21:50] Sachil V: So what
+[21:51] Melissa McMillan: I'll do is I'll come in and I'll actually mention them.
+[21:54] Sachil V: Yeah,
+[21:55] Melissa McMillan: yeah. And then they see it.
+[21:58] Sachil V: Okay. Yeah, very cool. I think. Yeah, that's pretty good. Yeah, I think not a lot I can add there, other than I would ask that you guys definitely just double check, triple check, really, that what we're actually saying about them is up to date. Just, you know, because the only thing that can go wrong with this post is if we're posting something out of date or inaccurate and then it's, you know, it
+[22:22] Melissa McMillan: looks
+[22:23] Sachil V: odd. Other than that. Yeah, I think that this
+[22:27] Melissa McMillan: is perfect.
+[22:28] Sachil V: It is, you know, the exact kind of companies we want to target anyways for, you know, what we're doing.
+[22:33] Melissa McMillan: Okay, great. Okay, perfect. Well, I feel like I can actually give you seven minutes of your valuable time back then. Right? Always a good thing. And then we've got these remaining
+[22:49] Sachil V: that
+[22:49] Melissa McMillan: we want you to review for next week. So you were mentioning that you'd be able to do that for this weekend, right?
+[22:55] Sachil V: Yeah, yeah, exactly. I think this will be a good chance to get a little more Runway done.
+[23:01] Melissa McMillan: Yes, exactly. So we'll be getting some drafts ready for you as well, behind the scenes. But main thing, our main ask from you is just going to be to QA all the ones for next week so that we can make sure to get those out on time.
+[23:15] Sachil V: And
+[23:15] Melissa McMillan: in the event that you want to hop on a call or anything like that for, you know, if you see one that just feels like it needs a ton of explanation or you need the
+[23:26] Sachil V: additional
+[23:26] Melissa McMillan: time. Yeah, just. Yes, let us know. We'll find some time. But definitely want to make sure we get those out next week as priority one.
+[23:35] Sachil V: Yeah, yeah, exactly. And then basically for the foreseeable future, regular posting schedule. Monday, Wednesday, Friday. Makes
+[23:41] Melissa McMillan: sense.
+[23:41] Sachil V: Exactly. Okay, perfect.
+[23:43] Melissa McMillan: Yeah, those
+[23:43] Sachil V: are good
+[23:44] Melissa McMillan: days to post.
+[23:45] Sachil V: Yeah, yeah, exactly. And then just one more thing. Let me do one final run up. I'm gonna head into another meeting real quick and then I'll come back, do one quick review of this post. And then I'll ping
+[23:59] Melissa McMillan: you when
+[23:59] Sachil V: it's, like, it's good to go.
+[24:02] Melissa McMillan: Awesome. And then you might have seen, you might not have seen. And if we go back to ordinal. Let me just. I'm taking a look right now. The AI stigma 1. So you are marked as an approver. So, like, I'll share my screen one more time real quick.
+[24:18] Sachil V: Oh, yeah. So once I
+[24:20] Melissa McMillan: mark
+[24:21] Sachil V: it,
+[24:22] Melissa McMillan: that's telling us we can post this now. I.
+[24:28] Sachil V: I
+[24:28] Melissa McMillan: will. I will level set with you. Also, we want to make sure that the cadence stays on time and on track. So, yeah, I'll let you know if, like, hey, the bottleneck is that you haven't approved this. This is supposed to go out tomorrow. Like, can you please approve it? And if you don't approve it, it's better for us to post it tomorrow and stay
+[24:50] Sachil V: on
+[24:50] Melissa McMillan: cadence and keep building momentum
+[24:52] Sachil V: than it
+[24:52] Melissa McMillan: is for us to wait.
+[24:54] Sachil V: So.
+[24:54] Melissa McMillan: Okay, so you know how we think about this.
+[24:57] Sachil V: Like,
+[24:57] Melissa McMillan: we can lose momentum when we. When we miss days of posting.
+[25:01] Sachil V: So
+[25:01] Melissa McMillan: if you don't get a chance to approve or whatever, like, do always expect to hear from us, but it's better to post and have it maybe, you know, be 95% of what you were hoping for
+[25:13] Sachil V: than
+[25:13] Melissa McMillan: it is for us to drop the ball.
+[25:15] Sachil V: Okay. Okay. Gotcha.
+[25:17] Melissa McMillan: Sounds good. Awesome. Well, thank you so much, Satchel. Really appreciate all the feedback and collaboration here. This is really helpful for us. Yeah, get those ways in, and we will have some more drafts ready for you asap, and we'll plan on getting all this stuff out next week.
+[25:33] Sachil V: Sounds good. And then should I schedule once the astigma is approved, or will you go ahead and schedule
+[25:41] Melissa McMillan: it for today? Oh, no, we. We do that,
+[25:42] Sachil V: we'll post something. Okay. Sounds good.
+[25:44] Melissa McMillan: Okay. All right.
+[25:46] Sachil V: Thank you.
+[25:47] Melissa McMillan: Of course. Talk soon.
+[25:48] Sachil V: Bye. Bye.
+[25:48] Melissa McMillan: Bye.
