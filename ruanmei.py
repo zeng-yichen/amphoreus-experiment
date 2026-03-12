@@ -1,6 +1,6 @@
 import argparse
 from post import generate_iterative_linkedin_posts
-from brief import generate_ghostwriter_briefing
+from brief import generate_briefing
 
 def main():
     parser = argparse.ArgumentParser(description="Ruan Mei Content Generation Engine")
@@ -27,7 +27,7 @@ def main():
         generate_iterative_linkedin_posts(args.client_name, args.company_keyword)
     elif args.action == "brief":
         print(f"Ruan Mei: I'm Starting Briefing for {args.client_name}...")
-        generate_ghostwriter_briefing(args.client_name, args.company_keyword)
+        generate_briefing(args.client_name, args.company_keyword)
 
 if __name__ == "__main__":
     main()

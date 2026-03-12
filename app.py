@@ -8,7 +8,7 @@ from PIL import Image, ImageTk
 
 # Import your existing worker functions!
 from post import generate_iterative_linkedin_posts
-from brief import generate_ghostwriter_briefing
+from brief import generate_briefing
 
 class PrintLogger:
     def __init__(self, text_widget):
@@ -23,7 +23,7 @@ class RuanMeiGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Ruan Mei")
-        self.root.geometry("1300x800") 
+        self.root.geometry("1300x950") 
         self.root.configure(padx=10, pady=10, bg="white")
 
         # --- BUTTON STYLE CONFIG ---
@@ -95,6 +95,12 @@ class RuanMeiGUI:
         tk.Radiobutton(frame_gen, text="Generate Briefing?", variable=self.action_var, value="brief", bg="white", activebackground="white").pack(anchor="w")
         tk.Radiobutton(frame_gen, text="Generate 10 LinkedIn Posts?", variable=self.action_var, value="post", bg="white", activebackground="white").pack(anchor="w")
 
+        # Add the Model Selection Dropdown
+        tk.Label(frame_gen, text="Model Choice:", bg="white").pack(anchor="w", pady=(10, 0))
+        self.model_var = tk.StringVar(value="All (Ensemble)")
+        model_options = ["All (Ensemble)", "Gemini 3.1 Pro", "GPT-5", "Claude Opus 4.6"]
+        tk.OptionMenu(frame_gen, self.model_var, *model_options).pack(anchor="w", pady=(0, 10))
+
         # The Main Run Button
         self.run_btn = tk.Button(frame_gen, text="🚀 PLEASE, RUAN MEI!", command=self.run_generation, font=("Arial", 12, "bold"), pady=8, **self.btn_style)
         self.run_btn.pack(fill="x", pady=10)
@@ -161,50 +167,81 @@ class RuanMeiGUI:
                     shutil.copy(file, target_dir)
                     print(f"Added {os.path.basename(file)} to {folder_type} folder.")
                 except Exception as e: print(f"Failed to copy {file}: {e}")
-
+    
     def run_generation(self):
         client_name = self.client_name_var.get().strip()
         company = self.company_var.get().strip()
         action = self.action_var.get()
+        model_choice = self.model_var.get() # Grab the dropdown value
+        
         if not client_name or not company:
             messagebox.showerror("Error", "Client Name and Company Keyword are required.")
             return
+            
         self.run_btn.config(state="disabled", text="Running...")
         self.console.delete(1.0, tk.END) 
         self.output_viewer.delete(1.0, tk.END)
-        threading.Thread(target=self._process_thread, args=(client_name, company, action), daemon=True).start()
+        
+        # Pass model_choice into the thread
+        threading.Thread(target=self._process_thread, args=(client_name, company, action, model_choice), daemon=True).start()
 
-    def _process_thread(self, client_name, company, action):
+    def _process_thread(self, client_name, company, action, model_choice):
         try:
             if action == "post":
                 print(f"Ruan Mei: I'm Starting Post Generation for {client_name}...\n")
-                generate_iterative_linkedin_posts(client_name, company)
+                # Assuming your post generator doesn't use the ensemble feature yet
+                generate_iterative_linkedin_posts(client_name, company) 
             else:
-                print(f"Ruan Mei: I'm Starting Briefing for {client_name}...\n")
-                generate_ghostwriter_briefing(client_name, company)
-        except Exception as e: print(f"\nAN ERROR OCCURRED: {e}")
+                print(f"Ruan Mei: I'm Starting Briefing for {client_name} using [{model_choice}]...\n")
+                # Pass the choice to the updated function!
+                generate_briefing(client_name, company, model_choice)
+                
+        except Exception as e: 
+            print(f"\nAN ERROR OCCURRED: {e}")
         finally:
-            self.run_btn.config(state="normal", text="🚀 PLEASE, RUAN MEI!")
+            self.run_btn.config(state="normal", text="PLEASE, RUAN MEI!")
             print("\n--- TASK FINISHED ---")
-            self.root.after(0, self.load_output_to_viewer)
+            # FIX: Use lambda to prevent immediate execution in the background thread
+            self.root.after(0, lambda: self.load_output_to_viewer(model_choice))
 
-    def load_output_to_viewer(self):
+    def load_output_to_viewer(self, model_choice=None):
+        # If clicked manually, model_choice will be None. Grab it from the dropdown!
+        if not model_choice:
+            model_choice = self.model_var.get()
+            
         company = self.company_var.get().strip()
         action = self.action_var.get()
-        if not company: return
+        if not company: 
+            return
+            
         if action == "brief":
-            filepath = os.path.join("./client_data", company, f"{company}_ruanmei_briefing.md")
+            # Map the exact dropdown string to the correct filename
+            if model_choice == "Gemini 3.1 Pro":
+                filename = f"{company}_ruanmei_gemini_briefing.md"
+            elif model_choice == "GPT-5":
+                filename = f"{company}_ruanmei_gpt_briefing.md"
+            elif model_choice == "Claude Opus 4.6":
+                filename = f"{company}_ruanmei_claude_briefing.md"
+            else:
+                # Fallback for "All (Ensemble)"
+                filename = f"{company}_ruanmei_briefing.md"
+                
+            filepath = os.path.join("./client_data", company, filename)
         else:
-            filepath = os.path.join("./client_data", company, f"{company}_ruanmei_posts.txt")
+            filepath = os.path.join("./client_data", company, f"{company}_ruanmei_gemini_posts.md")
+            
         self.output_viewer.delete(1.0, tk.END)
+        
         if os.path.exists(filepath):
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     content = f.read()
                 self.output_viewer.insert(tk.END, content)
                 print(f"Loaded {os.path.basename(filepath)} into viewer.")
-            except Exception as e: self.output_viewer.insert(tk.END, f"Error reading file:\n{e}")
-        else: self.output_viewer.insert(tk.END, "Waiting for output...")
+            except Exception as e: 
+                self.output_viewer.insert(tk.END, f"Error reading file:\n{e}")
+        else: 
+            self.output_viewer.insert(tk.END, f"Waiting for output...\n(Could not find {os.path.basename(filepath)})")
 
 if __name__ == "__main__":
     os.makedirs("./client_data", exist_ok=True)

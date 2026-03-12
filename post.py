@@ -1,10 +1,20 @@
 import os
 import time
 import docx
+import json
 from google import genai
 from google.genai import types
 
 client = genai.Client()
+
+# immediate next steps
+# adjustable hook and tone (hooks are the most important)
+# reduce from dense paragraph-form 
+# perhaps ensemble of writers that each adopt a distinct tone
+# tones can be gather from predetermined set
+
+# proactive behavior
+# distillation, tune? 
 
 def upload_and_wait(directory, client, skip_files):
     """Helper function to convert docs, upload files, and wait for processing."""
@@ -51,19 +61,24 @@ def upload_and_wait(directory, client, skip_files):
 def generate_iterative_linkedin_posts(client_name, company_keyword):
     directory_path = f"./client_data/{company_keyword}"
     accepted_path = os.path.join(directory_path, "accepted")
-    blocked_path = os.path.join(directory_path, "blocked")
+    blocked_path = os.path.join(directory_path, "rejected")
     
-    output_filename = f"{company_keyword}_ruanmei_posts.txt"
-    output_filepath = os.path.join(directory_path, output_filename)
-    briefing_filename = f"{company_keyword}_ruanmei_briefing.md"
+    post_filename = f"{company_keyword}_ruanmei_posts.txt"
+    google_output_filename = f"{company_keyword}_ruanmei_gemini_posts.md"
+    google_output_filepath = os.path.join(directory_path, google_output_filename)
+    gpt_output_filename = f"{company_keyword}_ruanmei_gpt_posts.md"
+    gpt_output_filepath = os.path.join(directory_path, gpt_output_filename)
+    claude_output_filename = f"{company_keyword}_ruanmei_claude_posts.md"
+    claude_output_filepath = os.path.join(directory_path, claude_output_filename)
+    final_output_filename = f"{company_keyword}_ruanmei_posts.md"
+    final_output_filepath = os.path.join(directory_path, final_output_filename)
 
-    print(f"Scanning directory: {directory_path}...")
-    
+    print(f"Scanning directories for {client_name}...")
     if not os.path.exists(directory_path):
         print(f"Error: Directory '{directory_path}' not found.")
         return
     
-    base_files = upload_and_wait(directory_path, client, skip_files=[output_filepath, briefing_filename])
+    base_files = upload_and_wait(directory_path, client, skip_files=[post_filename, google_output_filename, gpt_output_filename, claude_output_filename, final_output_filename])
     accepted_files = upload_and_wait(accepted_path, client, skip_files=[])
     blocked_files = upload_and_wait(blocked_path, client, skip_files=[])
 
@@ -77,7 +92,7 @@ def generate_iterative_linkedin_posts(client_name, company_keyword):
     )
 
     # Open the text file to start recording the session
-    with open(output_filepath, "w", encoding="utf-8") as out_file:
+    with open(google_output_filepath, "w", encoding="utf-8") as out_file:
         out_file.write(f"RUAN MEI LINKEDIN POSTS: {client_name.upper()}\n")
         out_file.write("="*50 + "\n\n")
 
@@ -100,6 +115,9 @@ def generate_iterative_linkedin_posts(client_name, company_keyword):
             """
             response_1a = chat.send_message([prompt_1a] + accepted_files)
             out_file.write(f"--- STEP 1.1: APPROVED POSTS ANALYSIS ---\n{response_1a.text}\n\n")
+            # separate tone and content
+            # generate variety of hook structures (flashy quotes, alternatives)
+            # reduce to post from paragraph form
 
         # --- STEP 1.2: Blocked Posts Analysis ---
         if blocked_files:
@@ -110,6 +128,7 @@ def generate_iterative_linkedin_posts(client_name, company_keyword):
             """
             response_1b = chat.send_message([prompt_1b] + blocked_files)
             out_file.write(f"--- STEP 1.2: REJECTED POSTS ANALYSIS (AVOID) ---\n{response_1b.text}\n\n")
+            # similar additional content
 
         # --- STEP 2: ICP & Product Analysis ---
         print("Step 2: Analyzing ICP...")
@@ -493,4 +512,4 @@ The frontier has moved from the classroom to the cluster.
     for f in all_uploaded_files:
         client.files.delete(name=f.name)
         
-    print(f"Process complete! Output saved to: {output_filepath}")
+    print(f"Process complete! Output saved to: {google_output_filepath}")
