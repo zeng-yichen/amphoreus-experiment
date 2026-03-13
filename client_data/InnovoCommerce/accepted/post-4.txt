@@ -1,0 +1,21 @@
+One of the best conversations I had last week was with a CMO of a 70-person rare disease biotech firm. It stopped me in my tracks completely:
+
+"Your platform uses operational data to improve trial design. But what happens when there's barely any data to begin with?"
+
+It's a fair challenge, and it's one the clinical AI space needs to answer honestly.
+
+Rare disease trials operate under fundamentally different constraints. Patient populations are small - for ultra-rare diseases, sometimes just a few hundred people globally (some conditions have fewer than 500 known cases worldwide). Historical trial data is sparse. The published literature is thin. And the operational playbooks that work for large oncology or cardiovascular programs simply don't translate.
+
+So when a rare disease team hears "AI-powered trial design optimization," their first reaction isn't excitement. It's skepticism. Because most AI platforms are trained on large datasets, and rare disease is, by definition, the opposite of large datasets.
+
+Here's how I think about it:
+
+The value of AI in rare disease isn't about pattern matching across thousands of similar trials. It's about extracting maximum insight from limited information. When you only have a handful of comparable trials at best, every data point matters more, not less. The question becomes: can your platform identify what's actually relevant across sparse data and surface operational insights that a human team would miss because they're buried in manual processes?
+
+For protocol design specifically, rare disease trials face unique operational challenges. Adaptive designs are more common, endpoint selection is more complex, eligibility criteria are harder to define, and regulatory pathways like FDA's Orphan Drug Designation (and the accelerated approval and breakthrough therapy designations that often stack on top) add layers that standard trial design tools weren't built for.
+
+The platforms that will earn trust in rare disease won't be the ones claiming they can do everything. They'll be the ones that are transparent about what works with limited data and what doesn't - and build their tools accordingly.
+
+If you're working in rare disease and evaluating AI for trial design, here's my advice: don't ask vendors "can you handle rare disease?" Ask them "show me what your platform does with 3 comparable trials, even if they've been discontinued, and a 200-patient population." 
+
+What's been your experience evaluating AI platforms for rare disease? I'd love to hear what questions you're asking vendors.

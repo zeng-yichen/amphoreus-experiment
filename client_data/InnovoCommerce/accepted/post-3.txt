@@ -1,0 +1,19 @@
+If you're the Head of Clinical Operations at a small/medium biopharma and considering implementing AI in your clinical trials, there’s one thing to understand: 
+
+AI isn't replacing the majority of your actions.
+
+I build clinical AI for a living. And I'll be the first to tell you: there are things in this industry that AI should never replace. 
+
+The most important one: the clinical monitor's relationship with their sites.
+
+A CRA doesn't just review data remotely. They physically travel to clinical sites, sit with investigators, review source documents, and build relationships with the physicians and coordinators running the trial on the ground. That relationship is the backbone of trial quality - and AI agents aren't going to be physically travelling to build it.
+
+When a site has a protocol deviation, the way the monitor handles that conversation determines whether it gets corrected quickly or becomes a recurring problem. When enrollment lags, the monitor's understanding of site-specific challenges (staffing, patient population, competing trials) determines whether the solution is effective or generic. When an investigator has feasibility concerns, the monitor is the one translating that feedback back to the sponsor in a way that leads to action.
+
+No AI is doing that. And no AI should be.
+
+Can AI help monitors be better at their jobs? Absolutely. We can help them surface data from fragmented systems faster, understand a site's performance before they walk through the door, build visit reports more efficiently, and create corrective action plans based on data in addition to their own field judgment.
+
+But the actual human interaction (the trust, the judgment, the ability to read a room and adjust your approach based on what the site coordinator is telling you between the lines) that's irreplaceable.
+
+The clinical AI companies that earn long-term trust in this industry will be the ones honest about this distinction. We're not here to replace the humans doing the hard work. We're here to give them back up to 30% of their time so they can focus on what actually matters: the conversations, the relationships, and the judgment calls that determine whether a trial succeeds or fails.

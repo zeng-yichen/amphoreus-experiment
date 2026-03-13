@@ -1,0 +1,273 @@
+[1:57] Mori Liu: Hello? Oh, they're not here. I thought this is a person but I guess it's their like note taker.
+[2:02] Andrew Ettinger: Leno. Leno is
+[2:05] Melissa McMillan: an
+[2:05] Andrew Ettinger: agent.
+[2:06] Melissa McMillan: Hi, Andrew, how's it going?
+[2:07] Andrew Ettinger: Good, how are you?
+[2:10] Melissa McMillan: Oh, I can't hear you. Hang on a second.
+[2:12] Andrew Ettinger: There
+[2:12] Melissa McMillan: we
+[2:12] Andrew Ettinger: go.
+[2:15] Melissa McMillan: Awesome. There we go. I can hear you now.
+[2:18] Andrew Ettinger: Great. How are
+[2:19] Melissa McMillan: you doing today?
+[2:21] Andrew Ettinger: Great. How are you?
+[2:22] Melissa McMillan: Very well, thank you so much. Good to see your faces. Looking forward to taking a quick peek at some of the content and I would love to be able to get some stuff scheduled for as soon as potentially tail end of this week or starting next week.
+[2:40] Mori Liu: Thursday's a good day to post. Sorry.
+[2:44] Melissa McMillan: It is a good day to post. Yes. So provided everything looks good to you all. We can absolutely do that. I'm going to go ahead and start sharing my screen here.
+[2:55] Andrew Ettinger: Go ahead.
+[2:58] Melissa McMillan: There we go.
+[2:59] Andrew Ettinger: You just want pictures that I'm happy with.
+[3:02] Melissa McMillan: Yes, photos are super key. Let's take a look at
+[3:12] Mori Liu: one point about the photos. I know you're. If you're familiar with Rent e the pattern of gamma.
+[3:19] Melissa McMillan: I'm not, no.
+[3:21] Mori Liu: If you look at his post, you know, I think photos has to be, you know, Andrew, like his self portrait, like it doesn't have to be him in there. He can, it's whatever relevant to the, like
+[3:33] Andrew Ettinger: to
+[3:33] Mori Liu: the topic of discussion. Right. So Grant Lee, he has these like graphics I can try to pull up real quick, but it's sort of these like graphic that really represents what he's trying to convey in the post. I think we can, like, if you guys can make those or generate those, that would save all that effort because I don't think we want to be like. And you should be taking selfies every time she posts.
+[4:01] Melissa McMillan: So we do have an internal graphic designer that
+[4:03] Mori Liu: we work
+[4:03] Melissa McMillan: with as well. We typically will do something like that as opposed to using Nano Banana or one of these AI generators so that we have something that looks a little bit more polished and professional. But that's also going to be generally more for things like infographics you may have seen on like, for example, Eric's profile will have those lists where it's, you know, a bunch of CTOs or CMOs or whatever
+[4:33] Andrew Ettinger: in a graphic,
+[4:35] Melissa McMillan: things like that or, you know, charts and graphs. We'll have her do things
+[4:38] Andrew Ettinger: like that. Awesome. All
+[4:40] Mori Liu: right, let's
+[4:41] Andrew Ettinger: give me the content. Let's. Let's start the content and we can drive towards this.
+[4:44] Melissa McMillan: Yeah, okay, but good to know. Maury, definitely an option on the table here. Let me hop back over. And actually before we go too deep into the content, one of the things that we need to do while we are here together is get your LinkedIn connected to ordinal because that is going to require 2fa from you. So let's just do that really quickly and it's probably going to send you a text or an email
+[5:13] Andrew Ettinger: before you do that. I
+[5:15] Melissa McMillan: have
+[5:15] Andrew Ettinger: it connected to Lead Delta because they do a good job at deleting contacts. Should I disconnect that before I connect another automation thing to my LinkedIn? I feel like
+[5:32] Melissa McMillan: no, I don't see that being a problem because we have multiple that we use. We've got the Go login, we've got Ordinary, we've got Hay Reach. So I don't anticipate that will be a problem. But if it is, you know, we can cross that bridge.
+[5:49] Andrew Ettinger: All right, cool. All right, go ahead.
+[5:51] Melissa McMillan: All right, so I've got your password from our form here, so. Oh, I'm getting that. Is that the right email address?
+[6:04] Andrew Ettinger: Yes.
+[6:06] Melissa McMillan: Let's see. And then the password. Looks like you created one for us right here. Vireo Hume. Is that still correct?
+[6:14] Andrew Ettinger: I might have inverted that. Try Hume Vireo with a capital H.
+[6:19] Melissa McMillan: Let's
+[6:19] Andrew Ettinger: see. Maybe we didn't change. Maybe. Maybe you didn't change that. Let's see.
+[6:23] Melissa McMillan: Let's try
+[6:25] Andrew Ettinger: and
+[6:26] Melissa McMillan: copy that too, in case I need it for any of my others. There we go. All
+[6:31] Andrew Ettinger: right. It
+[6:31] Melissa McMillan: should have just sent something to your phone.
+[6:34] Andrew Ettinger: 101307.
+[6:36] Melissa McMillan: 101307, that's right.
+[6:40] Andrew Ettinger: Yep.
+[6:41] Melissa McMillan: Perfect. Let's get in here. We're going to allow. And then it's just going to be this one.
+[6:52] Andrew Ettinger: Yeah,
+[6:55] Melissa McMillan: excellent. And then I am pretty confident we're also connected on Gologin, which is very important. If I need to access your profile or like David, our founding account manager, needs to access your profile for any reason, that's going to be key. So let's make sure that's running correctly while we're all here together. Because you might need to give me a 2fa code for that as well. So let's see.
+[7:23] Andrew Ettinger: No worries. I have the doc for the optimizations to make. So thank you. I need to
+[7:29] Melissa McMillan: do that. Great. Yes, that is certainly key as we start to get rolling. Let's see. Gologon is just doing its little security verification.
+[7:39] Andrew Ettinger: No worries.
+[7:42] Melissa McMillan: It's going to make me sign in again. There you are. Make sure I have the right password in. Signing in. Oh, yep. It's sending something to you. The phone number ending in 72 again.
+[7:59] Andrew Ettinger: 1-831-76176.
+[8:03] Melissa McMillan: All right, let's make sure we're in there. All right, we are in at the go login level. And then I just have one more I need to check out, which is hey Reach. So that we are all good to start poach posting. Hey, Reach is what we use to send the automated connection requests. So we really want to get that rolling aligned with the posts so that we're building that audience.
+[8:34] Andrew Ettinger: Oh, I didn't realize you guys were going to do that. Okay, awesome.
+[8:37] Melissa McMillan: Because
+[8:38] Andrew Ettinger: that's why I was deleting contacts. So I'm down to 29, 616. So I've got room for 400 more, which is great. So I have another. They delete 51 a day and I got a campaign that's removing another 1400.
+[8:57] Melissa McMillan: 1400, okay, fantastic.
+[9:01] Andrew Ettinger: 50 a day. So I'm keeping that running. So. So that I can get that down so we can rebuild.
+[9:06] Melissa McMillan: And what is the, like, service or piece of software that's being used there?
+[9:11] Andrew Ettinger: It's called Lead Delta.
+[9:15] Melissa McMillan: Okay.
+[9:16] Andrew Ettinger: It was the only one I could find through a whole bunch of people that actually runs campaigns to delete connections, not add them.
+[9:23] Melissa McMillan: If
+[9:24] Andrew Ettinger: heyreach does that, we can run that simultaneously as well. This one allowed me to filter, though, very specifically. So, like, I'm taking all the engineers in India that I have and deleting all of them. I have them for other projects. I don't need 1500 engineers in India right now. So that was an easy one I didn't have to think about. And I got 1500. Didn't have to think.
+[9:43] Melissa McMillan: Okay, I don't believe that Haybridge does deleting of accounts. I haven't used it for that and I haven't
+[9:49] Andrew Ettinger: heard.
+[9:49] Melissa McMillan: Yeah, I
+[9:50] Andrew Ettinger: don't think it does either, but if it does. Yeah. So
+[9:52] Melissa McMillan: I'll double check just to make sure. And I'll also do a little bit of research on my side just to be extra safe that it's going to be all right to run. Hey, reach. While you're also running this, can you just slack us with the name of the service? Because I am definitely going to forget as soon as we hop off this call.
+[10:10] Andrew Ettinger: Yeah, no worries. No worries.
+[10:11] David Zou: Melissa jumping in here. Hi, folks. I'm your account manager on this account. Sorry, I was pulled on another call that said I've actually used the tool you mentioned so
+[10:21] Melissa McMillan: I can
+[10:21] David Zou: take the lead on building together this SOP for how these two tools connect together. There are some minor risk factors that may be a problem if we were to run things simultaneously. That said, if we were to time block things in terms of, like, this system runs at this period of time, this system runs at this period of time, it'll kind of minimize our risk factor.
+[10:43] Andrew Ettinger: Yeah.
+[10:44] Melissa McMillan: Great call out, David. Thank you so much.
+[10:47] Andrew Ettinger: And I've freed up 400 contacts because I was capped at 30,000 summit 29, 600. So I could always stop while we do this. And, you know, we can stagger if we want, but the nice thing is 50 a day. If I run it for another week, you know, I can kind of get down to another couple hundred. So anyway. Okay,
+[11:07] Melissa McMillan: beautiful. Awesome. So we've got a good game plan for your account. You're going to own the little bit of profile optimization
+[11:14] Andrew Ettinger: that
+[11:14] Melissa McMillan: remains, so
+[11:15] Andrew Ettinger: that's
+[11:15] Melissa McMillan: perfect.
+[11:16] Andrew Ettinger: Now,
+[11:17] Melissa McMillan: I added you with hey reach so that we can start that when time is aligned, it's going to send you a pin in probably just a couple minutes here,
+[11:27] Andrew Ettinger: let
+[11:27] Melissa McMillan: me just check that it hasn't already sent. Yeah, it hasn't sent it yet. It looks like it can take a couple minutes. So let's hop over into Ordinal and take a look at what I think we should probably post first, which is this data is the new oil title. That's not what's going to actually show on LinkedIn.
+[11:47] Andrew Ettinger: That
+[11:47] Melissa McMillan: is just little title in Ordinal. So when we've looked at this one, I'm curious if we feel like we've gotten it to a good place. Is there anything that you feel like
+[11:58] Andrew Ettinger: you would
+[11:59] Melissa McMillan: want to change?
+[12:00] Andrew Ettinger: Yeah, I didn't actually review this one, which I need to. I'm slightly concerned about the. First line, because you know, it, it's a fairly provocative statement there. And I don't know, I think it's too provocative. So what could we accomplish without,
+[12:25] Melissa McMillan: you
+[12:25] Andrew Ettinger: know, specifically saying that they now invest that? Because everyone does. Like, so what? And I know you were just taking that from one of my interviews. So. But like I'm not really comfortable just saying that even though it's probably true, but it's hearsay. It's not like I found that in a 10k filing. Do you know what I'm saying? So you know, they might be like, we're never doing business with you. Like who the hell are you to talk about how much money we spend on data? Like, I don't think that's cool.
+[12:56] Melissa McMillan: Got it. Okay. So definitely want to make sure that it feels good to you, but also definitely need to make sure that we have a hook that is compelling. So we can do a compelling hook that maybe doesn't call out a specific company. What would you think about shifting from open AI to household name AI companies?
+[13:21] Mori Liu: Or can we just use the Oracle one? Andrew, you posted that, that link to the, to our channel, like our other channel, but like Oracle. Larry Ellison just said like now public data use up. Right? So like we really want to demand on private domain data. And so this, this is something that everyone in tech has like this common context of. Even though that keynote was like month ago, it recently blew up. And Andrew, you, you know, you know what I'm talking about, right?
+[13:54] Andrew Ettinger: I do, but I think Melissa, you're point in this
+[13:57] Mori Liu: is
+[13:58] Andrew Ettinger: your point in this post. Talking about data or talking about OpenAI or both
+[14:04] Melissa McMillan: talking about data.
+[14:07] Andrew Ettinger: Okay, okay. So you know, maybe the hook is, I don't, I don't mind being more punchy and direct at Oracle and Larry Ellison. Right. So maybe we take something from there. Right, right. But. Or if you need a hook here it's like you know, large lab, you know something about just like large labs or anyone building AI models know that, you know, spending significant time, energy and money and data to enable their models to work is, is core and foundational. Now that's too many words, but you get my point, right? Something like that, more sort of generically now it's probably not the greatest provocative hook, but it's better than me attacking OpenAI with numbers that they would be pissed at.
+[14:57] Mori Liu: It does need to be slightly more specific. I think Oracle and just like sort of going off that point and start with something everyone can relate with is. Is good. And I think this current post is like too much around OpenAI. Like, we haven't really tried. Like, OpenAI is definitely a good customer, but like we have. They're not our customer yet and we're not like just selling to them. So I don't think, you know, it is super valuable to reframe a whole post about them. However, going off of a common context that everyone can resonate with and just sort of like be a thought leader in this discussion thread that's going on the entire X like Internet. I think it's cool. And there's like, we're also trying to repurpose whatever we post on LinkedIn to X so we can talk more about that a bit later after we go through all the post. But that's also another context point we're thinking about.
+[15:47] Andrew Ettinger: Yeah. So I'm just trying to understand the context of the first post that we're doing. Is it about OpenAI that we're trying to do here? Is it about data? Are we using GPT as a specific example? Like, what's the, what's the, what's the point here?
+[16:01] Melissa McMillan: I know Millie just hopped on. So, Millie, you may have some better thoughts around this than I would be able to articulate. Do you want to take that
+[16:10] David Zou: just to catch up, Millie, in case you weren't allowed, the team is just providing feedback on this. Like data is the new oil post where it's like concerned about calling out OpenAI specifically. Can I
+[16:27] Millie Hanson: just
+[16:27] David Zou: quickly
+[16:28] Millie Hanson: run through everything and then I will jump on and just play catch
+[16:31] Melissa McMillan: up
+[16:31] Millie Hanson: quickly. Two seconds
+[16:36] David Zou: now while Molly does that. Wanted to take this as a second as to figure out kind of our working style in future pieces of content. You know, there's this like line between provocative so kind of more virality factor behind it versus more conservative, allowing us to kind of not have this risk of a client like OpenAI in the future reading this and being offended. What's a good heuristic at least for our team to check for that? Like, you know, how do you guys determine the post? You guys are comfortable calling out a specific name versus a post you guys would rather have kind of anonymous?
+[17:16] Andrew Ettinger: That's a good question. The heuristic is just whatever I feel like is
+[17:21] David Zou: appropriate for my
+[17:22] Andrew Ettinger: name. And I don't mind talking about companies very specifically.
+[17:29] David Zou: I
+[17:29] Andrew Ettinger: don't, as long as it's generally in a, in a very positive light and factual about what they're doing and my perception of that and tying it into the industry. What I, what I, what I don't want to do is talk about something that I might know that isn't public knowledge. Right. On the amount of money that they spend on this stuff. Right. Like that's inappropriate. Now I get it. I said that in a content interview, and there'd be no way for you guys to know that that's what that was. So, again, I'm not mad about. I'm just saying I'm not doing it. Right. I'm not doing that.
+[18:00] David Zou: So
+[18:00] Andrew Ettinger: if I'm
+[18:00] David Zou: not
+[18:00] Andrew Ettinger: doing that, does this still hit? And then if data is the new oil. GPT is very specifically just open AI. So do we want to use that as an example? Do we want to talk about just early models, right, instead of GPT or not? Again, that stuff I don't care about. Like in those bullets. David, that's not inflammatory, that's a fact. Like GP2 is the
+[18:27] David Zou: first
+[18:27] Andrew Ettinger: version. This is what happened. Then it went multimodal, right? Then it,
+[18:31] David Zou: you
+[18:31] Andrew Ettinger: know, went to go get, you know, more specific. Like that's fine.
+[18:35] David Zou: Right?
+[18:36] Andrew Ettinger: Because that's just. Those are factual things. Right? Gone. But GPT is synonymous with open AI. Right? So that's. Then the question is like, do we want this slightly more neutral or do we not care? Although I get it, like Claude is Claude and they're huge. But, you know, chat is also, you know, synonymous with AI also irrespective of what you use. Right. You know, so it doesn't matter.
+[19:06] David Zou: Awesome.
+[19:08] Millie Hanson: Hey, I
+[19:08] David Zou: just wanted
+[19:09] Millie Hanson: to jump in there, so. Yeah, so there's echoing. We're in the same room. Just catching up quickly. We can easily spin. I think we've got some good context here, but what we can do is put it kind of in a positive light. Now the graphic I did have made up for this might make a little bit more sense to you.
+[19:29] Andrew Ettinger: Okay,
+[19:30] Millie Hanson: this is what I was thinking here. This is based off of an article that I actually read. And it's basically just saying that, like you are getting these big, like firms, they are getting the data elsewhere now, where instead of, sorry, I'll stop sharing my screen. Where instead of a negative, I could flip it into a positive so it doesn't look like you're back. But that's the context. I can easily change that.
+[19:58] Andrew Ettinger: Yeah, but I don't. I. Sorry, I don't understand that graphic. What's the point of that graphic?
+[20:07] Millie Hanson: So the graphic here is just to show where all the data is kind of coming from. So it's talking about like the tipping point of text data used to train traditional LLMs. So it's the prediction by 2028, developers might be utilizing data sets that are all vast from text from the Internet.
+[20:32] Andrew Ettinger: Okay,
+[20:35] Mori Liu: I
+[20:36] Andrew Ettinger: need to see that. I need to see that.
+[20:43] Melissa McMillan: I
+[20:43] Andrew Ettinger: need to see that graphic. I don't, I
+[20:45] Millie Hanson: don't.
+[20:48] Andrew Ettinger: I'm not
+[20:48] Millie Hanson: sure it's
+[20:49] Andrew Ettinger: fully resonating with me.
+[20:51] Millie Hanson: Let me on here. It just wasn't quite ready yet, so I wasn't happy sending it over to you. But I've just uploaded it now to ordinal, so you can understand. But this is first version and don't take this as gospel right now.
+[21:10] Andrew Ettinger: Look, I, I just need to be very careful if I'm calling out on a chart very specific companies and very specific models, right?
+[21:18] Millie Hanson: That
+[21:18] Andrew Ettinger: I'm not shooting myself in the foot because like, that's a very, like, David, back to your heuristic. Right? Like that's like, you know, data is AI for new, data is newer. Great. But like,
+[21:36] Millie Hanson: I
+[21:36] Andrew Ettinger: don't know what I'm saying here, but I'm basically, I think, yeah, I got to figure out what I'm saying here because if you're a model and you just look at where you're ranked in a chart and
+[21:46] David Zou: you
+[21:47] Andrew Ettinger: know, am I saying here that, you know, I, I, yeah, I, I, I don't even know if anyone even know, like flan, like what, what, what, what even is that? Yeah, I don't know, I don't like this. I
+[22:03] Mori Liu: don't
+[22:03] Andrew Ettinger: understand it.
+[22:04] Millie Hanson: Therefore
+[22:04] Andrew Ettinger: I don't like it.
+[22:05] Mori Liu: We are not
+[22:07] David Zou: targeting
+[22:07] Mori Liu: all data. Data is a very specialized domain where search is doing tax data. Right? We're very much specialized and void data and we want to be leader in this space. And this is a very like quite carved out area where we don't want to be like talking about data in such generalized terms and try to tax an entire market, which we're not. I
+[22:28] David Zou: think being
+[22:30] Mori Liu: average in every, you know, all data is, is sort of,
+[22:33] David Zou: you know,
+[22:35] Andrew Ettinger: and I'm, and I'm only focused on voice, which is the hard thing. And it's already accepted that
+[22:40] David Zou: you
+[22:40] Andrew Ettinger: use data for models. Like that's not a,
+[22:42] Mori Liu: yeah,
+[22:43] Melissa McMillan: that's
+[22:43] Andrew Ettinger: not a, that's not a thing. It just sort of feels like if I posted this it'd be like, what, what are you even talking about? Which by the way, is kind of how I feel like I don't even know, I don't know what this graphic says. I don't know how it ties to the post. I don't know why that's relevant to what I want to do. Like I, I don't understand any of it, so
+[23:01] David Zou: therefore
+[23:01] Andrew Ettinger: I don't like it. So what do you want to do next?
+[23:05] David Zou: So Andrew, I think to prevent additional spin workshop this live for now, let me
+[23:10] Andrew Ettinger: and the rest
+[23:11] David Zou: of the team take it back. Melissa,
+[23:12] Andrew Ettinger: Billy,
+[23:12] David Zou: myself will kind of dive into this a little bit deeper. I started on Monday, so I appreciate the patience as I fully wrap up here previously really looking to better understand how kind of we can make this approval process a little easier. I think with this new heuristic in mind, we'll definitely keep that in mind moving forward to make sure. Hey, if we're calling anyone out specifically, we're making sure that it's a very positive tone. Nothing that could be construed as kind of material, non public information that you have access to. And then, yeah, I think maybe let us take this
+[23:44] Melissa McMillan: back
+[23:45] David Zou: and then we'll kind of follow up asynchronously with something new to review.
+[23:50] Andrew Ettinger: Cool. And is it helpful for me, I see all this stuff in here now. Is it helpful for me to go in and review and just leave some comments on just like, how I'm feeling? So you have that stuff. And sorry, by the
+[24:00] David Zou: way,
+[24:01] Melissa McMillan: I'm
+[24:01] Andrew Ettinger: not mad or upset or anything. I just speak very directly. So, like, it's all good. And I know we're iterating and I know this will be. Be awesome. So just to be very clear, like, it's all good and I know you're taking a content interview and, and, and, and doing what, what you think is right. And you, you, you are not experts in where we're at or certainly what's in my head. I'm trying to do it, nor should you ever be. And, but so, like, I totally get it. Like, it's all good. Like when I say these things just to be very clear.
+[24:26] Melissa McMillan: Oh, absolutely. Sorry, go ahead. No,
+[24:30] Millie Hanson: no, I completely appreciate that. I think like the said, it's ramping up and really understanding what you want. Patience. Obviously any feedback here is super valuable. The more feedback you give to me and the more brutal you are, the quicker I can ramp with you. That's
+[24:48] Andrew Ettinger: what I'm saying. I just want to be clear. Like, I'm not
+[24:50] Millie Hanson: bad about.
+[24:51] Andrew Ettinger: I
+[24:51] Millie Hanson: think it's
+[24:51] Andrew Ettinger: great. You guys are
+[24:52] Millie Hanson: amazing. It's
+[24:53] Andrew Ettinger: gonna be great. I know there's a learning process.
+[24:55] Millie Hanson: I'm
+[24:55] Andrew Ettinger: just direct because I get to the point, right? So
+[24:57] Millie Hanson: yeah,
+[24:58] Andrew Ettinger: now, like, now look like the 11 Labs thing, just really quickly as I looked at that, that looked like really well written, very fox wool. And if I was a reader, they'd be like, why the hell is this guy talking so nice about them? Aren't you competing? Like, that's a really nice part of my language mind, right? Like, this is like, that's like, that's where I'm like, david, sorry, I can't give you a heuristic on that. But I'm like, okay, that's like slightly weird while you're doing it, but that's cool because that's like, huh, interesting, right? You know, because if I was someone, be like, hey, dude, why are you saying that? Don't you compete with them? Oh, great. Thanks
+[25:31] Millie Hanson: for the
+[25:31] Andrew Ettinger: commentary. Actually, I don't. Right. I
+[25:34] David Zou: think
+[25:34] Andrew Ettinger: they're amazing. Here's where we play. Like, those are good things. So, you know, look, I will spend as much time possible. So I guess take away, Let me go into the system, let me go through the post, provide my feedback and then maybe we can then schedule a call after you've seen my feedback on that stuff. Right? And then we can kind of align on like, oh, maybe we have two posts that are amazing. Let's get ready to go with them or let's tweak these or let's have a discussion. And then again, my only ask is if I speak very direct there. Don't take it the wrong way. I'm just going to like, not mince words so we get the feedback and this is great. And I know we're going to get to an awesome spot and if it takes another rep or two, like, all good, I'd expect it
+[26:17] David Zou: 100%. And Andrew, I, you know, I appreciate that patience. I think we're going to have a very good working relationship. This will be a really good time. I love to communicate more directly. That being said earlier, you said, you know, nor should we be expected to understand your business to the same degree you do. That's actually going to be what I'm going to work towards. Right. I'm going to be our internal Andrew, working with the content engineers, making sure that
+[26:39] Andrew Ettinger: all the
+[26:39] David Zou: stories
+[26:40] Andrew Ettinger: we're
+[26:40] David Zou: learning
+[26:40] Andrew Ettinger: all the
+[26:41] David Zou: time
+[26:42] Andrew Ettinger: to be another
+[26:43] David Zou: version
+[26:44] Andrew Ettinger: of me. Bad enough there's one, but.
+[26:45] David Zou: I know, I know, really, just I think over time we'll be collecting these little heuristic checkpoints, right? Like, okay, let's find a way to really hook people in a
+[26:54] Andrew Ettinger: certain
+[26:55] David Zou: way. This is how Andrew likes to speak, you know, and that's kind of what we're working towards as we continue to get feedback from you and appreciate your patience.
+[27:02] Andrew Ettinger: No, there's no patience. I think it's all part of it. I expect all this. I think this is great. Great. I think you guys are unbelievable and I know this program is going to be awesome. Like, I, like I said, I, I'm very bullish. Like, all good. Like, it's great. So I just wanna, I want to enable you to go faster. Right. So I have a train tonight for two and a half hours home. I'm going to take the first half hour of the train, go into the system, provide the feedback. I'll leave it in there. I'll put a message in Slack when I'm done, just so you know. And then we can go from there and let's get cranking and you know, we'll, we'll, we'll absolutely get there. And if you want another content interview, if you think that's helpful, to draw context on top of that, let me know. I'll do it Thursday, I'll do it Friday, I'll do it Monday. Like whenever you want. Like, this is really important to me. Right. And I know the value here and I know how much time you're ultimately going to save me.
+[27:49] David Zou: We're
+[27:50] Millie Hanson: basically
+[27:50] David Zou: a foundational model that needs your training data. So we'll
+[27:53] Andrew Ettinger: make it
+[27:53] David Zou: happen. In terms of communication preference, do you prefer Slack text, email? That way I know if I need to get a hold of you really quickly, I have
+[28:03] Andrew Ettinger: whatever
+[28:04] David Zou: you want to channel.
+[28:04] Andrew Ettinger: Whatever, whatever you want. Whatever you want. I'm, I'm, I'm readily accessible and open. So. Whatever, whatever, whatever you need.
+[28:14] David Zou: Awesome, Andrew, I appreciate your time today. Melissa, Millie, do you folks have anything else to add?
+[28:19] Melissa McMillan: I just wanted to make sure that Maury and Andrew, you both did receive your invites to Ordinal I resent because it looked like y' all hadn't hopped on yet. Sometimes those invites can go to spam. So if that's
+[28:30] Mori Liu: what
+[28:30] Melissa McMillan: happen.
+[28:33] Andrew Ettinger: No, I, I, I. Yeah, here, I'm in. Dude, I don't know if you just saw.
+[28:38] Melissa McMillan: All right, so once you are in, what I'm going to be able to do is I'm going to be able to add you both as approvers and then you'll see in the top left hand navigation bar all of the posts that you're an approver on. But you will also be able to go to that all posts button and see all of your posts. Once something has had your feedback reworked, you'll be able to actually approve it.
+[29:03] Andrew Ettinger: Okay, the, the, where is the list? So should I just go click on those and leave comments in those? Is that the best way to do it?
+[29:09] Melissa McMillan: Exactly. So right now,
+[29:11] Andrew Ettinger: okay,
+[29:11] Melissa McMillan: because you just got added, you don't show up as an option for me yet. I might have to refresh the page a couple times since you just got logged in but on the left hand side navigation bar if you go to all posts you will be able to go in and all of those posts that say for review those are the ones that are ready for you to hop in and take a look at and then just
+[29:33] Andrew Ettinger: like you
+[29:33] Melissa McMillan: were seeing David do you can highlight any language or you know paragraphs that you want to add comments on. At the bottom of the page there's also kind of a more free form comment text field. You can go and add any more general feedback there as well and just call out something more broad. So for example the tone needs to be a little bit more serious or whatever in the comments there as well so feel free to go in and start leaving any comments on those and then if you'd like to hop on sooner than our next. Week's weekly also let us know that. And we can schedule a time to go through and chat through. But Millie will be able to take all of your feedback that you leave in the documents and get to work on those.
+[30:20] Andrew Ettinger: Yeah, look, you guys can only be as effective as the feedback that I give you, at least in these early stages. So you tell me like I like I told you like, I'm willing to invest whatever I need here. So if you want to do another call tomorrow, let's do it. You want to do another call Friday, let's do it. You want to do another call and do another content interview that might add more context and things for you, let's do it. Right. Like I said, I'm available. This is important and I will do it and it's great. So you tell me
+[30:51] Melissa McMillan: in terms of next steps, I'll ask that y' all just take a look at all of the four review posts, leave your feedback, slack us and let us know that you're done. And then once had a chance to
+[31:02] Mori Liu: go through
+[31:03] Melissa McMillan: all of that, make her edits, we can talk about either hopping on a call or, you know, whatever makes sense with Millie.
+[31:12] David Zou: Very
+[31:13] Andrew Ettinger: fair, Very fair. I've also been known to say I'm going to do something and then I inadvertently don't do it. So let me get you that data back. Very fair. And worst case, you'll have it tomorrow morning. I'm going to desperately try for later today. I'll slack you and we'll go from there. And I appreciate it.
+[31:30] Melissa McMillan: Perfect.
+[31:30] David Zou: Thank
+[31:31] Melissa McMillan: you all
+[31:31] David Zou: so much.
+[31:32] Mori Liu: One
+[31:33] David Zou: last
+[31:33] Millie Hanson: point,
+[31:33] David Zou: Andrew, on I think how to provide feedback. If you can just leave a reasoning as to why you're like, hey, this doesn't really feel the way that I want it to be. We can better build kind of a checkbox on our end to say that like, okay, here's why Andrew thinks this way. Here's how we can build systems around that.
+[31:52] Andrew Ettinger: I will absolutely give you more detail than probably necessary to start so that you get all that stuff. No, no worries. And I'm general generally fine with playing with different tones and stuff like that. It's just like, I think you kind of see where I'm where I will have more reactions. And I, I know we got to try a bunch of things also to see which tone, which form which. All that stuff lands. Like, I know. None of us know. So great.
+[32:13] Melissa McMillan: Yeah,
+[32:14] Millie Hanson: for sure. One last thing. Sorry from me. If you do see any sort of like expos? Or anything you really want to dive into, obviously you're an expert in your field, if you can just send them over, then that got some, like, content to work from that you actually want to share about. So, like the other day when you shared about that expose with Larry, just giving his perspective, that was super helpful for me to flesh out some content. So anything going forward, just shoot it in the Slack channel and I can jump on it.
+[32:44] Andrew Ettinger: Yeah, I will definitely arm you with a lot of that stuff. I read a lot of stuff. And if nothing else, it'll cause me to, you know, make sure that I save that. So. Absolutely.
+[32:54] Mori Liu: For the Larry post like that. We talked about this before you join Millie, I think would be a good replacement on OpenAI hook, instead of calling it OpenAI, relate to Larry Ellison about how data is. A new moat and there's need to access
+[33:09] Millie Hanson: data
+[33:09] Mori Liu: beyond the Internet and blah blah. I think that would make a really good hub for
+[33:14] Millie Hanson: that.
+[33:16] Mori Liu: I have
+[33:16] Millie Hanson: actually written a post on that. I jumped on that pretty quick so you'll find that in ordinal it is living
+[33:22] Andrew Ettinger: awesome
+[33:24] Millie Hanson: and it's on the 10th of March.
+[33:27] Andrew Ettinger: I see
+[33:27] Millie Hanson: it. Dive into that again, give me all feedback and I can amend that and we can get that out asap.
+[33:35] Andrew Ettinger: Love it. Awesome.
+[33:37] Melissa McMillan: Awesome. Thank you both. We'll look out for those comments and edits and we'll talk soon.
+[33:43] Andrew Ettinger: Awesome. Thanks everyone.
+[33:44] Melissa McMillan: Thanks team.
+[33:45] Millie Hanson: Bye
+[33:45] Melissa McMillan: bye.

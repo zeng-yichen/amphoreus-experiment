@@ -1,0 +1,320 @@
+[0:00] Andrew Ettinger: Sa.
+[1:30] Melissa McMillan: Hey Andrew, how are you doing?
+[1:32] Andrew Ettinger: Great. How are you?
+[1:33] Melissa McMillan: Very well. Excited to meet you.
+[1:35] Andrew Ettinger: You too. It's my favorite
+[1:38] Melissa McMillan: emergency audios over here. It might sound a little crazy for a second as everybody's hopping in.
+[1:45] Andrew Ettinger: How are you?
+[1:47] Melissa McMillan: There we go. Awesome. I'm going to go ahead and start sharing my screen. Andrew, I know you have to hop at 1:40 PST. I want to make sure that we are honoring that timeline.
+[2:04] Andrew Ettinger: That's
+[2:04] Melissa McMillan: fine.
+[2:06] Andrew Ettinger: I have a doctor.
+[2:08] Melissa McMillan: If I
+[2:08] Andrew Ettinger: don't go to my
+[2:09] Melissa McMillan: wife will
+[2:09] Andrew Ettinger: kill me. So
+[2:12] Melissa McMillan: very understandable. Those are important. So quick kickoff with the introductions. So we have not met yet, but my name is Melissa McMillan. I'm the head of customer success over here at Vereo. Really looking forward to working with you. Myself and Margie from my side here are going to be your primary points of contact. We are constantly in slack and looking out for any kind of correspondence. Whereas our wonderful content engineer Millie over here is often heads down writing. So that's why Margie and I are going to be more of your first line of defense while Millie will be producing your content. And then I believe you've met Eric from our side. I don't know if you have met Eric's co founder Emmett though We have both of our co founders here, Emmett and Eric today.
+[2:58] Andrew Ettinger: Hey Emmett, congrats on what you guys built. Really excited for this. So. I think you got a lot, a lot here.
+[3:06] Melissa McMillan: You
+[3:06] Andrew Ettinger: too.
+[3:07] Melissa McMillan: Thank you.
+[3:08] Andrew Ettinger: Super tactical. I changed my password to LinkedIn. I
+[3:14] Melissa McMillan: just.
+[3:14] Andrew Ettinger: In the form I put your name and then Human. Then I changed it because I'm deleting a bunch of contacts from this program and I think they screwed up my authentication. So I was trying to re. Get in whatever. Anyway, just put it in the chat. I want to make sure you had it
+[3:29] Melissa McMillan: perfect. Thank you so much. We are grabbing that. Did you say you put it in Slack?
+[3:34] Andrew Ettinger: Put it in Slack. I put in the chat here, but I'll put it in Slack also. Just, just perfect.
+[3:39] Melissa McMillan: Thank you so
+[3:40] Andrew Ettinger: much. And then I heard the audio on the Google Meet, so I was like, all right, let me, let me pay attention. So
+[3:51] Melissa McMillan: perfect. Thank you so much for that. That's helpful. We will get the onboarding, little operational details out of the way with that information and then let's dive right in here. So when it comes to marketing initiatives for Hume, want to make sure that we have a really solid understanding of your product and who you're going after. I'd love if you could just kind of confirm slash deny some of my understanding thus far. Far. Let me get to this next slide here. There we go. So it sounds like your customers are almost always developers and technical teams that are building something on top of the infrastructure you provide. So AI startups, maybe even enterprise product teams, healthcare app builders, pretty much anyone creating like a voice forward user experience who needs it to feel less robotic and more like a person. So it seemed like there was just a really wide range from like growth stage startups to enterprise. Do I have all that right?
+[4:59] Andrew Ettinger: With the information that you have, you did a great job. So let me tell you what we're really doing, where we're going to, and you wouldn't
+[5:05] Melissa McMillan: have this
+[5:05] Andrew Ettinger: information. And it dawned on me last night that I have like 10 documents with my narratives all over the place and it probably would be helpful to get you one so that you have that. It might be faster if I just record myself speaking for a few minutes and send it to you tomorrow. But nonetheless, look, at the end of the day, we developed an incredible model and architecture for voice AI. However, going forward the API will still be up there. As you mentioned, the output of the way you would consume this is through an API. But we're actually licensing our infrastructure and our post training data and evaluation systems to the large model builders and to those AI companies. So examples would be the Fang companies are doing very large deals with us and will continue to do so. Examples would be large voice specific AI native companies like let's say Hippocratic AI or a happy robot AI people in that space because they're committed to building foundational AI infrastructure and models themselves. And we're going to be a strategic partner to license them our infrastructure, our data, our training systems, our eval systems for them going forward. So that's the pivot that the business is going through. You won't see that largely from much of our content or our website. That's what I'm working on right now and I'm hoping to kind
+[6:44] Melissa McMillan: of get
+[6:44] Andrew Ettinger: all this to go inside. If it doesn't, it doesn't. But that's largely where we're headed. So I know I probably owe you a clearer outline of that, which I can easily do in the next day or so. And then as far as the TAM or ICP goes, I can give you largely like our top 250, which we already have, but I'm also building out the rest of those which,
+[7:12] Melissa McMillan: you
+[7:12] Andrew Ettinger: know, I can get to. But you know, that's kind of what I'm building right now. So you let me know where those are blockers and I'll unblock them very quickly.
+[7:23] Melissa McMillan: Awesome, thank you. Yes, would love a little voice memo. You can just send a little voice memo in Slack with kind of the download. So those are always helpful. Any documentation. Also always a great thing. And it sounds like from what you're saying, you kind of want to lean toward enterprise and away from startup, is that right?
+[7:41] Andrew Ettinger: No. If you're a well funded AI startup. No, not at all. Right. Actually they
+[7:46] Melissa McMillan: could be
+[7:46] Andrew Ettinger: great customers. They could be great customers, but I don't know in the end that it changes. The audience might, but the way in which we position our content doesn't really change because generally our value add in the technology is the fact that the output of that enables your voice to be very expressive. It enables you to have the data on emotions and emotional intelligence which you can feed into what you're doing. So we really want to be the thought leaders in driving that narrative. Right. And have people think of us like, like that they see it, if they play with our stuff and would think it maybe not always
+[8:26] Melissa McMillan: as
+[8:27] Andrew Ettinger: intuitively obvious, but when you talk to them about the fact that we give you six or 800 different labels in this data to make sure you can have the right conversational agents work across whatever you're doing, like it resonates very quickly because they're like, yeah, we don't want anything sounding like robots. How do we do that? How do we know if they had a good conversation? The pause was right, the tone was right across language, across dialects, like all of those things are very complex, and you probably would have taken the content in that direction anyway, but maybe not. But nonetheless, that's kind of where we generally want to head.
+[9:05] Melissa McMillan: Hey, that's really helpful. Do I. Is there a
+[9:06] Andrew Ettinger: hand?
+[9:08] Mori Liu: No, no, I'm just adding to it. You did perfect. So
+[9:13] Melissa McMillan: to
+[9:14] Mori Liu: just add on that or
+[9:15] Melissa McMillan: like to
+[9:15] Mori Liu: say in a different way. We're basically targeting anyone that's training a model that has audio layer to it. So that can be you know, straight up voice models, right? That's audio layer or video model for example Runway like video. A lot of video company are adding like audio to their product. So veo have you
+[9:37] Melissa McMillan: know,
+[9:37] Mori Liu: a model that's flash that doesn't have audio. They also have a, you know, bigger model has audio to it. So any video company
+[9:44] Melissa McMillan: or
+[9:44] Mori Liu: multimodal company that has audio as a component or is trying to add audio as a component otherwise. Also voice Companies are adding TTs for example Deepgram, right. They have a really good transcript model. That's where they make most of their money. But they want to also do TTS and leaning towards Agent 11 Labs also was interested and they're also building agent stuff. Those are like the main thing. But you know, if you want to be creative, think of like world apps. They're doing world models, right? Like any world have a voice in it. So like those are more like creative use cases. But the main target is like voice companies and multimodal companies or any company that has like an audio component to it in extension. There's also companies like fine tuning for example Salesforce. They plug in APIs, they definitely train their own model. But they might want to fine tune the specific customer service use cases or hardware phone numbers. This and that. Other company that came to us won't mention names but you know, patient doctor use cases, right? Like companion use cases where the boys are extremely like attractive like a girlfriend. So stuff like that are also in consideration because we have very good post training data sets in addition to pre training because people also come to us as pre training post training wise. You know, it is, you know, more finely labeled. It can do one speaker with different emotions. It can do,
+[11:10] Melissa McMillan: you
+[11:11] Mori Liu: know, like refined
+[11:14] Melissa McMillan: grain
+[11:14] Mori Liu: emotionally. Eric.
+[11:17] Melissa McMillan: Okay, that's really helpful context. Eric, did you have something you wanted to. Yeah, and I just want to
+[11:22] Eric Lay: also more Millie, like just to kind of share the way I'm thinking about this. I think talking about the product is helpful. But I think one thing that we like to lean into at Vireo is to focus on what the customer is specifically caring about. So like we could talk about voice AI. Voice AI is oftentimes for some of these companies maybe is their top priority, but maybe it's not and so it could even just speak to more of the CTO buyer, to the VP of engineering. And so it could even be a lot of content that doesn't always necessarily need to be tied to voice AI, but more so the pain points of scaling and Engineering Org or how to train AI models in general. And so I think those are things that. We like to lean into. And I'm curious, like, how you feel about that, Andrew, because I find,
+[12:12] Andrew Ettinger: like,
+[12:12] Eric Lay: what matters, what
+[12:13] Mori Liu: the
+[12:13] Eric Lay: customer wants, not necessarily what you guys sell always. But I also know a CEO, you might want to really push a narrative and, like, focus on only pushing that narrative.
+[12:23] Andrew Ettinger: No, no, no. I don't give a shit what I want. I care what the customers want. I'm trying to sell things to customers. That's the whole point of this thing. Right? So this is not about Andrew wanting to pontificate about
+[12:35] Eric Lay: what Andrew
+[12:36] Andrew Ettinger: thinks. So I totally agree. I think Maury gave a great description and the combination of my two things probably were way too technical, but wanted to make sure you at least had that context. And yes, the themes are right. Scaling AI systems, making them accurate
+[12:57] Melissa McMillan: is
+[12:57] Andrew Ettinger: tough. Voice is a primary interface. Going forward, if voice is going to work, you better understand emotion.
+[13:04] Melissa McMillan: If
+[13:04] Andrew Ettinger: you're going to understand emotion, you better have the right systems in place to go do that. Right. It's a hard thing to think about. Like, these are great themes that will resonate and I'm fine. Eric, to your point, on rounding out the edges or going to the edge, even if you're not saying voice, I'm totally fine with that. Because if I'm posting content as a thought leader on how you develop, train, evaluate and, you know, fine tune models holistically, that's a good thing. Right? We just ultimately want to make sure in the end it's voice. But yes.
+[13:35] Melissa McMillan: Okay. I feel like we're getting close to what was going to be one of my questions, but not quite there yet. I want to understand what this ideal customer wants to learn. Right. What do they spend their time on and like, what are the pain points that lead them to you? Would you say a pain point is just that they are developing
+[13:55] Mori Liu: this
+[13:55] Melissa McMillan: and it doesn't sound human, or can you shed a little bit more light on those areas?
+[14:00] Andrew Ettinger: Yeah. There's three pain points. The first pain point is there. I know this sounds a little silly, but it's true. They are committed to building out voice AI models
+[14:10] Melissa McMillan: and
+[14:10] Andrew Ettinger: they need help with the right architecture to get that to even work before they even get any data. There's a whole bunch of things in there. I won't go into how tokens are all this stuff. There is an architectural pattern that is special about voice and how text and voice work in combination together and interact with the GPUs, the machines, the models. Okay. So that's the very first thing,
+[14:33] Mori Liu: and
+[14:34] Andrew Ettinger: sometimes that's hard to scale. It's hard to get that to work. It's hard to get that to work. There are things to go think about. Then from there it is
+[14:43] Melissa McMillan: like,
+[14:43] Andrew Ettinger: okay, is this thing have like a heartbeat and can it even have a conversation right on X number of
+[14:52] Melissa McMillan: data,
+[14:52] Andrew Ettinger: dialects,
+[14:53] Melissa McMillan: languages,
+[14:55] Andrew Ettinger: etc.
+[14:55] Melissa McMillan: So if
+[14:55] Andrew Ettinger: you were to build an assistant for your email and you didn't care where the person lived, this assistant better be able to understand Japanese, Chinese, 18 different. Different dialects in India, right? You know, Swedish diet, you know what I'm saying? So now you'd have to be like, all right, look, like, I have to, like, train this thing on all of that data. Like, holy. Like, how do I get that data and how do I even get that in here to see where I'm at, right? That's a big pain because that's
+[15:23] Melissa McMillan: like
+[15:24] Andrew Ettinger: a lot of data, like millions and millions and millions of hours. And then you need to understand that
+[15:29] Melissa McMillan: Melissa
+[15:29] Andrew Ettinger: was pissed off, right? Margie was happy, right? You know, Emek was, you know, whatever, right? And by the way, you could be happy, pissed off, sad, right? And all of those things at once, right? And imagine that would affect your tone of the email, right? As opposed to just pissed off, right? So you then need all of those emotional labels once you've trained that. So now, like, I know the dialects, I know the language, I know all that, but it has to act in the right way with the right context. And that is
+[16:01] Melissa McMillan: actually another
+[16:02] Andrew Ettinger: really long poll because it's very challenging and to get all those nuances right. Once I've got that right, and then once I've gotten those nuances right, I have to make sure they stay that way when they're in production. And I have to continually measure that to make sure that
+[16:20] Melissa McMillan: all of
+[16:20] Andrew Ettinger: a sudden, Melissa doesn't just become an angry voice every single time for no reason, right? Like, that wouldn't be a good assistant. Sorry, Melissa, I know you wouldn't never do that. But,
+[16:29] Melissa McMillan: like.
+[16:29] Andrew Ettinger: You know
+[16:29] Melissa McMillan: what I mean?
+[16:30] Andrew Ettinger: But, like, like, weird happen with AI as, you know, and with voice, you know, if you get a weird thing back in text. Did I lose you?
+[16:42] Melissa McMillan: Nope, we're still here.
+[16:44] Andrew Ettinger: Okay, if you get a
+[16:45] Melissa McMillan: weird
+[16:46] Andrew Ettinger: thing back. If you get a weird. Yeah, if you get a weird thing back in. In Claude code or chat, GPT and text, you're just like, all right, whatever. You move
+[16:53] Melissa McMillan: on.
+[16:53] Andrew Ettinger: Or sometimes you don't even know or it's buried in everything else. You get a bad thing in voice. Like, it's pretty bad, right? Forget if it's egregious or offensive or anything else, right? Once you get a bad experience voice, you're like, this thing sucks. Robotic is like, one thing, but so is everything else. Those are. That's basically the life cycle. And customers feel pain at every area of that, right? And have to go through a lot of tinkering. And generally, the people that have to do that work want to be doing much sexier things. Like, they don't wake up in the day, in the morning, like to go solve those problems. Like, like at a higher level they do, but a low level they don't. And that's where we
+[17:33] Melissa McMillan: help. Okay, that's super helpful context. So the decision makers then are probably going to be like technical builders, dev leadership. Right?
+[17:48] Andrew Ettinger: Yeah. This
+[17:48] Mori Liu: is where
+[17:48] Melissa McMillan: it's
+[17:49] Andrew Ettinger: weird.
+[17:51] Mori Liu: I can add.
+[17:52] Andrew Ettinger: Go ahead, Maureen.
+[17:55] Mori Liu: The main people are targeting can be like in
+[17:59] Melissa McMillan: a
+[17:59] Mori Liu: startup, like a
+[18:00] Melissa McMillan: factor
+[18:01] Mori Liu: or CTO type of role, head of engineering or head of research, depending on this startup they have. Research department or their purely engineering department. On a bigger company level, you know, I had been in contact with
+[18:15] Melissa McMillan: like
+[18:16] Mori Liu: had a product of research at X company, right? Or had a product on their TTS division or member staff on their multimodal division or, you know, had a research on audio. So those are sort of the keyword roles that we're aiming for. Or if, you
+[18:36] Melissa McMillan: know,
+[18:36] Mori Liu: if this is a company that's super hard to get through, maybe like a research engineer would suffice, no matter what team they're on. But they can lead us to the audio team because sometimes it's hard to identify exactly who's on audio because all of the LinkedIn profile, it's like MTS or research engineer, right? So that's good. Like a pretty comprehensive profile that we're targeting in terms of who is a decision maker or who would be interested in technical content and would resonate if we sort of like enlighten them on their pain point also to add on a pain point level. So like this is not comprehensive. This is like thoughts that we've been sort of pondering or we've been hearing people come to us about. One is people that want to build TTS from scratch, right? So the problem they're facing is like, do I go to a scraping company and just scrape all of data and process ourselves, or do I go to scale AI? Or do I go to McCor? Or do I go to like, you know, all these like label blocks to define people, recruit laborers, labor, data, or do I buy it for someone else, right? Compared to McCormick scale AI, like we're way more specialized in audio data and we offer in way cheaper price because we do combine a lot of, we do use human labels, but there's a lot of more efficiency processes going on where we also use AI to combine the labels. We have our own eval system, we trained our own transcription model and labeling model to be way more accurate because we were the first players in the space, I think the same time or even earlier than 11 labs.
+[20:19] Andrew Ettinger: Put this link here. She reached out to me on LinkedIn last night to connect, right? She's a head of one of the product leads at OpenAI, right? Product. It
+[20:32] Melissa McMillan: just
+[20:32] Andrew Ettinger: says, right. So you'll also get people like that. And the good news is, like, I didn't follow up with her or say anything, but like she just sent me a connect last night, right? So like you're starting to see these types of things come through. Like that's a gold lead right there. So obviously I'm just letting that sit and not touching it, Right? And gonna play it cool. But you could be in product. The other problem is when I described all that nonsense to you, the engineer is in charge of figuring that out. And when. You're the boss, Melissa, and you're like, this thing sounds like shit. The engineer is like, all right, I got it. Like, let me go try to figure out what's wrong and fix it. Like, if you got to that engineer, the engineer would go to the boss and be like, hey, look, like, I think I solved
+[21:21] Melissa McMillan: something.
+[21:21] Andrew Ettinger: Like, we should talk to these folks. And, like, they literally buy, you know, $10 million worth of stuff in 48 hours. It's wild, right? So we have a little bit of a challenge there with, like, sort of like the key Persona as a result of all this stuff, but we'll probably just iterate on that. But again, more color for you. So it's a little bit of a challenging space with that respect, but we'll see. Maybe. Maybe
+[21:50] Melissa McMillan: Millie will
+[21:50] Andrew Ettinger: just code for us.
+[21:52] Mori Liu: This is very interesting because she's on personality, and we hosted dinner, like, a couple of days ago where
+[22:00] Melissa McMillan: a lot
+[22:00] Mori Liu: of people are interested. Our training models evolving. Like, mimicking
+[22:04] Melissa McMillan: human
+[22:04] Mori Liu: style and emotion is a very core element of human style, where a lot of these labs and companies previously weren't really noticing. So, you know, there's audio data, but label in different ways. So, like, we also want to reach people that are, like, specifically interested in emotional label, because that's, like, what we specialize. Other small departments, like, hard words like pronunciation, phone numbers, emails. We also have a special data center on that.
+[22:30] Andrew Ettinger: She's. She's probably, like, literally $25 million to me. Maybe. Maybe more literally. I'm not joking. Right. And. And that
+[22:41] Mori Liu: could be. Yeah,
+[22:45] Andrew Ettinger: right. So that's how wild this stuff is. So. And. And, yeah, so anyway, we probably derailed you. Probably give you more info than you wanted. So. Sorry, Melissa.
+[22:54] Melissa McMillan: No, this is helpful. Really appreciate all the color and context, especially as we're learning your. Or just getting our arms around your tone of voice and how you talk. Like, these are all really helpful for us. I'd also like to, before we move on to the next thing, which is a little bit more focused on sales targets, just make sure if there are any upcoming events, upcoming product launches, maybe even if you have any big pushes coming up or, like, flagship customers that we could post about that you maybe have local rights for things of that nature. Anything come to mind?
+[23:28] Andrew Ettinger: Yeah, I mean, unfortunately, I don't have any logo rights, because if I sold to this person at OpenAI, that would never let me do that. And our equivalents that we're working with will never let us do that. So, unfortunately, I don't have that. And the ones that I could do. Logos are not really what I want to be talking about, even if they're decent logos or decent stories. Like I posted one
+[23:48] Melissa McMillan: about
+[23:50] Andrew Ettinger: this feel good story, but I just did that just to like show AI to human well being, etc. We just had a
+[23:57] Melissa McMillan: lot of
+[23:57] Andrew Ettinger: big PR because of a transaction we did with Google
+[24:01] Melissa McMillan: for
+[24:02] Andrew Ettinger: a license and hire, so we're just coming off of a big a big one right now. The strength. Strategy is not really looking for much of that right now. Trying to get our strategy in place, get our website updated with this new direction, our messaging done, or all that stuff done. We do have some new models that we will be releasing over the coming weeks. Open sourcing a few things, which is cool to this community and a good thing, these devices that can run on a model. So if you're Apple or Samsung or others that have devices, you now could run these natively on your model. We're going to open source that. It's a pretty cool thing. We can keep you posted on some of those things, but it's nothing that's vital that we have to do this around. But you tell me what you need here and if you have ideas, but nothing that has to distract you, I would say from just getting this off the
+[24:54] Mori Liu: ground.
+[24:56] Melissa McMillan: Awesome. Just keep us posted when it comes to things like events as they come up. If you're going to conferences, stuff like that. We love those product launches. Just keep in the loop. We are all going to be in Slack together. Yeah,
+[25:09] Andrew Ettinger: we are going to continue to have these dinners. I just started a few weeks ago, so I'm behind, but I. I need to go to the Nvidia conference and I just haven't booked that stuff yet. So that is something coming up we could talk about. But anyway,
+[25:24] Melissa McMillan: great.
+[25:24] Andrew Ettinger: Yeah, I know you. I know your program's great for that. And so to the extent that we could be out ahead of that, I definitely want to test, you know, that out. I think it's powerful. And candidly, if that works, well, you know, I might just go to more things. Right. Just to try it out if I could get more meetings. So. I know that's powerful. I know that's powerful. I don't want to distract you guys from getting up and going and then we can focus on those things. Right. I don't want to distract, like, hey, I've got to hit this for this thing. Right. I'd rather just go through. And I'm sure we got to get a few posts out and just kind of learn, but you tell me.
+[26:00] Melissa McMillan: Perfect and then. Maury, did you have something you wanted to add?
+[26:03] Andrew Ettinger: Oh, sorry, Mar.
+[26:04] Mori Liu: No, you're. You're so good for events. Like you mentioned, we did the dinner, Voice AI
+[26:12] Melissa McMillan: dinner
+[26:13] Mori Liu: last Thursday. I think there's some echoing. I don't know if. Melissa, your room
+[26:20] Melissa McMillan: muted. All right.
+[26:23] Mori Liu: We. We did Voice AI dinner specifically for researchers or like CTO founder level in the Voice and
+[26:30] Melissa McMillan: Multimodal.
+[26:31] Mori Liu: We're gonna do like a post on LinkedIn next, you know, on the company account. On my account, Andrew probably post it more so building a brand where we're involved in the community, where we're not, you know, the whole dinner is like constructed, very not salesy. It's very like luxurious restaurant. You know, people are sitting down just having conversations. But that dinner got us pretty good intro to like deep gram to a lot of, you know, good company and, and you know, people that are in charge of the audio model or like multimodal models. But it's also the publicity outside of that is to build a presence in the space and make. Think we're cool, right? Following that we'll have more dinners. But we're also partnering with base 10 to do like a trivia night for like engineers. We're like a co host of that event. People compete for like 2k to answer trivia questions about pop culture. But also like there's like nerdy engineering question. So there's some publicity around that. There's logos, you know they put. But they'll put our logo and stuff. In terms of like product launches, we're doing Octave 3 which is like a one of the core model TTS model launch in the next three weeks, three to four weeks as like that's the quickest timeline but more likely like a month for that model. The special thing about it is that we're not changing anything besides just pouring more data into it. Because we're providing data for other labs, we're using that to train our model. So showing the capability model in benchmarks and different press ways, it'll show how important data is and we can potentially take the marking angle of this model. We've done nothing else to it besides adding more data and look how good it sounds. That's a very brute way of saying it, but I think that's a good angle to mark your data. Another product see thing is benchmark. I think benchmark. A lot of data companies use it internally to improve their data. But. But also we want to sort of show the industry how important emotion is. But like more specifically, one of benchmarks that I'm developing with researcher is like conversational naturalness. How do we evaluate like a naturalness of conversation when it's back and forth rather than one single audio file. So this is like undefined, like non deterministic metric, right? So developing that metric ourselves and releasing public reposition us as a leader in this space in terms of how do we define naturalness, empathy, expressiveness. So that's another kind of product benchmark.
+[29:08] Andrew Ettinger: But
+[29:08] Mori Liu: I think
+[29:08] Andrew Ettinger: that. Let me just stop it right there for a second because that is an interesting thing that I would like to own. So if we get me going as the brand for Hume on all this stuff, as the leader, Maury's idea on these evaluations and benchmarks are huge. So think of it like this. There's 35 people that have models that do this.
+[29:29] Mori Liu: We
+[29:29] Andrew Ettinger: are going to objectively just measure them all and it might mean that we're last. Right?
+[29:34] Mori Liu: It's
+[29:34] Andrew Ettinger: fine, I don't care. I'm not actually trying to sell that. And if we do that every week and every new thing that comes up. And then we do it against Japanese and then we do it against like this conversation. And we do all of that and we have that on our site. Right. First of all, it's unbelievable, quote unquote, like product led engagement. It's not even like product led, like growth or sign up. But then we start posting about that content right now, literally, we are the authority on how all these things work. Right. And Eric, to your point, We're not talking about our product that we're selling. It's just objectively, oh, wow. We just saw OpenAI. Like, medical conversations in Mandarin are like, absolutely incredible. Like, da, da, da, hear this. And like, maybe we start playing clips or, you know, things like that. So we have a lot of possibilities as we get into this that are really excited around that.
+[30:31] Mori Liu: I think Millie has her hand up.
+[30:34] Andrew Ettinger: Yeah,
+[30:34] Millie Hanson: Sorry. To your point earlier, Andrew, you said you don't want to distract us from kicking off, but that's the exact content we want. We want to know what it. What events you've got in the pipeline or the events you've been to. The idea is that with these ABM targets, we could have a post something along the lines of, I'm going to X event. I am looking forward to seeing this talk and then listing the people. That's a great idea. And it just means that when you go to the event, it will then kind of line up a conversation with your icp. So those. That sort of intel is super helpful for me fleshing out the content for you to also chat with your icp also with, say, like previous events. If you've had any great conversations and you want to highlight them again with an icp, if you have any photos, feel free to send them over again. It's just, it helps build trust with any content we're putting out there. And going forward, when you do go to any events again, just a quick iPhone picture with an ICP would be super helpful. But yeah, that was just my standpoint on that. I hope that makes sense.
+[31:43] Andrew Ettinger: It totally does. Sorry if
+[31:45] Millie Hanson: I
+[31:45] Andrew Ettinger: overlooked that piece and now I could
+[31:50] Millie Hanson: just plan
+[31:51] Andrew Ettinger: some of those things. So now
+[31:52] Millie Hanson: that's
+[31:52] Andrew Ettinger: great.
+[31:53] Millie Hanson: Yeah. No, don't be silly. Like, you're the expert in your space, we're the expert in our space and we're just coming together to make sure we're putting out the best possible content. So this is just like a little bit of advice on from my side, but it will also help me create great content for you.
+[32:09] Andrew Ettinger: Yeah. So.
+[32:12] Melissa McMillan: So
+[32:13] Andrew Ettinger: I owe
+[32:14] Melissa McMillan: you. I
+[32:14] Andrew Ettinger: owe you this. I'll put this together. Just so you know. I'm sure you saw, like, I have a fairly decent LinkedIn right size audience. Maybe not as a CEO, but as a CRO. It was probably pretty,
+[32:30] Melissa McMillan: pretty,
+[32:31] Andrew Ettinger: pretty, pretty good. So I'm purging like a thousand. Like, I just started, like, I have all these engineers in India. I don't need them as contacts anymore because I can't
+[32:38] Melissa McMillan: sell to
+[32:39] Andrew Ettinger: them. So I just program purging all of them. And then I'm going to start my own automation with my own, like to rebuild my, my audience right around, around this. It's already building, as you can see from this. And you know, I've been manually purging and stuff like that. So just realize, just know that I'm going to be committed to that because I know that's important, irrespective of this. I'll get you
+[33:01] Melissa McMillan: the
+[33:01] Andrew Ettinger: first set of the ABM targets, you know, shortly in the next day or so. And then
+[33:10] Melissa McMillan: ICP
+[33:11] Andrew Ettinger: list,
+[33:11] Melissa McMillan: like
+[33:11] Andrew Ettinger: where the Personas. I have a little bit of work
+[33:14] Melissa McMillan: to do, but
+[33:16] Andrew Ettinger: I'll put all that stuff together for you.
+[33:19] Melissa McMillan: Awesome. Thank you so much. I know we only have nine minutes left before you have to hop, so we're going to quickly run through a couple of post examples and just want to get your take on
+[33:31] Andrew Ettinger: that. By
+[33:32] Melissa McMillan: the way, I
+[33:32] Andrew Ettinger: can chat again tomorrow. I could chat again later. Like I'm totally around and available. This is actually very important to me and this is a huge priority. I just didn't realize when I did this that I had this appointment that if I cancel it'll be six months and I'll be in
+[33:44] Melissa McMillan: trouble. No worries at all. We'll have many more upcoming meetings and if we need to schedule a follow up tomorrow, we can do that.
+[33:50] Andrew Ettinger: Yeah, I'm committed.
+[33:51] Melissa McMillan: It's
+[33:51] Andrew Ettinger: very big priority. Okay,
+[33:53] Melissa McMillan: awesome. Thank you for that. So first and foremost, we're looking at things from a scale of 1 to 6, from most casual to most serious and most professional. This is going to be the most casual. You can see we're just being funny with a meme here. Curious to hear if this feels aligned with what you're trying to do or if we need to move on to one that's a little more formal.
+[34:16] Andrew Ettinger: I mean, it's stupid to me, but if it's going to work, I
+[34:19] Melissa McMillan: don't care.
+[34:20] Andrew Ettinger: Right? So you know what I mean. But I know what could be stupid in my eyes actually could work. Right? So I don't mind trying things like this, but to me, I'd rather go up a little bit if,
+[34:33] Melissa McMillan: if,
+[34:33] Andrew Ettinger: okay,
+[34:35] Melissa McMillan: but
+[34:35] Andrew Ettinger: if you're
+[34:35] Melissa McMillan: like,
+[34:36] Andrew Ettinger: that thing's going to perform like crazy, you don't even know it. Right. I, I, I wouldn't be upset and I'd try it.
+[34:43] Melissa McMillan: All right, good to know. What about this one? That's a little bit of a step up. Still casual, a little more formal than the last one, but still casual. Some slight rage bait.
+[34:53] Mori Liu: Like, like
+[34:54] Melissa McMillan: what
+[34:54] Mori Liu: are we, are we judging? Like, would we post this? Is that the question? Like,
+[35:03] Eric Lay: Or just tell us what you don't like about these posts or what you like. I think that would be an
+[35:07] Mori Liu: easy place
+[35:07] Eric Lay: to start
+[35:08] Mori Liu: contextualized specifically for Andrew's LinkedIn,
+[35:10] Eric Lay: right?
+[35:11] Mori Liu: Yes,
+[35:11] Melissa McMillan: exactly.
+[35:15] Andrew Ettinger: So this, so the equivalent would be like me and some of our folks on a whiteboard in our conference room with something like funny, maybe provocative on there, like whatever.
+[35:26] Mori Liu: Right. It is to kind of show the human set. Because if you guys saw Andrew's LinkedIn, the picture of him with a whiteboard. Be like this. I took that. I was like, post like this. We're gonna take a picture like that. I thought it was a good vibes, and it shows, like, the human side of a CEO. Not like, I'm a board member, but, like, yo, like,
+[35:45] Melissa McMillan: I'm
+[35:45] Mori Liu: passionate
+[35:46] Melissa McMillan: about
+[35:46] Mori Liu: face, you know, good
+[35:47] Melissa McMillan: people.
+[35:48] Mori Liu: So,
+[35:48] Melissa McMillan: like,
+[35:49] Mori Liu: I think we're definitely open to this. However, it should be balanced with a level of authority, because we don't want to make Andrew look like the Sea of Cooley. Right? So. And it's a different ICP and different sort of brand we're trying to build because we are selling a pretty serious product where people care about privacy. They care about, you know,
+[36:08] Melissa McMillan: the
+[36:08] Mori Liu: traffic. Trust of the data. Data selling is all about relationship. Right? It's the same audio, it's the same text. Like why do you buy from this person? Because, because you kind of trust them. It's like Surge CEO, like a lot of his deals with internal relationship McCOR Even they're young, they, they, they like they plug through OpenAI first before they plug all the other people because if they see open the logo on there, you know we
+[36:30] Melissa McMillan: can't do that.
+[36:31] Mori Liu: But
+[36:31] Andrew Ettinger: yeah, I'm good with this. This is standard, standard stuff though.
+[36:37] Melissa McMillan: Yeah. So this one we're still a little more casual but getting more polished.
+[36:42] Andrew Ettinger: Yeah, it's fine.
+[36:44] Melissa McMillan: So this sounds like more aligned now. The next one is going to be in the more corporate exec kind of territory versus the more casual territory. So we would call this level four medium formal. I want to get your take on that.
+[36:57] Andrew Ettinger: There'll be a picture of me just working somewhere.
+[37:01] Melissa McMillan: The picture could be any picture really, but you know, some image. And you can see in terms of the language on the left hand side, you know, we're not really trying to be humorous here. It's a little more polished, a little more executive, but not
+[37:17] Mori Liu: super
+[37:17] Melissa McMillan: formal. Like we're
+[37:18] Mori Liu: talking
+[37:19] Melissa McMillan: laws.
+[37:21] Andrew Ettinger: I'm fine with it. I know I have to. I generally hate like pictures of myself. I know you have to do it and it works. Sometimes I just find it arrogant, but I don't want to be perceived as that. And it's not actually completely me to post a bunch of pictures of me now. That said, like, over the last several years I've done a lot of videos on go to market stuff. And I even tell you the amount of business I got from doing those, which I did. One take. I sat on my couch, literally filmed it. One take, cap cut, uploaded it. I don't even know what the hell I'm doing. Right. Threw it on there and like regardless of the metrics, I got
+[38:00] Melissa McMillan: business
+[38:01] Andrew Ettinger: every few weeks from it. It was
+[38:02] Melissa McMillan: crazy.
+[38:03] Andrew Ettinger: Right? So I know that that stuff can work. So I guess I was willing to put myself out there like that. I just hate the picture. But like, yes. Anyway, generally this is fine.
+[38:15] Melissa McMillan: Okay, that's helpful. We've only got two more, so the next one is a little more formal. What do you like? What do you not like about this?
+[38:27] Andrew Ettinger: This seems like a little dense to
+[38:29] Melissa McMillan: read. Okay,
+[38:31] Mori Liu: is this
+[38:32] Melissa McMillan: the
+[38:32] Mori Liu: same, like, is this a reaction of this post?
+[38:38] Melissa McMillan: So this was the image that was included
+[38:41] Mori Liu: in the
+[38:41] Melissa McMillan: post that we see
+[38:42] Mori Liu: on the
+[38:42] Melissa McMillan: right hand side and it's a screenshot from a. I think it was an email or. No, it was an article.
+[38:50] Mori Liu: I think this shows an opinion and this like rides on sort of a trend, you know, like the release of this news, the release of like, like moat book,
+[38:59] Melissa McMillan: like
+[39:00] Mori Liu: whatever, like trend that's going on. It's like a reaction, but it's like opinion reaction. It's pretty serious. I mean, numbers, you know, you know, having very concrete. Examples I think tagging people sometimes work if you tag them in a very like intentional context. I think Eric showed a example of HubSpot. You tag
+[39:19] Melissa McMillan: HubSpot
+[39:20] Mori Liu: and they like connected you. That's also like very similar to this one.
+[39:28] Emmett Chen-Ran: I want to say I tagged this is my post. I tagged Pilot in this and it actually did get me a meeting with the CEO of Pilot. Yeah, so,
+[39:35] Mori Liu: so that's why I think it's
+[39:36] Melissa McMillan: good with
+[39:36] Mori Liu: this. Very intentional, you know, thought through with tagging.
+[39:40] Melissa McMillan: Yeah.
+[39:40] Andrew Ettinger: Okay.
+[39:41] Melissa McMillan: Super helpful
+[39:41] Andrew Ettinger: feedback. You'll see my
+[39:43] Melissa McMillan: LinkedIn
+[39:43] Andrew Ettinger: text posts are all over the place. Right. From probably a good format to probably a good foundation. I screwed up because I just wrote too much too, too long to what like I, I, I'm all over the place. So like I always had these templates I tried to stay within but then I never did so, so
+[40:00] Melissa McMillan: I was
+[40:04] Eric Lay: so I think we're at a good
+[40:05] Melissa McMillan: place here. We know that the super duper funnel like this one is not going to be it. So the last couple things before you have to hop Andrew, we're making good time. Was just the timeline. So we want to get the content interview scheduled with Millie. That's going to be just like your, your Barbara Walter style 20 question situation where Millie's going to ask you some questions to generate some content out of. We'll be doing something like that one to two times per
+[40:29] Mori Liu: month
+[40:30] Melissa McMillan: going forward. That's where the content is going to come out of. We're going to have a weekly 30 minute sync just to talk through any little operational details. Initially we're going to be looking at things like getting everything set up on our end in the first sync. Then we're going to be talking about things like how it's going, what kind of metrics we've been seeing. We'll have one more formal review every month. I did call out two. You can see I've got in parentheses three question mark posts per week. I believe you originally signed up with two, but we were talking about it internally and thinking that three might actually be a better thing for just generating the best possible results. More frequent posts mean more engagement. So wanted to see what your thoughts were on that. So I want to jump in
+[41:17] Eric Lay: here. So
+[41:18] Mori Liu: I
+[41:18] Eric Lay: think like originally I know we had budget for two also we cut the price in half and all of that. I think the purpose of this pilot is to make sure we crush it. And so internally we're like okay, is two enough to really give us comfort? So I think internally we really want this to work. So we're happy to throw in an extra post per week, which normally would be even more expensive. More operational costs. I think the only thing I'd say, like, just keep the referrals coming, Andrew, you know, and. And like, we'll. We'll do everything we can to. To. To go above and beyond free. Scheduled
+[41:58] Andrew Ettinger: or no. Are Billy and Andrew
+[41:59] Eric Lay: scheduled? Let me just check. I mean, I think they both scheduled.
+[42:04] Andrew Ettinger: All right,
+[42:05] Eric Lay: let me
+[42:05] Andrew Ettinger: know
+[42:05] Eric Lay: if
+[42:06] Andrew Ettinger: they don't. They're
+[42:07] Eric Lay: both.
+[42:07] Andrew Ettinger: They're. They're both sold. And Andrew will get his. Boss the CRO too, so he's two for one. He's like, great. Our ABM person sucks. Let's just go do this. And you're gonna play to his boss's ego, who I know really well. He used to work for me, so. And I'm having dinner with someone tomorrow night. I'm pitching like, don't worry, I, I, I got you and I'm not stopping
+[42:24] Eric Lay: it. Okay, awesome. Then we'll, yeah, we'll, we'll, we won't stop at two post a week. We'll go up to three and let's, let's make sure this is a big win.
+[42:35] Andrew Ettinger: Yeah, I got you.
+[42:36] Eric Lay: I,
+[42:37] Andrew Ettinger: I know, I, I know I gotta live up to my end of the bargain, so I appreciate that. And don't worry, I, I, I'm, I, I will continue to, to sell for. It's my, it's my pleasure.
+[42:46] Eric Lay: It's
+[42:46] Andrew Ettinger: my pleasure.
+[42:48] Eric Lay: Well,
+[42:48] Andrew Ettinger: I also know
+[42:49] Eric Lay: if
+[42:49] Andrew Ettinger: I'm validating it, that I love it because they all look at me as like, way better LinkedIn than all them and they're just afraid to even try. I just didn't give a. So I was just like, whatever, I'll just do it and see what happens. I didn't care. So that's why it's actually even easier. Right. You know what I mean? For them. So I got, thank you. So thank you. I appreciate it. I know you don't need to do that and I will give you plenty in return.
+[43:17] Melissa McMillan: Awesome. Well, I know you have to hop to your doctor's appointment, so we will let you run. I'm going to slack you about going ahead and scheduling our recurring sync and our content interview so we can do that async and let you get on the move.
+[43:30] Andrew Ettinger: Should I post or not do anything until we get this going or what's your thought on that?
+[43:36] Melissa McMillan: Yeah, you can keep
+[43:37] Eric Lay: momentum. Yeah, momentum
+[43:38] Melissa McMillan: is important. If
+[43:39] Mori Liu: you've got something
+[43:40] Melissa McMillan: up, you're sleeping.
+[43:41] Mori Liu: We're posting about the event like tomorrow,
+[43:44] Melissa McMillan: like
+[43:45] Mori Liu: they have to. Our latest. I mean, if you guys want to look at the post and sort of edit it, because I have
+[43:52] Melissa McMillan: to share
+[43:53] Eric Lay: in the
+[43:53] Mori Liu: slack
+[43:54] Eric Lay: and we're happy to give feedback, but yeah, I'll let you guys. Ryan, super
+[43:58] Andrew Ettinger: excited
+[43:58] Eric Lay: for this partnership.
+[43:59] Andrew Ettinger: You guys are awesome. Thank you. It's a top priority for me, so slack me. I'm on it. I will meet anytime. Thank you.
+[44:05] Melissa McMillan: Awesome. Thank you all. Bye. Bye.
