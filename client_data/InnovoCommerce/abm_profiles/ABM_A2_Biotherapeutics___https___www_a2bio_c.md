@@ -1,0 +1,3 @@
+# ABM Target Profile: A2 Biotherapeutics | https://www.a2bio.com | https://www.zymewire.com/company/5d4d385b0cf192584b004a59
+
+Error gathering ABM data: 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-3.1-pro is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}

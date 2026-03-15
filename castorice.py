@@ -2,7 +2,6 @@ import os
 from google import genai
 from google.genai import types
 
-# Initialize the Gemini client
 google_client = genai.Client()
 
 class Castorice:
@@ -14,13 +13,23 @@ class Castorice:
     def __init__(self, model_name="gemini-3.1-pro-preview"):
         self.model_name = model_name
 
-    def generate_domain_primer(self, client_name: str, company_keyword: str, client_context: str = "") -> str:
+    def generate_domain_primer(
+        self,
+        client_name: str,
+        company_keyword: str,
+        client_context: str = "",
+        client_and_icp_summary: str = "",
+    ) -> str:
+        """
+        Generate domain primer. When client_and_icp_summary (Sections 1 and 2 from Aglaea's
+        briefing) is provided, use it to define the industry and tailor research—no separate
+        industry_hint file needed.
+        """
         print(f"Castorice is researching the {company_keyword} industry for {client_name}...")
-        
-        # Configure the tool to use live Google Search
+
         search_config = types.GenerateContentConfig(
-            temperature=0.4, # Keep it factual
-            tools=[{"google_search": {}}] # Enables native internet access
+            temperature=0.4,
+            tools=[{"google_search": {}}],
         )
 
         system_instruction = f"""
@@ -28,20 +37,39 @@ class Castorice:
         Your job is to prepare a ghostwriter to interview an executive ({client_name})
         in the '{company_keyword}' space. The ghostwriter has NO background in this industry
         and may be going in blind—they need a clear industry definition, a quick-start cheat sheet,
-        and research grounded in the actual market (not just the company name).
+        and research grounded in the actual market and in what we already know about this client and their ICP.
         """
 
-        context_note = "Base Context (from client folder, e.g. transcripts):\n" + (client_context.strip() or "(None provided.)")
+        has_summary = bool(client_and_icp_summary.strip())
+        context_note = "Base Context (from client folder, e.g. transcripts):\n" + (
+            client_context.strip() or "(None provided.)"
+        )
+
+        if has_summary:
+            step1 = f"""
+        Step 1 — Use the briefing summary below (Sections 1 and 2: The Client, ICP) to define the industry.
+        From this summary, state in one sentence what INDUSTRY or MARKET we are researching. All research
+        below must target that industry/market and must be relevant to this client and their ICP.
+
+        --- SECTIONS 1 AND 2 (CLIENT + ICP) ---
+        {client_and_icp_summary.strip()}
+        --- END ---
+        """
+        else:
+            step1 = f"""
+        Step 1 — Define the industry: From the company keyword '{company_keyword}' and any base context below,
+        state in one sentence what INDUSTRY or MARKET we are researching. All research below must target this industry/market.
+        """
+
         client_aware_note = (
-            "Use the Base Context above to tailor the Devil's Advocate questions to this client's "
-            "positioning, product, and ICP so the ghostwriter can provoke depth that feels relevant to them."
-            if client_context.strip() else ""
+            "Use the Sections 1+2 summary and Base Context to tailor the Devil's Advocate questions and jargon "
+            "to this client's positioning, product, and ICP."
+            if (has_summary or client_context.strip()) else
+            "When no summary or context is provided, make Devil's Advocate questions generally relevant to the industry."
         )
 
         prompt = f"""
-        Step 1 — Define the industry: From the company keyword '{company_keyword}' and any base context below,
-        state in one sentence what INDUSTRY or MARKET we are researching (e.g. "emotion AI for customer experience",
-        "B2B e-commerce platforms"). All research below must target this industry/market, not the company itself.
+        {step1}
 
         {context_note}
 
@@ -73,9 +101,7 @@ class Castorice:
         What keeps executives in this industry awake at night?
 
         ### Devil's Advocate Questions
-        3 smart, slightly provocative questions the ghostwriter can ask to get a passionate response from the client.
-        {f' {client_aware_note}' if client_aware_note else ''}
-        When no base context is provided, make these generally relevant to the industry; when context exists, tie them to this client's ICP and product.
+        3 smart, slightly provocative questions the ghostwriter can ask to get a passionate response from the client. {client_aware_note}
         """
 
         try:

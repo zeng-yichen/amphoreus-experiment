@@ -1,4 +1,3 @@
-
 import os
 import time
 import docx
@@ -33,8 +32,8 @@ def get_local_context(directory, skip_files):
         if filename in skip_files: continue
         filepath = os.path.join(directory, filename)
         
-        # Only read .txt files! The .docx files are already converted by upload_and_wait.
-        if filename.lower().endswith(".txt"):
+        # Only read .txt files and .md files (for ABM profiles)
+        if filename.lower().endswith((".txt", ".md")):
             with open(filepath, "r", encoding="utf-8") as f:
                 context_text += f"\n--- DOCUMENT: {filename} ---\n{f.read()}\n"
                 
@@ -82,12 +81,12 @@ def upload_and_wait(directory, client, skip_files):
         
     return uploaded_files
 
-def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted_files, blocked_files):
+def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted_files, blocked_files, abm_files):
     print("Files ready. Initializing Gemini Chat Session...")
-    all_uploaded_files = base_files + accepted_files + blocked_files
+    all_uploaded_files = base_files + accepted_files + blocked_files + abm_files
     
     chat = google_client.chats.create(
-        model="gemini-3.1-pro-preview",
+        model="gemini-3.1-pro",
         config=types.GenerateContentConfig(temperature=0.7)
     )
 
@@ -131,13 +130,23 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
         response_2 = chat.send_message(prompt_2)
         out_file.write(f"--- STEP 2: ICP & PRODUCT ANALYSIS ---\n{response_2.text}\n\n")
 
+        # --- STEP 2.5: ABM Targets ---
+        abm_instruction = ""
+        if abm_files:
+            print("Gemini Step 2.5: Ingesting ABM Profiles...")
+            prompt_2_5 = "I am attaching Account-Based Marketing (ABM) target profiles. Please review these targets, their predicted pain points, and recommended ingress strategies."
+            response_2_5 = chat.send_message([prompt_2_5] + abm_files)
+            out_file.write(f"--- STEP 2.5: ABM PROFILES INGESTION ---\n{response_2_5.text}\n\n")
+            abm_instruction = "CRITICAL: Exactly 3 of these 12 messages MUST be Account-Based Marketing (ABM) posts dedicated to the specific targets provided in the ABM profiles. These ABM messages should favorably mention the target, address their specific pain points, and subtly position {client_name} as the solution to encourage a meeting."
+
         # --- STEP 3: Overarching Strategy ---
-        print("Gemini Step 3: Developing 10 overarching messages...")
+        print("Gemini Step 3: Developing 12 overarching messages...")
         prompt_3 = f"""
-        We need 10 posts that range from BOFU to MOFU to TOFU. 
-        Begin with drafting 10 compelling overarching messages that you would like our posts to deliver. 
+        We need 12 posts that range from BOFU to MOFU to TOFU. 
+        Begin with drafting 12 compelling overarching messages that you would like our posts to deliver. 
         Let's leverage a variety of {client_name}'s practices and philosophies to appeal to {client_name}'s ICP.
-        CRITICAL INSTRUCTION: Output your response EXCLUSIVELY as a valid JSON array of 10 strings. 
+        {abm_instruction}
+        CRITICAL INSTRUCTION: Output your response EXCLUSIVELY as a valid JSON array of 12 strings. 
         """
         response_3 = chat.send_message(prompt_3)
         
@@ -146,7 +155,7 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
             if "[" in clean_json and "]" in clean_json:
                 clean_json = clean_json[clean_json.find("["):clean_json.rfind("]")+1]
             messages_list = json.loads(clean_json)
-            out_file.write("--- STEP 3: THE 10 OVERARCHING MESSAGES ---\n")
+            out_file.write("--- STEP 3: THE 12 OVERARCHING MESSAGES ---\n")
             for i, msg in enumerate(messages_list):
                 out_file.write(f"{i+1}. {msg}\n")
             out_file.write("\n")
@@ -155,17 +164,18 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
             return
 
         # --- STEP 4: Iterative Generation ---
-        print("Gemini Step 4: Drafting the 10 LinkedIn posts iteratively...")
+        print("Gemini Step 4: Drafting the 12 LinkedIn posts iteratively...")
         out_file.write("="*50 + "\n--- FINAL LINKEDIN POST DRAFTS ---\n" + "="*50 + "\n\n")
         
         for index, message in enumerate(messages_list):
-            print(f"Generating Post {index + 1} of 10...")
+            print(f"Generating Post {index + 1} of 12...")
             prompt_5 = f"""
             Theme for this post: "{message}"
             
-            Generate a LinkedIn post around this theme that begins with a commonplace occurrence 
-            or a widespread idea that is debunked through practical advice and/or example(s) throughout the post, culminating 
-            in a succinct conclusion. 
+            Generate a LinkedIn post around this theme that delivers practical advice and/or example(s) throughout the post, culminating 
+            in a succinct conclusion. INCORPORATE ELEMENTS FROM APPROVED POSTS AND AVOID ELEMENTS FROM REJECTED POSTS.
+            
+            If this theme mentions an ABM target, strictly follow the ingress strategy from their profile, mention them favorably, and structure the post to naturally encourage them to reach out or accept a meeting with {client_name}.
             
             The example should be rooted in {client_name}'s real or PLAUSIBLY real experiences.
             Ensure you strictly apply a snappy, succinct writing style as we analyzed in the previous step.
@@ -184,7 +194,7 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
         except Exception as e:
             print(f"Failed to delete {f.name}: {e}")
 
-def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, blk_text):
+def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, blk_text, abm_text):
     print("Initializing GPT-5 Chat Session...")
     messages = [{"role": "system", "content": "You are a professional LinkedIn ghostwriter."}]
     
@@ -240,13 +250,29 @@ def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, b
         messages.append({"role": "assistant", "content": resp_2_text})
         out_file.write(f"--- STEP 2: ICP & PRODUCT ANALYSIS ---\n{resp_2_text}\n\n")
 
+        # --- STEP 2.5 ---
+        abm_instruction = ""
+        if abm_text:
+            print("GPT-5 Step 2.5: Ingesting ABM Profiles...")
+            prompt_2_5 = f"""
+            I am attaching Account-Based Marketing (ABM) target profiles. Please review these targets, their predicted pain points, and recommended ingress strategies.
+            \n\nABM PROFILES:\n{abm_text}
+            """
+            messages.append({"role": "user", "content": prompt_2_5})
+            resp_2_5 = openai_client.chat.completions.create(model="gpt-5", messages=messages)
+            resp_2_5_text = resp_2_5.choices[0].message.content
+            messages.append({"role": "assistant", "content": resp_2_5_text})
+            out_file.write(f"--- STEP 2.5: ABM PROFILES INGESTION ---\n{resp_2_5_text}\n\n")
+            abm_instruction = "CRITICAL: Exactly 3 of these 12 messages MUST be Account-Based Marketing (ABM) posts dedicated to the specific targets provided in the ABM profiles. These ABM messages should favorably mention the target, address their specific pain points, and subtly position {client_name} as the solution to encourage a meeting."
+
         # --- STEP 3 ---
-        print("GPT-5 Step 3: Developing 10 overarching messages...")
+        print("GPT-5 Step 3: Developing 12 overarching messages...")
         prompt_3 = f"""
-        We need 10 posts that range from BOFU to MOFU to TOFU. 
-        Begin with drafting 10 compelling overarching messages that you would like our posts to deliver. 
+        We need 12 posts that range from BOFU to MOFU to TOFU. 
+        Begin with drafting 12 compelling overarching messages that you would like our posts to deliver. 
         Let's leverage a variety of {client_name}'s practices and philosophies to appeal to {client_name}'s ICP.
-        CRITICAL INSTRUCTION: Output your response EXCLUSIVELY as a valid JSON array of 10 strings. 
+        {abm_instruction}
+        CRITICAL INSTRUCTION: Output your response EXCLUSIVELY as a valid JSON array of 12 strings. 
         """
         messages.append({"role": "user", "content": prompt_3})
         resp_3 = openai_client.chat.completions.create(model="gpt-5", messages=messages)
@@ -258,7 +284,7 @@ def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, b
             if "[" in clean_json and "]" in clean_json:
                 clean_json = clean_json[clean_json.find("["):clean_json.rfind("]")+1]
             messages_list = json.loads(clean_json)
-            out_file.write("--- STEP 3: THE 10 OVERARCHING MESSAGES ---\n")
+            out_file.write("--- STEP 3: THE 12 OVERARCHING MESSAGES ---\n")
             for i, msg in enumerate(messages_list):
                 out_file.write(f"{i+1}. {msg}\n")
             out_file.write("\n")
@@ -267,17 +293,18 @@ def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, b
             return
 
         # --- STEP 4 ---
-        print("GPT-5 Step 4: Drafting the 10 LinkedIn posts iteratively...")
+        print("GPT-5 Step 4: Drafting the 12 LinkedIn posts iteratively...")
         out_file.write("="*50 + "\n--- FINAL LINKEDIN POST DRAFTS ---\n" + "="*50 + "\n\n")
         
         for index, message in enumerate(messages_list):
-            print(f"GPT-5 Generating Post {index + 1} of 10...")
+            print(f"GPT-5 Generating Post {index + 1} of 12...")
             prompt_5 = f"""
             Theme for this post: "{message}"
             
-            Generate a LinkedIn post around this theme that begins with a commonplace occurrence 
-            or a widespread idea that is debunked through practical advice and/or example(s) throughout the post, culminating 
-            in a succinct conclusion. 
+            Generate a LinkedIn post around this theme that delivers practical advice and/or example(s) throughout the post, culminating 
+            in a succinct conclusion. INCORPORATE ELEMENTS FROM APPROVED POSTS AND AVOID ELEMENTS FROM REJECTED POSTS.
+            
+            If this theme mentions an ABM target, strictly follow the ingress strategy from their profile, mention them favorably, and structure the post to naturally encourage them to reach out or accept a meeting with {client_name}.
             
             The example should be rooted in {client_name}'s real or PLAUSIBLY real experiences.
             Ensure you strictly apply a snappy, succinct writing style as we analyzed in the previous step.
@@ -292,7 +319,7 @@ def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, b
             out_file.write(f"{resp_5_text}\n\n")
             out_file.write("*" * 50 + "\n\n")
 
-def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text, blk_text):
+def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text, blk_text, abm_text):
     print("Initializing Claude Chat Session...")
     messages = []
     sys_prompt = "You are a professional LinkedIn ghostwriter."
@@ -313,6 +340,8 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
         resp_1_text = resp_1.content[0].text
         messages.append({"role": "assistant", "content": resp_1_text})
         out_file.write(f"--- STEP 1: CONTEXT INGESTION ---\n{resp_1_text}\n\n")
+        print("Waiting 60 seconds to respect Anthropic rate limits...")
+        time.sleep(60)
 
         # --- STEP 1.1 ---
         if acc_text:
@@ -326,6 +355,8 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
             resp_1a_text = resp_1a.content[0].text
             messages.append({"role": "assistant", "content": resp_1a_text})
             out_file.write(f"--- STEP 1.1: APPROVED POSTS ANALYSIS ---\n{resp_1a_text}\n\n")
+            print("Waiting 60 seconds to respect Anthropic rate limits...")
+            time.sleep(60)
 
         # --- STEP 1.2 ---
         if blk_text:
@@ -339,6 +370,8 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
             resp_1b_text = resp_1b.content[0].text
             messages.append({"role": "assistant", "content": resp_1b_text})
             out_file.write(f"--- STEP 1.2: REJECTED POSTS ANALYSIS (AVOID) ---\n{resp_1b_text}\n\n")
+            print("Waiting 60 seconds to respect Anthropic rate limits...")
+            time.sleep(60)
 
         # --- STEP 2 ---
         print("Claude Step 2: Analyzing ICP...")
@@ -348,14 +381,34 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
         resp_2_text = resp_2.content[0].text
         messages.append({"role": "assistant", "content": resp_2_text})
         out_file.write(f"--- STEP 2: ICP & PRODUCT ANALYSIS ---\n{resp_2_text}\n\n")
+        print("Waiting 60 seconds to respect Anthropic rate limits...")
+        time.sleep(60)
+        
+        # --- STEP 2.5 ---
+        abm_instruction = ""
+        if abm_text:
+            print("Claude Step 2.5: Ingesting ABM Profiles...")
+            prompt_2_5 = f"""
+            I am attaching Account-Based Marketing (ABM) target profiles. Please review these targets, their predicted pain points, and recommended ingress strategies.
+            \n\nABM PROFILES:\n{abm_text}
+            """
+            messages.append({"role": "user", "content": prompt_2_5})
+            resp_2_5 = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
+            resp_2_5_text = resp_2_5.content[0].text
+            messages.append({"role": "assistant", "content": resp_2_5_text})
+            out_file.write(f"--- STEP 2.5: ABM PROFILES INGESTION ---\n{resp_2_5_text}\n\n")
+            abm_instruction = "CRITICAL: Exactly 3 of these 12 messages MUST be Account-Based Marketing (ABM) posts dedicated to the specific targets provided in the ABM profiles. These ABM messages should favorably mention the target, address their specific pain points, and subtly position {client_name} as the solution to encourage a meeting."
+            print("Waiting 60 seconds to respect Anthropic rate limits...")
+            time.sleep(60)
 
         # --- STEP 3 ---
-        print("Claude Step 3: Developing 10 overarching messages...")
+        print("Claude Step 3: Developing 12 overarching messages...")
         prompt_3 = f"""
-        We need 10 posts that range from BOFU to MOFU to TOFU. 
-        Begin with drafting 10 compelling overarching messages that you would like our posts to deliver. 
+        We need 12 posts that range from BOFU to MOFU to TOFU. 
+        Begin with drafting 12 compelling overarching messages that you would like our posts to deliver. 
         Let's leverage a variety of {client_name}'s practices and philosophies to appeal to {client_name}'s ICP.
-        CRITICAL INSTRUCTION: Output your response EXCLUSIVELY as a valid JSON array of 10 strings. 
+        {abm_instruction}
+        CRITICAL INSTRUCTION: Output your response EXCLUSIVELY as a valid JSON array of 12 strings. 
         """
         messages.append({"role": "user", "content": prompt_3})
         resp_3 = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
@@ -367,26 +420,30 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
             if "[" in clean_json and "]" in clean_json:
                 clean_json = clean_json[clean_json.find("["):clean_json.rfind("]")+1]
             messages_list = json.loads(clean_json)
-            out_file.write("--- STEP 3: THE 10 OVERARCHING MESSAGES ---\n")
+            out_file.write("--- STEP 3: THE 12 OVERARCHING MESSAGES ---\n")
             for i, msg in enumerate(messages_list):
                 out_file.write(f"{i+1}. {msg}\n")
             out_file.write("\n")
         except json.JSONDecodeError:
             print("Error parsing JSON from Claude. Exiting thread.")
             return
+        
+        print("Waiting 60 seconds to respect Anthropic rate limits...")
+        time.sleep(60)
 
         # --- STEP 4 ---
-        print("Claude Step 4: Drafting the 10 LinkedIn posts iteratively...")
+        print("Claude Step 4: Drafting the 12 LinkedIn posts iteratively...")
         out_file.write("="*50 + "\n--- FINAL LINKEDIN POST DRAFTS ---\n" + "="*50 + "\n\n")
         
         for index, message in enumerate(messages_list):
-            print(f"Claude Generating Post {index + 1} of 10...")
+            print(f"Claude Generating Post {index + 1} of 12...")
             prompt_5 = f"""
             Theme for this post: "{message}"
             
-            Generate a LinkedIn post around this theme that begins with a commonplace occurrence 
-            or a widespread idea that is debunked through practical advice and/or example(s) throughout the post, culminating 
-            in a succinct conclusion. 
+            Generate a LinkedIn post around this theme that delivers practical advice and/or example(s) throughout the post, culminating 
+            in a succinct conclusion. INCORPORATE ELEMENTS FROM APPROVED POSTS AND AVOID ELEMENTS FROM REJECTED POSTS.
+            
+            If this theme mentions an ABM target, strictly follow the ingress strategy from their profile, mention them favorably, and structure the post to naturally encourage them to reach out or accept a meeting with {client_name}.
             
             The example should be rooted in {client_name}'s real or PLAUSIBLY real experiences.
             Ensure you strictly apply a snappy, succinct writing style as we analyzed in the previous step.
@@ -400,12 +457,17 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
             out_file.write("-" * 25 + "\n")
             out_file.write(f"{resp_5_text}\n\n")
             out_file.write("*" * 50 + "\n\n")
+            
+            # Additional sleep after each post to avoid Anthropic rate limits
+            print("Waiting 20 seconds to respect Anthropic rate limits...")
+            time.sleep(20)
 
 def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice="All (Ensemble)"):
     directory_path = f"./client_data/{company_keyword}"
     output_path = os.path.join(directory_path, "output")
     accepted_path = os.path.join(directory_path, "accepted")
     blocked_path = os.path.join(directory_path, "rejected")
+    abm_path = os.path.join(directory_path, "abm_profiles")
     
     google_output_filename = f"{company_keyword}_gemini_posts.md"
     google_output_filepath = os.path.join(output_path, google_output_filename)
@@ -423,36 +485,38 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
         return
     
     # 1. Load context based on model choice
-    base_files, accepted_files, blocked_files = [], [], []
-    local_context, acc_posts, blk_posts = "", "", ""
+    base_files, accepted_files, blocked_files, abm_files = [], [], [], []
+    local_context, acc_posts, blk_posts, abm_posts = "", "", "", ""
     
     if model_choice in ["All (Ensemble)", "Gemini 3.1 Pro"]:
-        base_files = upload_and_wait(directory_path, google_client, skip_files = [f for f in directory_path if f.startswith(company_keyword)])
+        base_files = upload_and_wait(directory_path, google_client, skip_files=[f for f in os.listdir(directory_path) if f.startswith(company_keyword)])
         accepted_files = upload_and_wait(accepted_path, google_client, skip_files=[])
         blocked_files = upload_and_wait(blocked_path, google_client, skip_files=[])
+        abm_files = upload_and_wait(abm_path, google_client, skip_files=[])
         
     if model_choice in ["All (Ensemble)", "GPT-5", "Claude Opus 4.6"]:
-        local_context = get_local_context(directory_path, skip_files = [f for f in directory_path if f.startswith(company_keyword)])
-        acc_posts = "\n--- APPROVED POSTS ---\n" + get_local_context(accepted_path, skip_files=[])
-        blk_posts = "\n--- REJECTED POSTS ---\n" + get_local_context(blocked_path, skip_files=[])
+        local_context = get_local_context(directory_path, skip_files=[f for f in os.listdir(directory_path) if f.startswith(company_keyword)])
+        acc_posts = "\n--- APPROVED POSTS ---\n" + get_local_context(accepted_path, skip_files=[]) if os.path.exists(accepted_path) else ""
+        blk_posts = "\n--- REJECTED POSTS ---\n" + get_local_context(blocked_path, skip_files=[]) if os.path.exists(blocked_path) else ""
+        abm_posts = "\n--- ABM TARGET PROFILES ---\n" + get_local_context(abm_path, skip_files=[]) if os.path.exists(abm_path) else ""
 
     # 2. Execution Routing
     if model_choice == "Gemini 3.1 Pro":
         print(f"Running Solo Post Generation with Gemini for {client_name}...")
-        run_gemini_posts_workflow(client_name, google_output_filepath, base_files, accepted_files, blocked_files)
+        run_gemini_posts_workflow(client_name, google_output_filepath, base_files, accepted_files, blocked_files, abm_files)
         # Duplicate to final path so GUI loads it easily
         import shutil
         shutil.copy(google_output_filepath, final_output_filepath)
         
     elif model_choice == "GPT-5":
         print(f"Running Solo Post Generation with GPT-5 for {client_name}...")
-        run_gpt5_posts_workflow(client_name, gpt_output_filepath, local_context, acc_posts, blk_posts)
+        run_gpt5_posts_workflow(client_name, gpt_output_filepath, local_context, acc_posts, blk_posts, abm_posts)
         import shutil
         shutil.copy(gpt_output_filepath, final_output_filepath)
         
     elif model_choice == "Claude Opus 4.6":
         print(f"Running Solo Post Generation with Claude for {client_name}...")
-        run_claude_posts_workflow(client_name, claude_output_filepath, local_context, acc_posts, blk_posts)
+        run_claude_posts_workflow(client_name, claude_output_filepath, local_context, acc_posts, blk_posts, abm_posts)
         import shutil
         shutil.copy(claude_output_filepath, final_output_filepath)
         
@@ -460,9 +524,9 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
         # Full Ensemble Mode WITH SYNTHESIS
         print(f"Triggering Parallel Posts Ensemble for {client_name}...")
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            f_gemini = executor.submit(run_gemini_posts_workflow, client_name, google_output_filepath, base_files, accepted_files, blocked_files)
-            f_gpt = executor.submit(run_gpt5_posts_workflow, client_name, gpt_output_filepath, local_context, acc_posts, blk_posts)
-            f_claude = executor.submit(run_claude_posts_workflow, client_name, claude_output_filepath, local_context, acc_posts, blk_posts)
+            f_gemini = executor.submit(run_gemini_posts_workflow, client_name, google_output_filepath, base_files, accepted_files, blocked_files, abm_files)
+            f_gpt = executor.submit(run_gpt5_posts_workflow, client_name, gpt_output_filepath, local_context, acc_posts, blk_posts, abm_posts)
+            f_claude = executor.submit(run_claude_posts_workflow, client_name, claude_output_filepath, local_context, acc_posts, blk_posts, abm_posts)
             
             # Wait for all generators to finish before proceeding to synthesis
             f_gemini.result()
@@ -487,7 +551,7 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
                 "Claude Opus 4.6": claude_draft
             }
             
-            # 2. Use Cyrene to synthesize drafts (no reference_posts; Cyrene merges for quality only)
+            # 2. Use Cyrene to synthesize drafts
             cyrene = Cyrene()
             synthesis = cyrene.synthesize_post(raw_drafts=raw_drafts)
 

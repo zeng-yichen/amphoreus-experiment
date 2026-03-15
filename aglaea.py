@@ -65,6 +65,38 @@ def upload_and_wait(directory, client, skip_files):
         
     return uploaded_files
 
+def extract_sections_1_and_2(client_name: str, base_files: list) -> str:
+    """
+    One Gemini call: from base files (profile + transcripts), produce only
+    Section 1 (The Client) and Section 2 (ICP). Used to orient Castorice so
+    no separate industry_hint file is needed.
+    """
+    if not base_files:
+        return ""
+    print("Extracting Sections 1 and 2 (Client + ICP) for Castorice...")
+    try:
+        prompt = f"""
+        From the attached files (LinkedIn profile and/or interview transcripts for {client_name}),
+        produce ONLY the following two sections in Markdown. Be concise but specific.
+
+        ## 1. The Client
+        [Professional background, role, notable achievements]
+
+        ## 2. The Ideal Customer Profile (ICP)
+        [Who they sell to, pain points, desires, psychological triggers]
+
+        Output nothing else. This will be used to guide industry research for a ghostwriter briefing.
+        """
+        response = google_client.models.generate_content(
+            model="gemini-3.1-pro-preview",
+            contents=[prompt] + base_files,
+            config=types.GenerateContentConfig(temperature=0.3),
+        )
+        return (response.text or "").strip()
+    except Exception as e:
+        print(f"Extract Sections 1+2 failed: {e}")
+        return ""
+
 def run_gemini_workflow(client_name, output_filepath, base_files, accepted_posts, blocked_posts, domain_primer):
 
     print("Files ready. Initializing 3.1 Pro Chat Session...")
@@ -249,7 +281,7 @@ def run_gpt5_workflow(client_name, output_filepath, context, accepted_posts, blo
         - Include a short subsection "How to Use Section 3 (Domain Knowledge Primer) in This Interview": instruct the ghostwriter to open with one Industry 101 point to build rapport, use the Jargon Cheat Sheet when the client uses technical terms, and deploy the Devil's Advocate questions when the conversation gets shallow or generic.
     """
     response = openai_client.chat.completions.create(
-        model="gpt-5", # Updated from gpt-5 to gpt-4-turbo to avoid 400 Bad Request error
+        model="gpt-5",
         messages=[{"role": "system", "content": "You are a professional ghostwriting strategist."},
                 {"role": "user", "content": full_prompt}]
     )
@@ -354,29 +386,28 @@ def generate_briefing(client_name, company_keyword, model_choice="All (Ensemble)
         print(f"Error: Directory '{directory_path}' not found.")
         return
 
-    # =========================================================================
-    # STEP 0: CASTORICE DOMAIN RESEARCH INJECTION
-    # =========================================================================
-    print("Triggering Castorice for domain research...")
+    # Upload base files once: used to extract Sections 1+2 for Castorice, and for Gemini workflow
+    skip_base = [f for f in os.listdir(directory_path) if f.startswith(company_keyword)]
+    base_files = upload_and_wait(directory_path, google_client, skip_files=skip_base)
+    sections_1_and_2 = extract_sections_1_and_2(client_name, base_files)
+
+    print("Requesting Castorice for domain research...")
     researcher = Castorice()
-    
     temp_context = get_local_context(directory_path, skip_files=[])
-    
-    domain_primer = researcher.generate_domain_primer(client_name, company_keyword, temp_context)
-    
-    primer_filepath = os.path.join(directory_path, "castorice_domain_primer.txt")
+    domain_primer = researcher.generate_domain_primer(
+        client_name, company_keyword, temp_context, client_and_icp_summary=sections_1_and_2
+    )
+    primer_filepath = os.path.join(output_path, "castorice_domain_primer.txt")
     with open(primer_filepath, "w", encoding="utf-8") as f:
         f.write(domain_primer)
-    print("Domain Knowledge Primer successfully generated and added to context directory.")
-    # =========================================================================
+    print("Castorice: Domain Knowledge Primer successfully generated and added to context directory.")
 
     if model_choice in ["All (Ensemble)", "Gemini 3.1 Pro"]:
-        base_files = upload_and_wait(directory_path, google_client, skip_files = [f for f in os.listdir(directory_path) if f.startswith(company_keyword)])
         acc_files = upload_and_wait(accepted_path, google_client, skip_files=[])
         blk_files = upload_and_wait(blocked_path, google_client, skip_files=[])
-    
+
     if model_choice in ["All (Ensemble)", "GPT-5", "Claude Opus 4.6"]:
-        local_context = get_local_context(directory_path, skip_files = [f for f in os.listdir(directory_path) if f.startswith(company_keyword)])
+        local_context = get_local_context(directory_path, skip_files=skip_base)
         acc_posts = "\n--- APPROVED POSTS ---\n" + get_local_context(accepted_path, skip_files=[])
         blk_posts = "\n--- REJECTED POSTS ---\n" + get_local_context(blocked_path, skip_files=[])
 
