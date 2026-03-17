@@ -19,13 +19,11 @@ of the world.
 
 But I cannot. I know it not to be true.
 
+We mortals have no choice but to be blown along the winds of fate, towards an unknown future.
+
+All I can hope for, my love, is to see you tomorrow.
+
 ...
-
-My love...
-
-...
-
-See you tomorrow.
 
 "Tomorrow"
 
