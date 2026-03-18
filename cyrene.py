@@ -1,6 +1,6 @@
 import re
 import logging
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Generator
 from anthropic import Anthropic
 
 logging.basicConfig(level=logging.INFO)
@@ -10,18 +10,16 @@ class Cyrene:
     """
     Cyrene: The Master Editor.
     Handles the synthesis of multiple model drafts into a single high-quality 
-    baseline, and then rewrites it to structurally mimic reference posts 
-    provided by Demiurge.
+    baseline, and rewrites it autonomously based on user style instructions or 
+    by introducing creative stylistic noise.
     """
 
     def __init__(self, model_name: str = "claude-opus-4-6"):
         self.model_name = model_name
-        # Initialize the client (requires ANTHROPIC_API_KEY in your environment variables)
         self.client = Anthropic()
 
     def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
         """Calls the Anthropic API using the specified Claude model."""
-        logger.info(f"Calling {self.model_name} for text generation...")
         try:
             response = self.client.messages.create(
                 model=self.model_name,
@@ -39,133 +37,119 @@ class Cyrene:
     def _format_dict(self, dictionary: Dict[str, str], title: str) -> str:
         formatted = ""
         for key, value in dictionary.items():
-            formatted += f"--- {title} FROM {key.upper()} ---\n{value}\n\n"
+            formatted += f"[{title}: {key}]\n{value}\n\n"
         return formatted
 
-    def _format_list(self, items: List[str], title: str) -> str:
-        formatted = ""
-        for i, item in enumerate(items):
-            formatted += f"--- {title} {i+1} ---\n{item}\n\n"
-        return formatted
-
-    def _parse_xml_tags(self, response_text: str, tag: str) -> Optional[str]:
+    def _parse_xml_tags(self, text: str, tag: str) -> str:
+        """Extracts content between specified XML tags, with a fallback for cut-off text."""
+        # Try to find the clean open and closed tags first
         pattern = f"<{tag}>(.*?)</{tag}>"
-        match = re.search(pattern, response_text, re.DOTALL | re.IGNORECASE)
+        match = re.search(pattern, text, re.DOTALL)
+        
         if match:
             return match.group(1).strip()
-        return None
-
-    def synthesize_post(self, raw_drafts: Union[Dict[str, str], str]) -> dict:
-        """
-        Synthesizes multiple drafts (from Phainon/ensemble) to maximize content quality.
-        Focuses entirely on logical flow, combining best arguments, and removing redundancies.
-        Does NOT apply specific stylistic constraints.
-        """
-        logger.info("Cyrene is synthesizing drafts for maximum quality...")
-
-        # Normalize input: if a single string is passed, wrap it in a dict
-        if isinstance(raw_drafts, str):
-            raw_drafts = {"Primary Draft": raw_drafts}
-
-        is_single = len(raw_drafts) == 1
-        draft_term = "draft" if is_single else "drafts"
-
-        system_prompt = f"""
-        You are Cyrene, the Master Editor. Your job is to synthesize the provided raw {draft_term} into a single, high-quality master draft.
+            
+        # FALLBACK: If the model got cut off and didn't print the closing tag, 
+        # just grab everything after the opening tag to save the recovered text.
+        fallback_pattern = f"<{tag}>(.*)"
+        fallback_match = re.search(fallback_pattern, text, re.DOTALL)
         
-        Focus purely on maximizing the factual and argumentative quality of the content. Combine the best insights, ensure strong logical flow, remove redundancies, and create a comprehensive and compelling narrative.
-        
-        Do NOT attempt to apply any specific stylistic formatting, tone mimicking, or extreme brevity. Focus solely on creating the perfect foundational draft.
+        if fallback_match:
+            return fallback_match.group(1).strip() + "\n\n[WARNING: GENERATION CUT OFF DUE TO LENGTH]"
+            
+        return f"Error: Could not find <{tag}> in response."
+
+    def synthesize_post(self, raw_drafts: Dict[str, str]) -> Dict[str, str]:
         """
+        Takes raw drafts from different models and synthesizes them into one masterpiece.
+        """
+        logger.info("Starting synthesis of raw drafts...")
+        
+        system_prompt = "You are Cyrene, an elite executive ghostwriter and editor. Your job is to take multiple AI-generated drafts and synthesize them into a single, cohesive, highly-tactical LinkedIn post."
+        
+        drafts_formatted = self._format_dict(raw_drafts, "DRAFT")
 
         user_prompt = f"""
-        <raw_{draft_term}>
-        {self._format_dict(raw_drafts, "DRAFT")}
-        </raw_{draft_term}>
+        <raw_drafts>
+        {drafts_formatted}
+        </raw_drafts>
 
         INSTRUCTIONS:
+        Read the provided drafts. They are variations of the same intended LinkedIn post.
+        Your goal is to merge the best hooks, the strongest empirical examples, and the tightest conclusions into ONE master draft. 
+        Eliminate all generic AI fluff, repetitive transitions, and cliché conclusions.
+
         Output your response in the following exact XML format:
 
-        <synthesis_strategy>
-        Explain how you are combining the best elements of the provided drafts to maximize overall quality.
-        </synthesis_strategy>
+        <step_1_strategy>
+        Briefly explain which elements from which drafts you are keeping and why.
+        </step_1_strategy>
 
-        <synthesized_draft>
-        [Your high-quality, comprehensive synthesized draft goes here]
-        </synthesized_draft>
+        <final_synthesized_post>
+        [Your masterfully merged draft goes here]
+        </final_synthesized_post>
         """
 
         raw_response = self._call_llm(system_prompt, user_prompt)
         
         return {
-            "strategy": self._parse_xml_tags(raw_response, "synthesis_strategy"),
-            "synthesized_draft": self._parse_xml_tags(raw_response, "synthesized_draft") or raw_response
+            "strategy": self._parse_xml_tags(raw_response, "step_1_strategy"),
+            "synthesized_draft": self._parse_xml_tags(raw_response, "final_synthesized_post")
         }
 
-    def rewrite_post(self, draft: str, reference_posts: List[str]) -> dict:
+    def rewrite_posts_iteratively(self, full_draft_text: str, style_instruction: str = "") -> Generator[Dict[str, Union[str, int]], None, None]:
         """
-        Takes a highly-quality drafted text and rewrites it to structurally and 
-        stylistically mimic the reference posts provided by Demiurge.
+        Splits the massive draft block into individual posts, iterating through them 
+        one-by-one to prevent context cutoff and improve stylistic quality.
         """
-        logger.info("Cyrene is performing stylistic rewrite based on reference posts...")
-
-        system_prompt = f"""
-        You are Cyrene, the Master Editor. Your job is to rewrite the provided draft into an improved post to suit the user's tastes.
+        # Split by the 50-asterisk delimiter from phainon.py
+        raw_posts = [p.strip() for p in full_draft_text.split("*" * 50) if p.strip()]
         
-        You have been provided with <reference_posts> from our repository. You must meticulously 
-        analyze the stylistic DNA of these references: their pacing, paragraph lengths, vocabulary, 
-        use of white space, and hook structures.
+        system_prompt = "You are Cyrene, a meticulous copyeditor. Your job is to completely rewrite a draft stylistically while maintaining 100% of the original factual payload and logical arguments."
         
-        Your final rewritten post must perfectly mimic the tone, format, and structural rhythm 
-        of the <reference_posts>, while ONLY using the factual information provided in the <raw_draft>.
-
-        <rules_of_engagement>
-        1. NO CONTENT DRIFT: You may not add new ideas, statistics, anecdotes, or arguments.
-        2. NO OMISSIONS: You must include every core argument and data point from the raw draft.
-        3. FLAWLESS MIMICRY: The final post should look and feel exactly like the reference posts.
-        </rules_of_engagement>
-        """
-
-        # Provide a fallback if Demiurge didn't find any references
-        if not reference_posts:
-            references_formatted = "NO REFERENCES PROVIDED."
+        if style_instruction and style_instruction.strip():
+            style_directive = f"Apply the following stylistic direction strictly: '{style_instruction.strip()}'"
+            analysis_directive = "Analyze the requested style direction and outline how you will apply it."
         else:
-            references_formatted = self._format_list(reference_posts, "REFERENCE POST")
+            style_directive = "No specific style was provided. You must introduce creative stylistic 'noise'—randomize sentence lengths, swap vocabulary, creatively restructure the flow, and change the emotional undertone slightly to make it feel organic and highly distinct from the original. Do NOT change any facts or the core message. DO NOT change the post length dramatically."
+            analysis_directive = "Briefly describe the random stylistic variations and 'noise' you are choosing to apply to this draft."
 
-        user_prompt = f"""
-        <reference_posts>
-        {references_formatted}
-        </reference_posts>
+        for index, post_text in enumerate(raw_posts):
+            user_prompt = f"""
+            <raw_draft>
+            {post_text}
+            </raw_draft>
 
-        <raw_draft>
-        {draft}
-        </raw_draft>
+            STYLE DIRECTIVE:
+            {style_directive}
 
-        INSTRUCTIONS:
-        Output your response in the following exact XML format:
+            INSTRUCTIONS:
+            Output your response in the following exact XML format:
 
-        <step_1_fact_extraction>
-        List bullet points of every core argument/statistic from the raw draft. This is your factual checklist.
-        </step_1_fact_extraction>
+            <step_1_fact_extraction>
+            List bullet points of every core argument, statistic, and narrative beat from the raw draft. This is your factual checklist that MUST survive the rewrite.
+            </step_1_fact_extraction>
 
-        <step_2_style_analysis>
-        Briefly identify the defining stylistic features of the reference posts (sentence length, formatting, emotional tone).
-        </step_2_style_analysis>
+            <step_2_style_approach>
+            {analysis_directive}
+            </step_2_style_approach>
 
-        <step_3_rewrite_strategy>
-        Explain how you will map the facts from Step 1 onto the style identified in Step 2.
-        </step_3_rewrite_strategy>
+            <step_3_rewrite_strategy>
+            Explain how you will map the facts from Step 1 onto the stylistic approach identified in Step 2.
+            </step_3_rewrite_strategy>
 
-        <final_post>
-        [Your rewritten, beautifully formatted post goes here]
-        </final_post>
-        """
+            <final_post>
+            [Your rewritten, beautifully formatted post goes here]
+            </final_post>
+            """
 
-        raw_response = self._call_llm(system_prompt, user_prompt)
-        
-        return {
-            "fact_extraction": self._parse_xml_tags(raw_response, "step_1_fact_extraction"),
-            "style_analysis": self._parse_xml_tags(raw_response, "step_2_style_analysis"),
-            "strategy": self._parse_xml_tags(raw_response, "step_3_rewrite_strategy"),
-            "final_post": self._parse_xml_tags(raw_response, "final_post") or raw_response
-        }
+            raw_response = self._call_llm(system_prompt, user_prompt)
+            
+            yield {
+                "index": index + 1,
+                "total": len(raw_posts),
+                "fact_extraction": self._parse_xml_tags(raw_response, "step_1_fact_extraction"),
+                "style_analysis": self._parse_xml_tags(raw_response, "step_2_style_approach"),
+                "strategy": self._parse_xml_tags(raw_response, "step_3_rewrite_strategy"),
+                "final_post": self._parse_xml_tags(raw_response, "final_post")
+            }

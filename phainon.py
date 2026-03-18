@@ -9,6 +9,7 @@ from anthropic import Anthropic
 from openai import OpenAI
 
 from cyrene import Cyrene
+from mydei import Mydei
 
 google_client = genai.Client()
 anthropic_client = Anthropic()
@@ -81,12 +82,12 @@ def upload_and_wait(directory, client, skip_files):
         
     return uploaded_files
 
-def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted_files, blocked_files, abm_files):
+def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted_files, feedback_files, abm_files):
     print("Files ready. Initializing Gemini Chat Session...")
-    all_uploaded_files = base_files + accepted_files + blocked_files + abm_files
+    all_uploaded_files = base_files + accepted_files + feedback_files + abm_files
     
     chat = google_client.chats.create(
-        model="gemini-3.1-pro",
+        model="gemini-3.1-pro-preview",
         config=types.GenerateContentConfig(temperature=0.7)
     )
 
@@ -109,20 +110,17 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
             print("Gemini Step 1.1: Analyzing Accepted Posts...")
             prompt_1a = """
             I am now attaching files containing LinkedIn posts that this client has previously APPROVED and loved.
-            Thoroughly analyze these approved posts. What specific formatting choices, sentence length/structures, tone, and overarching themes does the client prefer?
+            Thoroughly analyze these approved posts. What specific formatting choices, sentence length/structures, post length, tone, and overarching themes does the client prefer?
             """
             response_1a = chat.send_message([prompt_1a] + accepted_files)
             out_file.write(f"--- STEP 1.1: APPROVED POSTS ANALYSIS ---\n{response_1a.text}\n\n")
 
-        # --- STEP 1.2: Blocked Posts Analysis ---
-        if blocked_files:
-            print("Gemini Step 1.2: Analyzing Rejected Posts...")
-            prompt_1b = """
-            I am now attaching files containing LinkedIn posts that this client has REJECTED.
-            Thoroughly analyze these rejected posts. Contrast them with the approved ones. What specific content inaccuracies, tones, cliches, or formatting choices must we strictly AVOID moving forward?
-            """
-            response_1b = chat.send_message([prompt_1b] + blocked_files)
-            out_file.write(f"--- STEP 1.2: REJECTED POSTS ANALYSIS (AVOID) ---\n{response_1b.text}\n\n")
+        # --- STEP 1.2: Feedback Analysis ---
+        if feedback_files:
+            print("Gemini Step 1.2: Analyzing Client Feedback & Revisions...")
+            prompt_1b = "I am attaching drafts containing direct revisions, comments, and feedback from the client. Thoroughly analyze this feedback. What specific corrections did they make? Prioritize understanding their comments and respecting these rules for all future posts."
+            response_1b = chat.send_message([prompt_1b] + feedback_files)
+            out_file.write(f"--- STEP 1.2: CLIENT FEEDBACK ANALYSIS ---\n{response_1b.text}\n\n")
 
         # --- STEP 2: ICP & Product Analysis ---
         print("Gemini Step 2: Analyzing ICP...")
@@ -137,7 +135,7 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
             prompt_2_5 = "I am attaching Account-Based Marketing (ABM) target profiles. Please review these targets, their predicted pain points, and recommended ingress strategies."
             response_2_5 = chat.send_message([prompt_2_5] + abm_files)
             out_file.write(f"--- STEP 2.5: ABM PROFILES INGESTION ---\n{response_2_5.text}\n\n")
-            abm_instruction = "CRITICAL: Exactly 3 of these 12 messages MUST be Account-Based Marketing (ABM) posts dedicated to the specific targets provided in the ABM profiles. These ABM messages should favorably mention the target, address their specific pain points, and subtly position {client_name} as the solution to encourage a meeting."
+            abm_instruction = "CRITICAL: Exactly 2 of these 12 messages MUST be Account-Based Marketing (ABM) posts dedicated to the specific targets provided in the ABM profiles. These ABM messages should favorably mention the target, address their specific pain points, and subtly position {client_name} as the solution to encourage a meeting."
 
         # --- STEP 3: Overarching Strategy ---
         print("Gemini Step 3: Developing 12 overarching messages...")
@@ -173,12 +171,19 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
             Theme for this post: "{message}"
             
             Generate a LinkedIn post around this theme that delivers practical advice and/or example(s) throughout the post, culminating 
-            in a succinct conclusion. INCORPORATE ELEMENTS FROM APPROVED POSTS AND AVOID ELEMENTS FROM REJECTED POSTS.
+            in a succinct conclusion. INCORPORATE ELEMENTS FROM APPROVED POSTS AND STRICTLY ADHERE TO THE CLIENT'S REVISIONS AND FEEDBACK IF AVAILABLE. DO NOT REPEAT PAST MISTAKES.
             
-            If this theme mentions an ABM target, strictly follow the ingress strategy from their profile, mention them favorably, and structure the post to naturally encourage them to reach out or accept a meeting with {client_name}.
+            ONLY IF THIS THEME MENTIONS AN ABM TARGET should you strictly follow the ingress strategy from their profile, mention them favorably, and structure the post to naturally encourage them to reach out or accept a meeting with {client_name}.
             
             The example should be rooted in {client_name}'s real or PLAUSIBLY real experiences.
-            Ensure you strictly apply a snappy, succinct writing style as we analyzed in the previous step.
+            Ensure you strictly apply a snappy, succinct writing style as we analyzed in the previous step. 
+
+            Anatomy of a great post:
+            The post has one clear intellectual point that every component of the post is structured around: the hook hints at, introduces, or summarizes the One Main Idea, and the body fleshes it out with a valuable payoff. The post is cohesively written such that a reader skimming it is able to easily follow the narrative arc of the post and glean the One Main Idea.
+            Do not address the reader directly in the hook in the body of the post because it:
+            1. can feel preachy
+            2. presumes that the LinkedIn algorithm is working perfectly and serving content to the exact right people it's supposed to, which is definitely not the case in 2026
+            3. Is a common behavior that people new to posting on LI do, which is maybe not the best association to have with our content
             """
             response_5 = chat.send_message(prompt_5)
             
@@ -194,7 +199,7 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
         except Exception as e:
             print(f"Failed to delete {f.name}: {e}")
 
-def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, blk_text, abm_text):
+def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, feed_text, abm_text):
     print("Initializing GPT-5 Chat Session...")
     messages = [{"role": "system", "content": "You are a professional LinkedIn ghostwriter."}]
     
@@ -229,17 +234,12 @@ def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, b
             out_file.write(f"--- STEP 1.1: APPROVED POSTS ANALYSIS ---\n{resp_1a_text}\n\n")
 
         # --- STEP 1.2 ---
-        if blk_text:
-            print("GPT-5 Step 1.2: Analyzing Rejected Posts...")
-            prompt_1b = """
-            I am now attaching files containing LinkedIn posts that this client has REJECTED.
-            Thoroughly analyze these rejected posts. Contrast them with the approved ones. What specific content inaccuracies, tones, cliches, or formatting choices must we strictly AVOID moving forward?
-            """
-            messages.append({"role": "user", "content": prompt_1b + f"\n\nREJECTED POSTS:\n{blk_text}"})
+        if feed_text:
+            print("GPT-5 Step 1.2: Analyzing Client Feedback & Revisions...")
+            messages.append({"role": "user", "content": "Thoroughly analyze these drafts containing the client's direct revisions and feedback. Pay close attention to their corrections and rules. You must prioritize understanding and respecting this feedback for all future posts." + f"\n\nCLIENT FEEDBACK & REVISIONS:\n{feedback_text}"})
             resp_1b = openai_client.chat.completions.create(model="gpt-5", messages=messages)
-            resp_1b_text = resp_1b.choices[0].message.content
-            messages.append({"role": "assistant", "content": resp_1b_text})
-            out_file.write(f"--- STEP 1.2: REJECTED POSTS ANALYSIS (AVOID) ---\n{resp_1b_text}\n\n")
+            messages.append({"role": "assistant", "content": resp_1b.choices[0].message.content})
+            out_file.write(f"--- STEP 1.2: CLIENT FEEDBACK ANALYSIS ---\n{resp_1b.choices[0].message.content}\n\n")
 
         # --- STEP 2 ---
         print("GPT-5 Step 2: Analyzing ICP...")
@@ -302,7 +302,7 @@ def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, b
             Theme for this post: "{message}"
             
             Generate a LinkedIn post around this theme that delivers practical advice and/or example(s) throughout the post, culminating 
-            in a succinct conclusion. INCORPORATE ELEMENTS FROM APPROVED POSTS AND AVOID ELEMENTS FROM REJECTED POSTS.
+            in a succinct conclusion. INCORPORATE ELEMENTS FROM APPROVED POSTS AND STRICTLY ADHERE TO THE CLIENT'S REVISIONS AND FEEDBACK. DO NOT REPEAT PAST MISTAKES.
             
             If this theme mentions an ABM target, strictly follow the ingress strategy from their profile, mention them favorably, and structure the post to naturally encourage them to reach out or accept a meeting with {client_name}.
             
@@ -319,7 +319,7 @@ def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, b
             out_file.write(f"{resp_5_text}\n\n")
             out_file.write("*" * 50 + "\n\n")
 
-def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text, blk_text, abm_text):
+def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text, feed_text, abm_text):
     print("Initializing Claude Chat Session...")
     messages = []
     sys_prompt = "You are a professional LinkedIn ghostwriter."
@@ -359,17 +359,12 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
             time.sleep(60)
 
         # --- STEP 1.2 ---
-        if blk_text:
-            print("Claude Step 1.2: Analyzing Rejected Posts...")
-            prompt_1b = """
-            I am now attaching files containing LinkedIn posts that this client has REJECTED.
-            Thoroughly analyze these rejected posts. Contrast them with the approved ones. What specific content inaccuracies, tones, cliches, or formatting choices must we strictly AVOID moving forward?
-            """
-            messages.append({"role": "user", "content": prompt_1b + f"\n\nREJECTED POSTS:\n{blk_text}"})
+        if feed_text:
+            print("Claude Step 1.2: Analyzing Client Feedback & Revisions...")
+            messages.append({"role": "user", "content": "Thoroughly analyze these drafts containing the client's direct revisions and feedback. Pay close attention to their corrections and rules. You must prioritize understanding and respecting this feedback for all future posts." + f"\n\nCLIENT FEEDBACK & REVISIONS:\n{feedback_text}"})
             resp_1b = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
-            resp_1b_text = resp_1b.content[0].text
-            messages.append({"role": "assistant", "content": resp_1b_text})
-            out_file.write(f"--- STEP 1.2: REJECTED POSTS ANALYSIS (AVOID) ---\n{resp_1b_text}\n\n")
+            messages.append({"role": "assistant", "content": resp_1b.content[0].text})
+            out_file.write(f"--- STEP 1.2: CLIENT FEEDBACK ANALYSIS ---\n{resp_1b.content[0].text}\n\n")
             print("Waiting 60 seconds to respect Anthropic rate limits...")
             time.sleep(60)
 
@@ -441,7 +436,7 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
             Theme for this post: "{message}"
             
             Generate a LinkedIn post around this theme that delivers practical advice and/or example(s) throughout the post, culminating 
-            in a succinct conclusion. INCORPORATE ELEMENTS FROM APPROVED POSTS AND AVOID ELEMENTS FROM REJECTED POSTS.
+            in a succinct conclusion. INCORPORATE ELEMENTS FROM APPROVED POSTS AND STRICTLY ADHERE TO THE CLIENT'S REVISIONS AND FEEDBACK. DO NOT REPEAT PAST MISTAKES.
             
             If this theme mentions an ABM target, strictly follow the ingress strategy from their profile, mention them favorably, and structure the post to naturally encourage them to reach out or accept a meeting with {client_name}.
             
@@ -459,14 +454,14 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
             out_file.write("*" * 50 + "\n\n")
             
             # Additional sleep after each post to avoid Anthropic rate limits
-            print("Waiting 20 seconds to respect Anthropic rate limits...")
-            time.sleep(20)
+            print("Waiting 60 seconds to respect Anthropic rate limits...")
+            time.sleep(60)
 
 def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice="All (Ensemble)"):
     directory_path = f"./client_data/{company_keyword}"
     output_path = os.path.join(directory_path, "output")
     accepted_path = os.path.join(directory_path, "accepted")
-    blocked_path = os.path.join(directory_path, "rejected")
+    feedback_path = os.path.join(directory_path, "feedback")
     abm_path = os.path.join(directory_path, "abm_profiles")
     
     google_output_filename = f"{company_keyword}_gemini_posts.md"
@@ -483,52 +478,72 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
     if not os.path.exists(directory_path):
         print(f"Error: Directory '{directory_path}' not found.")
         return
+
+    # --- ADDED MYDEI INTEGRATION HERE ---
+    os.makedirs(abm_path, exist_ok=True)
+    print("Calling Mydei to dynamically generate ABM Briefing...")
+    mydei = Mydei()
+    abm_briefing = mydei.generate_abm_briefing(company_keyword)
+    
+    # Clean out old ABM profiles
+    for f in os.listdir(abm_path):
+        filepath = os.path.join(abm_path, f)
+        if os.path.isfile(filepath):
+            os.remove(filepath)
+            
+    if "NO ABM TARGETS FOUND" not in abm_briefing:
+        print("Mydei found ABM targets. Saving to briefing file...")
+        with open(os.path.join(abm_path, "mydei_briefing.md"), "w", encoding="utf-8") as f:
+            f.write(abm_briefing)
+    else:
+        print("Mydei found no ABM targets. Proceeding without ABM posts.")
+    # -------------------------------------
     
     # 1. Load context based on model choice
-    base_files, accepted_files, blocked_files, abm_files = [], [], [], []
-    local_context, acc_posts, blk_posts, abm_posts = "", "", "", ""
+    base_files, accepted_files, feedback_files, abm_files = [], [], [], []
+    local_context, acc_posts, feed_files, abm_posts = "", "", "", ""
     
     if model_choice in ["All (Ensemble)", "Gemini 3.1 Pro"]:
         base_files = upload_and_wait(directory_path, google_client, skip_files=[f for f in os.listdir(directory_path) if f.startswith(company_keyword)])
         accepted_files = upload_and_wait(accepted_path, google_client, skip_files=[])
-        blocked_files = upload_and_wait(blocked_path, google_client, skip_files=[])
+        feedback_files = upload_and_wait(feedback_path, google_client, skip_files=[])
         abm_files = upload_and_wait(abm_path, google_client, skip_files=[])
         
     if model_choice in ["All (Ensemble)", "GPT-5", "Claude Opus 4.6"]:
         local_context = get_local_context(directory_path, skip_files=[f for f in os.listdir(directory_path) if f.startswith(company_keyword)])
         acc_posts = "\n--- APPROVED POSTS ---\n" + get_local_context(accepted_path, skip_files=[]) if os.path.exists(accepted_path) else ""
-        blk_posts = "\n--- REJECTED POSTS ---\n" + get_local_context(blocked_path, skip_files=[]) if os.path.exists(blocked_path) else ""
-        abm_posts = "\n--- ABM TARGET PROFILES ---\n" + get_local_context(abm_path, skip_files=[]) if os.path.exists(abm_path) else ""
+        feed_files = "\n--- POST COMMENTS AND FEEDBACK ---\n" + get_local_context(feedback_path, skip_files=[]) if os.path.exists(feedback_path) else ""
+        
+        # Modified strictly to only append context string if actual ABM target content exists 
+        abm_context = get_local_context(abm_path, skip_files=[]) if os.path.exists(abm_path) else ""
+        abm_posts = "\n--- ABM TARGET PROFILES ---\n" + abm_context if abm_context.strip() else ""
 
     # 2. Execution Routing
     if model_choice == "Gemini 3.1 Pro":
         print(f"Running Solo Post Generation with Gemini for {client_name}...")
-        run_gemini_posts_workflow(client_name, google_output_filepath, base_files, accepted_files, blocked_files, abm_files)
-        # Duplicate to final path so GUI loads it easily
+        run_gemini_posts_workflow(client_name, google_output_filepath, base_files, accepted_files, feedback_files, abm_files)
         import shutil
         shutil.copy(google_output_filepath, final_output_filepath)
         
     elif model_choice == "GPT-5":
         print(f"Running Solo Post Generation with GPT-5 for {client_name}...")
-        run_gpt5_posts_workflow(client_name, gpt_output_filepath, local_context, acc_posts, blk_posts, abm_posts)
+        run_gpt5_posts_workflow(client_name, gpt_output_filepath, local_context, acc_posts, feed_files, abm_posts)
         import shutil
         shutil.copy(gpt_output_filepath, final_output_filepath)
         
     elif model_choice == "Claude Opus 4.6":
         print(f"Running Solo Post Generation with Claude for {client_name}...")
-        run_claude_posts_workflow(client_name, claude_output_filepath, local_context, acc_posts, blk_posts, abm_posts)
+        run_claude_posts_workflow(client_name, claude_output_filepath, local_context, acc_posts, feed_files, abm_posts)
         import shutil
         shutil.copy(claude_output_filepath, final_output_filepath)
         
     else:
-        # Full Ensemble Mode WITH SYNTHESIS
         print(f"Triggering Parallel Posts Ensemble for {client_name}...")
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            f_gemini = executor.submit(run_gemini_posts_workflow, client_name, google_output_filepath, base_files, accepted_files, blocked_files, abm_files)
-            f_gpt = executor.submit(run_gpt5_posts_workflow, client_name, gpt_output_filepath, local_context, acc_posts, blk_posts, abm_posts)
-            f_claude = executor.submit(run_claude_posts_workflow, client_name, claude_output_filepath, local_context, acc_posts, blk_posts, abm_posts)
+            f_gemini = executor.submit(run_gemini_posts_workflow, client_name, google_output_filepath, base_files, accepted_files, feedback_files, abm_files)
+            f_gpt = executor.submit(run_gpt5_posts_workflow, client_name, gpt_output_filepath, local_context, acc_posts, feed_files, abm_posts)
+            f_claude = executor.submit(run_claude_posts_workflow, client_name, claude_output_filepath, local_context, acc_posts, feedk_files, abm_posts)
             
-            # Wait for all generators to finish before proceeding to synthesis
             f_gemini.result()
             f_gpt.result()
             f_claude.result()
@@ -536,7 +551,6 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
         print("Ensemble generation complete. Synthesizing posts using Cyrene...")
         
         try:
-            # 1. Read the drafted outputs from the individual files
             with open(google_output_filepath, "r", encoding="utf-8") as f:
                 gemini_draft = f.read()
             with open(gpt_output_filepath, "r", encoding="utf-8") as f:
@@ -544,18 +558,15 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
             with open(claude_output_filepath, "r", encoding="utf-8") as f:
                 claude_draft = f.read()
             
-            # Package them into the dict format Cyrene expects
             raw_drafts = {
                 "Gemini 3.1 Pro": gemini_draft,
                 "GPT-5": gpt_draft,
                 "Claude Opus 4.6": claude_draft
             }
             
-            # 2. Use Cyrene to synthesize drafts
             cyrene = Cyrene()
             synthesis = cyrene.synthesize_post(raw_drafts=raw_drafts)
 
-            # 3. Write final synthesized output to the final output file
             with open(final_output_filepath, "w", encoding="utf-8") as out_file:
                 out_file.write(f"# SYNTHESIZED MASTER POSTS: {client_name.upper()}\n\n")
                 out_file.write("## Synthesis Strategy\n")
@@ -567,7 +578,6 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
             
         except Exception as e:
             print(f"Synthesis failed with error: {e}")
-            # Fallback to the original placeholder if something goes wrong during synthesis
             with open(final_output_filepath, "w", encoding="utf-8") as out_file:
                 out_file.write(f"# ENSEMBLE GENERATION COMPLETE: {client_name.upper()}\n\n")
                 out_file.write(f"Synthesis failed due to error: {e}\n\n")

@@ -48,7 +48,6 @@ def upload_and_wait(directory, client, skip_files):
     
     for filename in os.listdir(directory):
         filepath = os.path.join(directory, filename)
-        
         if filename.lower().endswith(".docx"):
             continue
             
@@ -65,382 +64,286 @@ def upload_and_wait(directory, client, skip_files):
         
     return uploaded_files
 
-def extract_sections_1_and_2(client_name: str, base_files: list) -> str:
-    """
-    One Gemini call: from base files (profile + transcripts), produce only
-    Section 1 (The Client) and Section 2 (ICP). Used to orient Castorice so
-    no separate industry_hint file is needed.
-    """
-    if not base_files:
-        return ""
-    print("Extracting Sections 1 and 2 (Client + ICP) for Castorice...")
-    try:
-        prompt = f"""
-        From the attached files (LinkedIn profile and/or interview transcripts for {client_name}),
-        produce ONLY the following two sections in Markdown. Be concise but specific.
-
-        ## 1. The Client
-        [Professional background, role, notable achievements]
-
-        ## 2. The Ideal Customer Profile (ICP)
-        [Who they sell to, pain points, desires, psychological triggers]
-
-        Output nothing else. This will be used to guide industry research for a ghostwriter briefing.
-        """
-        response = google_client.models.generate_content(
-            model="gemini-3.1-pro-preview",
-            contents=[prompt] + base_files,
-            config=types.GenerateContentConfig(temperature=0.3),
-        )
-        return (response.text or "").strip()
-    except Exception as e:
-        print(f"Extract Sections 1+2 failed: {e}")
-        return ""
-
-def run_gemini_workflow(client_name, output_filepath, base_files, accepted_posts, blocked_posts, domain_primer):
-
-    print("Files ready. Initializing 3.1 Pro Chat Session...")
+def run_gemini_briefing_workflow(client_name, company_keyword, output_filepath, base_files, blocked_files):
+    print("Files ready. Initializing Gemini Chat Session...")
+    all_uploaded_files = base_files + blocked_files
+    
     chat = google_client.chats.create(
         model="gemini-3.1-pro-preview",
-        config=types.GenerateContentConfig(temperature=0.5)
+        config=types.GenerateContentConfig(temperature=0.7)
     )
 
-    full_briefing_content = ""
+    with open(output_filepath, "w", encoding="utf-8") as out_file:
+        out_file.write(f"RUAN MEI BRIEFING (GEMINI): {client_name.upper()}\n")
+        out_file.write("="*50 + "\n\n")
 
-    try:
-        with open(output_filepath, "w", encoding="utf-8") as out_file:
-            header = f"#Briefing: {client_name.upper()}\n\n"
-            out_file.write(header)
-            full_briefing_content += header
+        print("\nGemini Step 1: Feeding base context...")
+        prompt_1 = f"""
+        I am attaching several files. Among these are interview transcripts between our organization Virio 
+        and a startup founder/executive named {client_name}, as well as a PDF export of their LinkedIn profile. 
+        Comprehend the LinkedIn profile and these interview transcripts thoroughly before we proceed.
+        """
+        response_1 = chat.send_message([prompt_1] + base_files)
+        out_file.write(f"--- STEP 1: CONTEXT INGESTION ---\n{response_1.text}\n\n")
 
-            # --- STEP 1: Context Ingestion ---
-            print("\nGemini Step 1: Feeding context...")
-            prompt_1 = f"""
-            I am attaching several files: a PDF export of the LinkedIn profile for {client_name}, 
-            and transcripts of past interviews conducted between our content agency (Virio) and them.
-            
-            Your task is to help me build a comprehensive "Ghostwriter Briefing Document" step-by-step. 
-            This document will be handed to a new ghostwriter who has zero prior knowledge of the client. 
-            
-            First, acknowledge that you have read and comprehended the files. Do not generate the briefing yet.
+        if blocked_files:
+            print("Gemini Step 1.1: Analyzing Rejected Posts...")
+            prompt_1a = """
+            I am attaching files containing LinkedIn posts this client has REJECTED.
+            What topics, angles, or tones does the client dislike? We must avoid pulling the interview in these directions.
             """
-            chat.send_message([prompt_1] + base_files)
+            response_1a = chat.send_message([prompt_1a] + blocked_files)
+            out_file.write(f"--- STEP 1.1: AVOIDANCE TERRITORY (REJECTED POSTS) ---\n{response_1a.text}\n\n")
 
-            # --- STEP 1.1: Accepted Posts Analysis ---
-            if accepted_posts:
-                print("Gemini Step 1.1: Processing Accepted Posts...")
-                prompt_1a = """
-                I am attaching LinkedIn posts this client has APPROVED. 
-                Analyze them to understand the specific persona, topics, and angles the client likes to project publicly. 
-                Acknowledge receipt and summarize their preferred persona.
-                """
-                chat.send_message([prompt_1a] + accepted_posts)
+        print("Gemini Step 2: Analyzing ICP...")
+        prompt_2 = f"First, what is {client_name}'s ideal customer profile? What is his/her product? How would his/her product and philosophies resonate with his/her ideal customer?"
+        response_2 = chat.send_message(prompt_2)
+        out_file.write(f"--- STEP 2: ICP & PRODUCT ANALYSIS ---\n{response_2.text}\n\n")
 
-            # --- STEP 1.2: Blocked Posts Analysis ---
-            if blocked_posts:
-                print("Gemini Step 1.2: Processing Rejected Posts...")
-                prompt_1b = """
-                I am attaching LinkedIn posts this client has REJECTED. 
-                Analyze them to understand what topics, tones, or angles we must avoid. 
-                Acknowledge receipt and summarize the "Do Not Cross" boundaries for this client.
-                """
-                chat.send_message([prompt_1b] + blocked_posts)
+        print("Gemini Step 3: Triggering Castorice for Domain Primer...")
+        castorice = Castorice(model_name="gemini-3.1-pro-preview")
+        domain_primer = castorice.generate_domain_primer(
+            client_name=client_name,
+            company_keyword=company_keyword,
+            client_context=response_1.text,
+            client_and_icp_summary=response_2.text
+        )
+        out_file.write(f"--- STEP 3: DOMAIN KNOWLEDGE PRIMER (CASTORICE) ---\n{domain_primer}\n\n")
 
-            # --- STEP 2: The Client & ICP ---
-            print("Gemini Step 2: Drafting Client Background & ICP...")
-            prompt_2 = f"""
-            Let's write the first two sections of the document. Use Markdown formatting.
-            
-            ## 1. The Client
-            Provide a crystal-clear breakdown of {client_name}'s professional background, notable achievements, and current role.
-            
-            ## 2. The Ideal Customer Profile (ICP)
-            Who exactly are they selling to? What are the ICP's pain points, desires, and psychological triggers?
-            """
-            response_2 = chat.send_message(prompt_2)
-            section_2 = response_2.text + "\n\n"
-            out_file.write(section_2)
-            full_briefing_content += section_2
+        print("Gemini Step 4: Generating Dynamic Interview Script...")
+        prompt_4 = f"""
+        Now, equip the ghostwriter for their next interview with {client_name}. 
+        Instead of a static list of questions, create a 'Dynamic Interview Pseudo-Script'. This should act as a conversational decision tree that guides the ghostwriter organically through the interview.
 
-            # --- STEP 2.5: Injecting Castorice Domain Primer ---
-            print("Gemini Step 2.5: Injecting Castorice Domain Knowledge Primer...")
-            section_3 = f"## 3. Domain Knowledge Primer\n{domain_primer}\n\n"
-            out_file.write(section_3)
-            full_briefing_content += section_3
+        CRITICAL INSTRUCTION: Ensure the topics and angles explored here are NET-NEW. Do NOT redundantly ask questions about stories, topics, or themes that have already been exhausted in the past transcripts.
 
-            # --- STEP 3: Content Strategy ---
-            print("Gemini Step 3: Drafting Content Strategy...")
-            prompt_3 = f"""
-            Now, generate the fourth section:
-            
-            ## 4. Content Strategy & Persona
-            How does {client_name} want to be perceived by their ICP? What is their unique philosophy, and how does their product/service naturally position itself as the solution?
-            Crucially, include a "Green Flags" (what they love) and "Red Flags" (what to strictly avoid based on rejected posts) subsection for the ghostwriter to keep in mind.
-            """
-            response_3 = chat.send_message(prompt_3)
-            section_3_out = response_3.text + "\n\n"
-            out_file.write(section_3_out)
-            full_briefing_content += section_3_out
-
-            # --- STEP 4: Previously Covered Ground ---
-            print("Gemini Step 4: Summarizing Past Interviews...")
-            prompt_4 = """
-            Next, generate the fifth section based strictly on the interview transcripts:
-            
-            ## 5. Previously Covered Ground
-            Provide thorough, structured summaries of the attached past interviews. What core stories, frameworks, and philosophies have we already extracted from them?
-            """
-            response_4 = chat.send_message(prompt_4)
-            section_4 = response_4.text + "\n\n"
-            out_file.write(section_4)
-            full_briefing_content += section_4
-
-            # --- STEP 5: Next Interview Strategy ---
-            print("Gemini Step 5: Drafting the Next Interview Playbook...")
-            prompt_5 = """
-            Finally, generate the most critical section for our new ghostwriter:
-            
-            ## 6. Next Interview Strategy (The Playbook)
-            Based on what we already know (and what we are missing from the transcripts), provide a strict strategy for the upcoming 1-hour interview. 
-            - Include the overarching goal of the next call.
-            - Provide 9-13 highly specific, probing questions the ghostwriter must ask to mine new, unseen stories or deeper tactical insights. 
-            - Include elaborate notes on how to steer the client if they start giving generic or "corporate" answers.
-            - Include a short subsection "How to Use Section 3 (Domain Knowledge Primer) in This Interview": instruct the ghostwriter to open with one Industry 101 point to build rapport, use the Jargon Cheat Sheet when the client uses technical terms, and deploy the Devil's Advocate questions when the conversation gets shallow or generic.
-            """
-            response_5 = chat.send_message(prompt_5)
-            section_5 = response_5.text + "\n\n"
-            out_file.write(section_5)
-            full_briefing_content += section_5
-
-    finally:
-        print("\nCleaning up files from Google servers...")
-        for f in base_files + accepted_posts + blocked_posts:
-            try:
-                google_client.files.delete(name=f.name)
-            except Exception as e:
-                print(f"Failed to delete {f.name}: {e}")
-            
-    print(f"Process complete! Sectioned Briefing saved to: {output_filepath}")
-    return full_briefing_content
-
-def run_gpt5_workflow(client_name, output_filepath, context, accepted_posts, blocked_posts, domain_primer):
-    """Executes the full prompt sequence in one pass for GPT-5."""
-    print("\nFeeding GPT context...")
-    full_prompt = f"""
-        I am attaching several files: a PDF export of the LinkedIn profile for {client_name}, 
-        and transcripts of past interviews conducted between our content agency (Virio) and them.
+        Format the script with the following sections:
         
-        Your task is to help me build a comprehensive "Ghostwriter Briefing Document" step-by-step. 
-        This document will be handed to a new ghostwriter who has zero prior knowledge of the client. 
+        ### Phase 1: The Opener
+        Provide ONE high-impact, open-ended opening question related to {company_keyword} or their recent shifts that forces the client off autopilot.
         
-        First, acknowledge that you have read and comprehended the files. Do not generate the briefing yet.
+        ### Phase 2: The Conversation Tree
+        Provide 6 distinct branching paths based on how the client answers the opener. Each path should have 6 follow-up questions.
+        ALL QUESTIONS SHOULD BE WRITTEN IN STRAIGHTFORWARD, COLLOQUIAL, NATURAL CONVERSATION LANGUAGE. Questions should extract storytelling x virality, hot takes x thought leadership opinions, and overall content that will increase the brand recognition and image of the client and their company.
+        FOR EACH QUESTION, PROVIDE THE RELEVANCE OF THE QUESTION TO THE CLIENT'S ICP.
 
-        Client: {client_name}
-        LinkedIn PDF export + Transcripts: {context}
+        ### Phase 3: Digging for Stories (The "Yes, and..." technique)
+        Provide 10 tactical follow-up prompts the ghostwriter can use at any time to transition from high-level philosophy into concrete, ghostwriting-ready anecdotes.
+        """
+        response_4 = chat.send_message(prompt_4)
+        out_file.write(f"--- STEP 4: DYNAMIC INTERVIEW SCRIPT ---\n{response_4.text}\n\n")
 
-        I am attaching LinkedIn posts this client has APPROVED. 
-        Analyze them to understand the specific persona, topics, and angles the client likes to project publicly. 
+        print("Gemini Step 5: Executive Polish...")
+        prompt_5 = "Review everything we've discussed. Synthesize it into a clean, executive summary."
+        response_5 = chat.send_message(prompt_5)
+        out_file.write(f"--- STEP 5: EXECUTIVE SUMMARY ---\n{response_5.text}\n\n")
 
-        ACCEPTED POSTS: {accepted_posts}
+    print("\nCleaning up files from Google servers...")
+    for f in all_uploaded_files:
+        try:
+            google_client.files.delete(name=f.name)
+        except Exception as e:
+            pass
 
-        I am attaching LinkedIn posts this client has REJECTED. 
-        Analyze them to understand what topics, tones, or angles we must avoid. 
-
-        REJECTED POSTS: {blocked_posts}
-
-        Let's write the first two sections of the document. Use Markdown formatting.
-        
-        ## 1. The Client
-        Provide a crystal-clear breakdown of {client_name}'s professional background, notable achievements, and current role.
-        
-        ## 2. The Ideal Customer Profile (ICP)
-        Who exactly are they selling to? What are the ICP's pain points, desires, and psychological triggers?
-
-        Next, output the following Domain Knowledge Primer verbatim, but format it cleanly under the header:
-        ## 3. Domain Knowledge Primer
-        {domain_primer}
-
-        Now, generate the fourth section:
-        
-        ## 4. Content Strategy & Persona
-        How does {client_name} want to be perceived by their ICP? What is their unique philosophy, and how does their product/service naturally position itself as the solution?
-        Crucially, include a "Green Flags" (what they love) and "Red Flags" (what to strictly avoid based on rejected posts) subsection for the ghostwriter to keep in mind.
-
-        Next, generate the fifth section based strictly on the interview transcripts:
-        
-        ## 5. Previously Covered Ground
-        Provide thorough, structured summaries of the attached past interviews. What core stories, frameworks, and philosophies have we already extracted from them?
-
-        Finally, generate the most critical section for our new ghostwriter:
-        
-        ## 6. Next Interview Strategy (The Playbook)
-        Based on what we already know (and what we are missing from the transcripts), provide a strict strategy for the upcoming 1-hour interview. 
-        - Include the overarching goal of the next call.
-        - Provide 9-13 highly specific, probing questions the ghostwriter must ask to mine new, unseen stories or deeper tactical insights. 
-        - Include elaborate notes on how to steer the client if they start giving generic or "corporate" answers.
-        - Include a short subsection "How to Use Section 3 (Domain Knowledge Primer) in This Interview": instruct the ghostwriter to open with one Industry 101 point to build rapport, use the Jargon Cheat Sheet when the client uses technical terms, and deploy the Devil's Advocate questions when the conversation gets shallow or generic.
-    """
-    response = openai_client.chat.completions.create(
-        model="gpt-5",
-        messages=[{"role": "system", "content": "You are a professional ghostwriting strategist."},
-                {"role": "user", "content": full_prompt}]
-    )
-    
-    gpt_content = response.choices[0].message.content
+def run_gpt5_briefing_workflow(client_name, company_keyword, output_filepath, base_text, blk_text):
+    print("Initializing GPT-5 Chat Session...")
+    messages = [{"role": "system", "content": "You are a professional LinkedIn ghostwriter and interviewer."}]
     
     with open(output_filepath, "w", encoding="utf-8") as out_file:
-        out_file.write(f"# GPT Draft Briefing: {client_name.upper()}\n\n")
-        out_file.write(gpt_content)
-        
-    print(f"GPT draft saved to: {output_filepath}")
-    return gpt_content
+        out_file.write(f"RUAN MEI BRIEFING (GPT-5): {client_name.upper()}\n")
+        out_file.write("="*50 + "\n\n")
 
-def run_claude_workflow(client_name, output_filepath, context, accepted_posts, blocked_posts, domain_primer):
-    """Executes the full prompt sequence in one pass for Claude 4 Opus."""
-    print("\nFeeding Claude context...")
-    full_prompt = f"""
-        I am attaching several files: a PDF export of the LinkedIn profile for {client_name}, 
-        and transcripts of past interviews conducted between our content agency (Virio) and them.
-        
-        Your task is to help me build a comprehensive "Ghostwriter Briefing Document" step-by-step. 
-        This document will be handed to a new ghostwriter who has zero prior knowledge of the client. 
-        
-        Client: {client_name}
-        LinkedIn PDF export + Transcripts: {context}
+        print("\nGPT-5 Step 1: Feeding context...")
+        prompt_1 = f"Comprehend the LinkedIn profile and interview transcripts for {client_name}."
+        messages.append({"role": "user", "content": prompt_1 + f"\n\nFILES:\n{base_text}"})
+        resp_1 = openai_client.chat.completions.create(model="gpt-5", messages=messages)
+        messages.append({"role": "assistant", "content": resp_1.choices[0].message.content})
+        out_file.write(f"--- STEP 1: CONTEXT INGESTION ---\n{resp_1.choices[0].message.content}\n\n")
 
-        I am attaching any LinkedIn posts this client has APPROVED. 
-        ACCEPTED POSTS: {accepted_posts}
+        if blk_text:
+            print("GPT-5 Step 1.1: Analyzing Rejected Posts...")
+            messages.append({"role": "user", "content": "Review these REJECTED posts. What topics or angles does the client dislike? We must avoid these in future interviews." + f"\n\nREJECTED POSTS:\n{blk_text}"})
+            resp_1a = openai_client.chat.completions.create(model="gpt-5", messages=messages)
+            messages.append({"role": "assistant", "content": resp_1a.choices[0].message.content})
+            out_file.write(f"--- STEP 1.1: AVOIDANCE TERRITORY (REJECTED POSTS) ---\n{resp_1a.choices[0].message.content}\n\n")
 
-        I am attaching any LinkedIn posts this client has REJECTED. 
-        REJECTED POSTS: {blocked_posts}
+        print("GPT-5 Step 2: Analyzing ICP...")
+        messages.append({"role": "user", "content": f"What is {client_name}'s ideal customer profile and product?"})
+        resp_2 = openai_client.chat.completions.create(model="gpt-5", messages=messages)
+        messages.append({"role": "assistant", "content": resp_2.choices[0].message.content})
+        out_file.write(f"--- STEP 2: ICP & PRODUCT ANALYSIS ---\n{resp_2.choices[0].message.content}\n\n")
 
-        Let's write the first two sections of the document. Use Markdown formatting.
+        print("GPT-5 Step 3: Triggering Castorice for Domain Primer...")
+        castorice = Castorice()
+        domain_primer = castorice.generate_domain_primer(client_name, company_keyword, resp_1.choices[0].message.content, resp_2.choices[0].message.content)
+        messages.append({"role": "assistant", "content": f"[SYSTEM INJECTED DOMAIN KNOWLEDGE]:\n{domain_primer}"})
+        out_file.write(f"--- STEP 3: DOMAIN KNOWLEDGE PRIMER (CASTORICE) ---\n{domain_primer}\n\n")
+
+        print("GPT-5 Step 4: Generating Dynamic Interview Script...")
+        prompt_4 = f"""
+        Now, equip the ghostwriter for their next interview with {client_name}. 
+        Instead of a static list of questions, create a 'Dynamic Interview Pseudo-Script'. This should act as a conversational decision tree that guides the ghostwriter organically through the interview.
+
+        CRITICAL INSTRUCTION: Ensure the topics and angles explored here are NET-NEW. Do NOT redundantly ask questions about stories, topics, or themes that have already been exhausted in the past transcripts.
+
+        Format the script with the following sections:
         
-        ## 1. The Client
-        Provide a crystal-clear breakdown of {client_name}'s professional background, notable achievements, and current role.
+        ### Phase 1: The Opener
+        Provide ONE high-impact, open-ended opening question related to {company_keyword} or their recent shifts that forces the client off autopilot.
         
-        ## 2. The Ideal Customer Profile (ICP)
-        Who exactly are they selling to? What are the ICP's pain points, desires, and psychological triggers?
+        ### Phase 2: The Conversation Tree
+        Provide 3 distinct branching paths based on how the client answers the opener. 
+        - IF the client focuses on [Topic A], THEN the ghostwriter should pivot and ask: [Specific Follow-up Question].
+        - IF the client focuses on [Topic B], THEN the ghostwriter should pivot and ask: [Specific Follow-up Question].
+        - IF the client gives a short/generic answer, THEN use this fallback probe: [Specific Follow-up Question].
 
-        Next, output the following Domain Knowledge Primer exactly as provided under the header:
-        ## 3. Domain Knowledge Primer
-        {domain_primer}
+        ### Phase 3: Digging for Stories (The "Yes, and..." technique)
+        Provide 3 tactical follow-up prompts the ghostwriter can use at any time to transition from high-level philosophy into concrete, ghostwriting-ready anecdotes.
 
-        Now, generate the fourth section:
-        
-        ## 4. Content Strategy & Persona
-        How does {client_name} want to be perceived by their ICP? What is their unique philosophy, and how does their product/service naturally position itself as the solution?
-        Crucially, include a "Green Flags" (what they love) and "Red Flags" (what to strictly avoid based on rejected posts) subsection for the ghostwriter to keep in mind.
+        ### Phase 4: The Anchor
+        Provide one closing question designed to reliably tie the conversation back to their core product and Ideal Customer Profile (ICP).
+        """
+        messages.append({"role": "user", "content": prompt_4})
+        resp_4 = openai_client.chat.completions.create(model="gpt-5", messages=messages)
+        messages.append({"role": "assistant", "content": resp_4.choices[0].message.content})
+        out_file.write(f"--- STEP 4: DYNAMIC INTERVIEW SCRIPT ---\n{resp_4.choices[0].message.content}\n\n")
 
-        Next, generate the fifth section based strictly on the interview transcripts:
-        
-        ## 5. Previously Covered Ground
-        Provide thorough, structured summaries of the attached past interviews. What core stories, frameworks, and philosophies have we already extracted from them?
+        print("GPT-5 Step 5: Executive Polish...")
+        messages.append({"role": "user", "content": "Synthesize everything into a clean, executive summary."})
+        resp_5 = openai_client.chat.completions.create(model="gpt-5", messages=messages)
+        out_file.write(f"--- STEP 5: EXECUTIVE SUMMARY ---\n{resp_5.choices[0].message.content}\n\n")
 
-        Finally, generate the most critical section for our new ghostwriter:
-        
-        ## 6. Next Interview Strategy (The Playbook)
-        Based on what we already know (and what we are missing from the transcripts), provide a strict strategy for the upcoming 1-hour interview. 
-        - Include the overarching goal of the next call.
-        - Provide 15-20 highly specific, probing questions (WRITTEN IN COLLOQUIAL LANGUAGE) the ghostwriter must ask to mine new, unseen stories or deeper tactical insights. 
-        - For each question, provide 5-10 highly specific, probing follow-up questions (WRITTEN IN COLLOQUIAL LANGUAGE).
-        - Include elaborate notes on how to steer the client if they start giving generic or "corporate" answers.
-        - Include a short subsection "How to Use Section 3 (Domain Knowledge Primer) in This Interview": instruct the ghostwriter to open with one Industry 101 point to build rapport, use the Jargon Cheat Sheet when the client uses technical terms, and deploy the Devil's Advocate questions when the conversation gets shallow or generic.
-    """
-    response = anthropic_client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=8192,
-        messages=[{"role": "user", "content": full_prompt}]
-    )
-    
-    claude_content = response.content[0].text
+def run_claude_briefing_workflow(client_name, company_keyword, output_filepath, base_text, blk_text):
+    print("Initializing Claude Chat Session...")
+    messages = []
+    sys_prompt = "You are a professional LinkedIn ghostwriter and interviewer."
     
     with open(output_filepath, "w", encoding="utf-8") as out_file:
-        out_file.write(f"# Claude Draft Briefing: {client_name.upper()}\n\n")
-        out_file.write(claude_content)
-        
-    print(f"Claude draft saved to: {output_filepath}")
-    return claude_content
+        out_file.write(f"RUAN MEI BRIEFING (CLAUDE): {client_name.upper()}\n")
+        out_file.write("="*50 + "\n\n")
 
-# --- MAIN ORCHESTRATOR ---
+        print("\nClaude Step 1: Feeding context...")
+        prompt_1 = f"Comprehend the LinkedIn profile and interview transcripts for {client_name} thoroughly."
+        messages.append({"role": "user", "content": prompt_1 + f"\n\nFILES:\n{base_text}"})
+        resp_1 = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
+        messages.append({"role": "assistant", "content": resp_1.content[0].text})
+        out_file.write(f"--- STEP 1: CONTEXT INGESTION ---\n{resp_1.content[0].text}\n\n")
+
+        if blk_text:
+            print("Claude Step 1.1: Analyzing Rejected Posts...")
+            messages.append({"role": "user", "content": "Review these REJECTED posts. What topics or angles does the client dislike? We must avoid these in future interviews." + f"\n\nREJECTED POSTS:\n{blk_text}"})
+            resp_1a = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
+            messages.append({"role": "assistant", "content": resp_1a.content[0].text})
+            out_file.write(f"--- STEP 1.1: AVOIDANCE TERRITORY (REJECTED POSTS) ---\n{resp_1a.content[0].text}\n\n")
+
+        print("Claude Step 2: Analyzing ICP...")
+        messages.append({"role": "user", "content": f"What is {client_name}'s ideal customer profile and product?"})
+        resp_2 = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
+        messages.append({"role": "assistant", "content": resp_2.content[0].text})
+        out_file.write(f"--- STEP 2: ICP & PRODUCT ANALYSIS ---\n{resp_2.content[0].text}\n\n")
+
+        print("Claude Step 3: Triggering Castorice for Domain Primer...")
+        castorice = Castorice()
+        domain_primer = castorice.generate_domain_primer(client_name, company_keyword, resp_1.content[0].text, resp_2.content[0].text)
+        messages.append({"role": "assistant", "content": f"[SYSTEM INJECTED DOMAIN KNOWLEDGE]:\n{domain_primer}"})
+        out_file.write(f"--- STEP 3: DOMAIN KNOWLEDGE PRIMER (CASTORICE) ---\n{domain_primer}\n\n")
+
+        print("Claude Step 4: Generating Dynamic Interview Script...")
+        prompt_4 = f"""
+        Now, equip the ghostwriter for their next interview with {client_name}. 
+        Instead of a static list of questions, create a 'Dynamic Interview Pseudo-Script'. This should act as a conversational decision tree that guides the ghostwriter organically through the interview.
+
+        CRITICAL INSTRUCTION: Ensure the topics and angles explored here are NET-NEW. Do NOT redundantly ask questions about stories, topics, or themes that have already been exhausted in the past transcripts.
+
+        Format the script with the following sections:
+        
+        ### Phase 1: The Opener
+        Provide ONE high-impact, open-ended opening question related to {company_keyword} or their recent shifts that forces the client off autopilot.
+        
+        ### Phase 2: The Conversation Tree
+        Provide 3 distinct branching paths based on how the client answers the opener. 
+        - IF the client focuses on [Topic A], THEN the ghostwriter should pivot and ask: [Specific Follow-up Question].
+        - IF the client focuses on [Topic B], THEN the ghostwriter should pivot and ask: [Specific Follow-up Question].
+        - IF the client gives a short/generic answer, THEN use this fallback probe: [Specific Follow-up Question].
+
+        ### Phase 3: Digging for Stories (The "Yes, and..." technique)
+        Provide 3 tactical follow-up prompts the ghostwriter can use at any time to transition from high-level philosophy into concrete, ghostwriting-ready anecdotes.
+
+        ### Phase 4: The Anchor
+        Provide one closing question designed to reliably tie the conversation back to their core product and Ideal Customer Profile (ICP).
+        """
+        messages.append({"role": "user", "content": prompt_4})
+        resp_4 = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
+        messages.append({"role": "assistant", "content": resp_4.content[0].text})
+        out_file.write(f"--- STEP 4: DYNAMIC INTERVIEW SCRIPT ---\n{resp_4.content[0].text}\n\n")
+
+        print("Claude Step 5: Executive Polish...")
+        messages.append({"role": "user", "content": "Synthesize everything into a clean, executive summary."})
+        resp_5 = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
+        out_file.write(f"--- STEP 5: EXECUTIVE SUMMARY ---\n{resp_5.content[0].text}\n\n")
 
 def generate_briefing(client_name, company_keyword, model_choice="All (Ensemble)"):
-
     directory_path = f"./client_data/{company_keyword}"
     output_path = os.path.join(directory_path, "output")
-    accepted_path = os.path.join(directory_path, "accepted")
     blocked_path = os.path.join(directory_path, "rejected")
     
-    google_output_filename = f"{company_keyword}_gemini_briefing.md"
-    google_output_filepath = os.path.join(output_path, google_output_filename)
-    gpt_output_filename = f"{company_keyword}_gpt_briefing.md"
-    gpt_output_filepath = os.path.join(output_path, gpt_output_filename)
-    claude_output_filename = f"{company_keyword}_claude_briefing.md"
-    claude_output_filepath = os.path.join(output_path, claude_output_filename)
+    os.makedirs(output_path, exist_ok=True)
     
-    final_output_filename = f"{company_keyword}_briefing.md"
-    final_output_filepath = os.path.join(output_path, final_output_filename)
+    google_output_filepath = os.path.join(output_path, f"{company_keyword}_gemini_briefing.md")
+    gpt_output_filepath = os.path.join(output_path, f"{company_keyword}_gpt_briefing.md")
+    claude_output_filepath = os.path.join(output_path, f"{company_keyword}_claude_briefing.md")
+    final_output_filepath = os.path.join(output_path, f"{company_keyword}_briefing.md")
 
-    print(f"Scanning directories for {client_name}...")
     if not os.path.exists(directory_path):
         print(f"Error: Directory '{directory_path}' not found.")
         return
 
-    # Upload base files once: used to extract Sections 1+2 for Castorice, and for Gemini workflow
-    skip_base = [f for f in os.listdir(directory_path) if f.startswith(company_keyword)]
-    base_files = upload_and_wait(directory_path, google_client, skip_files=skip_base)
-    sections_1_and_2 = extract_sections_1_and_2(client_name, base_files)
-
-    print("Requesting Castorice for domain research...")
-    researcher = Castorice()
-    temp_context = get_local_context(directory_path, skip_files=[])
-    domain_primer = researcher.generate_domain_primer(
-        client_name, company_keyword, temp_context, client_and_icp_summary=sections_1_and_2
-    )
-    primer_filepath = os.path.join(output_path, "castorice_domain_primer.txt")
-    with open(primer_filepath, "w", encoding="utf-8") as f:
-        f.write(domain_primer)
-    print("Castorice: Domain Knowledge Primer successfully generated and added to context directory.")
-
+    # 1. Load context
+    base_files, blocked_files = [], []
+    local_context, blk_posts = "", ""
+    
     if model_choice in ["All (Ensemble)", "Gemini 3.1 Pro"]:
-        acc_files = upload_and_wait(accepted_path, google_client, skip_files=[])
-        blk_files = upload_and_wait(blocked_path, google_client, skip_files=[])
-
+        base_files = upload_and_wait(directory_path, google_client, skip_files=[f for f in os.listdir(directory_path) if f.startswith(company_keyword)])
+        blocked_files = upload_and_wait(blocked_path, google_client, skip_files=[])
+        
     if model_choice in ["All (Ensemble)", "GPT-5", "Claude Opus 4.6"]:
-        local_context = get_local_context(directory_path, skip_files=skip_base)
-        acc_posts = "\n--- APPROVED POSTS ---\n" + get_local_context(accepted_path, skip_files=[])
-        blk_posts = "\n--- REJECTED POSTS ---\n" + get_local_context(blocked_path, skip_files=[])
+        local_context = get_local_context(directory_path, skip_files=[f for f in os.listdir(directory_path) if f.startswith(company_keyword)])
+        blk_posts = "\n--- REJECTED POSTS ---\n" + get_local_context(blocked_path, skip_files=[]) if os.path.exists(blocked_path) else ""
 
-    # 3. Execution Routing
     if model_choice == "Gemini 3.1 Pro":
-        print(f"Running Solo Briefing with Gemini for {client_name}...")
-        final_text = run_gemini_workflow(client_name, google_output_filepath, base_files, acc_files, blk_files, domain_primer)
-        
+        run_gemini_briefing_workflow(client_name, company_keyword, google_output_filepath, base_files, blocked_files)
+        final_output_filepath = google_output_filepath
     elif model_choice == "GPT-5":
-        print(f"Running Solo Briefing with GPT-5 for {client_name}...")
-        final_text = run_gpt5_workflow(client_name, gpt_output_filepath, local_context, acc_posts, blk_posts, domain_primer)
-        
+        run_gpt5_briefing_workflow(client_name, company_keyword, gpt_output_filepath, local_context, blk_posts)
+        final_output_filepath = gpt_output_filepath
     elif model_choice == "Claude Opus 4.6":
-        print(f"Running Solo Briefing with Claude for {client_name}...")
-        final_text = run_claude_workflow(client_name, claude_output_filepath, local_context, acc_posts, blk_posts, domain_primer)
-        
+        run_claude_briefing_workflow(client_name, company_keyword, claude_output_filepath, local_context, blk_posts)
+        final_output_filepath = claude_output_filepath
     else:
-        # Full Ensemble Mode
         print(f"Triggering Parallel Briefing Ensemble for {client_name}...")
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            f_gemini = executor.submit(run_gemini_workflow, client_name, google_output_filepath, base_files, acc_files, blk_files, domain_primer)
-            f_gpt = executor.submit(run_gpt5_workflow, client_name, gpt_output_filepath, local_context, acc_posts, blk_posts, domain_primer)
-            f_claude = executor.submit(run_claude_workflow, client_name, claude_output_filepath, local_context, acc_posts, blk_posts, domain_primer)
-
-            d_gemini = f_gemini.result()
-            d_gpt = f_gpt.result()
-            d_claude = f_claude.result()
+            f_gemini = executor.submit(run_gemini_briefing_workflow, client_name, company_keyword, google_output_filepath, base_files, blocked_files)
+            f_gpt = executor.submit(run_gpt5_briefing_workflow, client_name, company_keyword, gpt_output_filepath, local_context, blk_posts)
+            f_claude = executor.submit(run_claude_briefing_workflow, client_name, company_keyword, claude_output_filepath, local_context, blk_posts)
+            
+            f_gemini.result()
+            f_gpt.result()
+            f_claude.result()
+            
+        try:
+            with open(google_output_filepath, "r", encoding="utf-8") as f: d_gemini = f.read()
+            with open(gpt_output_filepath, "r", encoding="utf-8") as f: d_gpt = f.read()
+            with open(claude_output_filepath, "r", encoding="utf-8") as f: d_claude = f.read()
+        except Exception as e:
+            print(f"File read error during synthesis: {e}")
+            d_gemini, d_gpt, d_claude = "", "", ""
 
         print("Synthesis: Merging insights into Master Briefing...")
         synthesis_prompt = f"""
         You are the Senior Editor-in-Chief. Synthesize these 3 drafts for {client_name} into one Master Briefing.
         Ensure tactical depth, avoid generic AI language, and prioritize the most unique stories from the transcripts.
         Make sure the Domain Knowledge Primer remains fully intact as Section 3.
+        Make sure the Dynamic Interview Script (Conversation Tree) is merged into a cohesive, highly usable Section 4.
 
         DRAFT 1 (Gemini): {d_gemini}
         DRAFT 2 (GPT-5): {d_gpt}
@@ -453,16 +356,9 @@ def generate_briefing(client_name, company_keyword, model_choice="All (Ensemble)
         )
         final_text = final_response.content[0].text
 
-    match model_choice:
-        case "Gemini 3.1 Pro":
-            final_output_filepath = google_output_filepath
-        case "GPT-5":
-            final_output_filepath = gpt_output_filepath
-        case "Claude Opus 4.6":
-            final_output_filepath = claude_output_filepath
-    with open(final_output_filepath, "w", encoding="utf-8") as out_file:
-        out_file.write(f"# MASTER BRIEFING: {client_name.upper()}\n")
-        out_file.write(f"*(Generated via: {model_choice})*\n\n")
-        out_file.write(final_text)
-        
-    print(f"Process complete! Briefing saved to: {final_output_filepath}")
+        with open(final_output_filepath, "w", encoding="utf-8") as out_file:
+            out_file.write(f"# MASTER BRIEFING: {client_name.upper()}\n")
+            out_file.write("="*60 + "\n\n")
+            out_file.write(final_text)
+
+    print(f"\nBriefing complete! Please check the output at: {final_output_filepath}")

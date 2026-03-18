@@ -1,18 +1,21 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import shutil
 import threading
 import sys
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 from PIL import Image, ImageTk
 
 from phainon import generate_iterative_linkedin_posts
 from aglaea import generate_briefing
-from cyrene import Cyrene
-from demiurge import Demiurge
+from anaxa import Anaxa
 from cerydra import Cerydra
+from cyrene import Cyrene
 from hysilens import Hysilens
-from mydei import Mydei
 
 class PrintLogger:
     def __init__(self, text_widget):
@@ -32,14 +35,19 @@ class AmphoreusExperiment:
 
         # --- STATE ---
         self.current_generation_data = None
+        self.anaxa = Anaxa()
         self.cerydra = Cerydra()
         self.hysilens = Hysilens()
-        self.mydei = Mydei()
 
         # --- FONTS ---
         self.UI_FONT = ("Arial", 11, "bold")
         self.HOVER_FONT = ("Arial", 12, "bold") 
         self.HEADER_FONT = ("Arial", 12, "bold")
+
+        # --- TREEVIEW STYLING (To bold the Data Explorer tree) ---
+        style = ttk.Style()
+        style.configure("Treeview", font=("Arial", 10, "bold"))
+        style.configure("Treeview.Heading", font=("Arial", 11, "bold"))
 
         self.chibi_images = []
         self.image_refs = []
@@ -48,37 +56,29 @@ class AmphoreusExperiment:
         if os.path.exists(static_dir):
             for file in os.listdir(static_dir):
                 if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
-                    # Skip the specific tool images so they don't randomly show up as chibis
                     if file.lower() not in ["aglaea.jpg", "phainon.jpg"]:
                         self.chibi_images.append(os.path.join(static_dir, file))
 
-        # Pre-load specific tool icons
         self.aglaea_img = self._load_specific_image(os.path.join(static_dir, "aglaea.jpg"), size=(30, 30))
         self.phainon_img = self._load_specific_image(os.path.join(static_dir, "phainon.jpg"), size=(30, 30))
 
         # --- LAYOUT ---
-        # 1. Left Panel
         self.left_panel = tk.Frame(root, width=350, bg="white")
         self.left_panel.pack(side="left", fill="y", expand=False, padx=(0, 10))
         self.left_panel.pack_propagate(False) 
         
-        # 2. Right Panel (Document Explorer & Cerydra Q&A)
         self.right_panel = tk.Frame(root, width=380, bg="white")
         self.right_panel.pack(side="right", fill="y", expand=False, padx=(10, 0))
         self.right_panel.pack_propagate(False)
         
-        # 3. Center Panel (Document Viewer)
         self.center_panel = tk.Frame(root, bg="white")
         self.center_panel.pack(side="left", fill="both", expand=True)
 
         # ==========================================
         #               LEFT PANEL
         # ==========================================
-
-        # --- 1. CLIENT DETAILS ---
         frame_details = tk.LabelFrame(self.left_panel, text="1. Client Details", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
         frame_details.pack(fill="x", pady=2)
-        
         frame_details.columnconfigure(1, weight=1)
 
         tk.Label(frame_details, text="Client Name:", bg="white", font=self.UI_FONT).grid(row=0, column=0, sticky="w")
@@ -94,28 +94,21 @@ class AmphoreusExperiment:
         self._place_chibi(v1_frame, side="left", size=(45, 45))
         tk.Label(v1_frame, text="\"A picture of grace and elegance.\"", font=("Georgia", 10, "bold", "italic"), fg="#888888", bg="white").pack(side="left", padx=5)
 
-        # --- 2. FILE MANAGEMENT ---
         frame_files = tk.LabelFrame(self.left_panel, text="2. Upload Documents", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
         frame_files.pack(fill="x", pady=2)
         
         tk.Label(frame_files, text="Make sure Company Keyword is filled out first.", fg="gray", bg="white", font=("Arial", 9, "bold")).pack(pady=(0, 4))
-
         frame_files.pack_propagate(True)
         
         self._create_clickable_label(frame_files, "Add Base Files (Transcripts/Profile)", lambda: self.show_upload_dialog("base")).pack(fill="x", pady=8)
         self._create_clickable_label(frame_files, "Add Accepted Posts (Optional)", lambda: self.show_upload_dialog("accepted")).pack(fill="x", pady=8)
-        self._create_clickable_label(frame_files, "Add Rejected Posts (Optional)", lambda: self.show_upload_dialog("blocked")).pack(fill="x", pady=8)
-        self._create_clickable_label(frame_files, "Add 'As I Have Written' (Demiurge)", lambda: self.show_upload_dialog("as_written")).pack(fill="x", pady=8)
-        
-        # New Mydei ABM Integration
-        self._create_clickable_label(frame_files, "Add ABM Targets (.xlsx)", self.upload_abm_targets).pack(fill="x", pady=8)
+        self._create_clickable_label(frame_files, "Add Client Feedback (Optional)", lambda: self.show_upload_dialog("feedback")).pack(fill="x", pady=8)
 
         v2_frame = tk.Frame(self.left_panel, bg="white")
         v2_frame.pack(fill="x", pady=0)
         self._place_chibi(v2_frame, side="right", size=(45, 45))
         tk.Label(v2_frame, text="\"What do we have here?\"", font=("Georgia", 10, "bold", "italic"), fg="#888888", bg="white").pack(side="right", padx=5)
 
-        # --- 3. GENERATION ---
         frame_gen = tk.LabelFrame(self.left_panel, text="3. Generation", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
         frame_gen.pack(fill="x", pady=2)
 
@@ -146,22 +139,20 @@ class AmphoreusExperiment:
         self.run_btn.pack(fill="x", pady=8)
 
         # --- 4. STYLE TRANSFER (REWRITE) ---
-        frame_rewrite = tk.LabelFrame(self.left_panel, text="4. Stylistic Rewrite with Cyrene & the Demiurge", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
+        frame_rewrite = tk.LabelFrame(self.left_panel, text="4. Stylistic Rewrite (Cyrene)", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
         frame_rewrite.pack(fill="x", pady=2)
         
-        tk.Label(frame_rewrite, text="Style Instruction (Demiurge):", bg="white", font=self.UI_FONT).pack(anchor="w", pady=(2, 2))
+        tk.Label(frame_rewrite, text="Style Instruction (Optional):", bg="white", font=self.UI_FONT).pack(anchor="w", pady=(2, 2))
         
         self.style_prompt_text = tk.Text(frame_rewrite, height=5, relief="solid", borderwidth=1, font=self.UI_FONT, bg="white", fg="black", highlightthickness=2, highlightbackground="white", highlightcolor="black", insertbackground="black")
-        self.style_prompt_text.insert("1.0", "Because that 'blank' page is called the 'future'.")
+        self.style_prompt_text.insert("1.0", "Leave blank for random stylistic noise, or type a specific instruction.")
         self.style_prompt_text.pack(anchor="w", fill="x", pady=(0, 6))
         
         self.rewrite_btn = self._create_clickable_label(frame_rewrite, "✨ Rewrite Posts", self.run_rewrite)
         self.rewrite_btn.pack(fill="x", pady=8)
 
-        # --- CONSOLE OUTPUT ---
         tk.Label(self.left_panel, text="Console Output:", bg="white", font=self.UI_FONT).pack(anchor="w", pady=(6, 2))
-        
-        self.console = scrolledtext.ScrolledText(self.left_panel, width=40, height=5, bg="#1e1e1e", fg="#00ff00", font=("Courier", 10), borderwidth=1, relief="solid", highlightthickness=0)
+        self.console = scrolledtext.ScrolledText(self.left_panel, width=40, height=5, bg="#1e1e1e", fg="#00ff00", font=("Courier", 10, "bold"), borderwidth=1, relief="solid", highlightthickness=0)
         self.console.pack(fill="both", expand=True)
         self.console.vbar.configure(troughcolor="white", bg="white", activebackground="#e0e0e0", borderwidth=0)
 
@@ -178,12 +169,26 @@ class AmphoreusExperiment:
         
         self._create_clickable_label(header_frame, "🔄 Manually Load Output", self.load_output_to_viewer).pack(side="right", padx=10)
 
+        # --- SEARCH BAR (Using Interactive Text Labels instead of Buttons) ---
+        self.doc_search_var = tk.StringVar()
+        
+        self._create_clickable_label(header_frame, "✖ Clear", self.clear_doc_search).pack(side="right", padx=(5, 10))
+        self._create_clickable_label(header_frame, "🔍 Find", self.search_doc_viewer).pack(side="right", padx=(5, 5))
+        
+        search_entry = tk.Entry(header_frame, textvariable=self.doc_search_var, font=self.UI_FONT, width=20, relief="solid", borderwidth=1, highlightthickness=1)
+        search_entry.pack(side="right")
+        search_entry.bind("<Return>", lambda event: self.search_doc_viewer())
+        
+        # ---------------------------------------------------------------------
+
+        # Intentionally unbolded per request: "aside from text in the Document Viewer..."
         self.output_viewer = scrolledtext.ScrolledText(self.center_panel, bg="#ffffff", fg="#333333", font=("Helvetica", 11), wrap="word", relief="solid", borderwidth=1, highlightthickness=2, highlightbackground="white", highlightcolor="black")
         self.output_viewer.pack(fill="both", expand=True)
         self.output_viewer.vbar.configure(troughcolor="white", bg="white", activebackground="#e0e0e0", borderwidth=0)
 
-        self.viewer_menu = tk.Menu(self.output_viewer, tearoff=0, bg="white", font=("Arial", 10))
+        self.viewer_menu = tk.Menu(self.output_viewer, tearoff=0, bg="white", font=("Arial", 10, "bold"))
         self.viewer_menu.add_command(label="🔍 Identify Source (Hysilens)", command=self.run_hysilens)
+        self.viewer_menu.add_command(label="🌐 Ask Anaxa (Web Search)", command=self.run_anaxa)
 
         self.output_viewer.bind("<Button-3>", self.show_context_menu)
         self.output_viewer.bind("<Button-2>", self.show_context_menu)
@@ -195,7 +200,7 @@ class AmphoreusExperiment:
         explorer_header.pack(fill="x", pady=(0, 5))
         
         self._place_chibi(explorer_header, side="left", size=(50, 50))
-        tk.Label(explorer_header, text="Cerydra's Data Explorer", font=("Arial", 16, "bold"), bg="white").pack(side="left", padx=(5, 0))
+        tk.Label(explorer_header, text="Data Explorer", font=("Arial", 16, "bold"), bg="white").pack(side="left", padx=(5, 0))
         self._create_clickable_label(explorer_header, "🔄 Refresh", self.refresh_file_tree).pack(side="right", padx=10)
 
         tree_frame = tk.Frame(self.right_panel, bg="white", relief="solid", borderwidth=1)
@@ -214,18 +219,18 @@ class AmphoreusExperiment:
         
         tk.Label(search_frame, text="Search Doc:", bg="white", font=self.UI_FONT).pack(side="left")
         self.search_var = tk.StringVar()
-        search_entry = tk.Entry(search_frame, textvariable=self.search_var, font=self.UI_FONT, relief="solid", borderwidth=1, highlightthickness=1)
-        search_entry.pack(side="left", fill="x", expand=True, padx=5)
+        exp_search_entry = tk.Entry(search_frame, textvariable=self.search_var, font=self.UI_FONT, relief="solid", borderwidth=1, highlightthickness=1)
+        exp_search_entry.pack(side="left", fill="x", expand=True, padx=5)
         
-        search_entry.bind("<Return>", lambda e: self.search_document())
+        exp_search_entry.bind("<Return>", lambda e: self.search_document())
         self._create_clickable_label(search_frame, "🔍 Find", self.search_document).pack(side="right")
 
+        # Intentionally unbolded per request: "...and Data Explorer"
         self.doc_explorer_viewer = scrolledtext.ScrolledText(self.right_panel, bg="#fdfdfd", fg="#333333", font=("Helvetica", 11), wrap="word", relief="solid", borderwidth=1, highlightthickness=1, state="disabled")
         self.doc_explorer_viewer.pack(fill="both", expand=True, pady=(0, 10))
         self.doc_explorer_viewer.vbar.configure(troughcolor="white", bg="white", activebackground="#e0e0e0", borderwidth=0)
         
-        # --- Cerydra Strategy Q&A Panel ---
-        self.qa_frame = tk.LabelFrame(self.right_panel, text="Client Strategy Q&A with Cerydra", font=self.HEADER_FONT, padx=5, pady=5, bg="white", relief="flat", bd=0)
+        self.qa_frame = tk.LabelFrame(self.right_panel, text="Client Strategy Q&A (Cerydra)", font=self.HEADER_FONT, padx=5, pady=5, bg="white", relief="flat", bd=0)
         self.qa_frame.pack(fill="x", pady=(5, 0))
 
         tk.Label(self.qa_frame, text="Paste Draft/Text to Evaluate (Optional):", bg="white", font=self.UI_FONT).pack(anchor="w")
@@ -263,8 +268,7 @@ class AmphoreusExperiment:
                 photo = ImageTk.PhotoImage(img)
                 self.image_refs.append(photo)
                 return photo
-            except Exception as e:
-                pass
+            except Exception as e: pass
         return None
 
     def _place_chibi(self, parent_frame, side="left", size=(45, 45)):
@@ -278,35 +282,9 @@ class AmphoreusExperiment:
             self.image_refs.append(photo)
             lbl = tk.Label(parent_frame, image=photo, bg="white")
             lbl.pack(side=side)
-        except Exception as e:
-            pass
+        except Exception as e: pass
 
-    # --- ABM UPLOAD (MYDEI) LOGIC ---
-    def upload_abm_targets(self):
-        """Allows user to select an Excel file and kicks off Mydei ABM research."""
-        company = self.company_var.get().strip()
-        if not company:
-            messagebox.showerror("Error", "Please enter a Company Keyword first!")
-            return
-
-        files = filedialog.askopenfilenames(title="Select ABM Target .xlsx Files", filetypes=[("Excel Files", "*.xlsx *.xls")])
-        if files:
-            self.console.insert(tk.END, f"\n[MYDEI] Starting ABM research on {len(files)} file(s). Check console for live progress...\n")
-            self.console.see(tk.END)
-            
-            # Run Mydei in a background thread so the UI doesn't freeze
-            threading.Thread(target=self._run_mydei_thread, args=(company, files), daemon=True).start()
-
-    def _run_mydei_thread(self, company, files):
-        """Executes the Mydei research pipeline."""
-        self.mydei.process_abm_files(company, files)
-        
-        # Automatically refresh the right-hand Data Explorer so the new abm_profiles folder appears!
-        self.root.after(0, self.refresh_file_tree)
-        self.root.after(0, lambda: self.console.insert(tk.END, "\n[MYDEI] ABM Research complete. Profiles saved to Data Explorer.\n"))
-        self.root.after(0, lambda: self.console.see(tk.END))
-
-    # --- RIGHT PANEL: DATA EXPLORER & CERYDRA LOGIC ---
+    # --- RIGHT PANEL LOGIC ---
     def refresh_file_tree(self):
         for item in self.file_tree.get_children():
             self.file_tree.delete(item)
@@ -351,11 +329,8 @@ class AmphoreusExperiment:
         question = self.question_input.get().strip()
         draft = self.draft_text_input.get("1.0", tk.END).strip()
 
-        if not company:
-            messagebox.showwarning("Missing Data", "Please specify a Company Keyword so Cerydra knows which folder to search.")
-            return
-        if not question:
-            messagebox.showwarning("Missing Data", "Please enter a question for Cerydra to answer.")
+        if not company or not question:
+            messagebox.showwarning("Missing Data", "Company Keyword and Question are required.")
             return
 
         self.query_btn.config(state="disabled", text="Analyzing...")
@@ -379,12 +354,13 @@ class AmphoreusExperiment:
 
         tk.Label(popup, text="🧠 Strategic Analysis", font=("Arial", 14, "bold"), bg="white", fg="#333").pack(anchor="w", pady=(0, 10))
         
-        result_viewer = scrolledtext.ScrolledText(popup, bg="#f9f9f9", fg="#111", font=("Helvetica", 11), wrap="word", relief="solid", borderwidth=1)
+        # Changed font to bold inside popup
+        result_viewer = scrolledtext.ScrolledText(popup, bg="#f9f9f9", fg="#111", font=("Helvetica", 11, "bold"), wrap="word", relief="solid", borderwidth=1)
         result_viewer.pack(fill="both", expand=True)
         result_viewer.insert("1.0", result_text)
         result_viewer.config(state="disabled") 
         
-        tk.Button(popup, text="Close", command=popup.destroy, font=("Arial", 10), bg="#e0e0e0", cursor="hand2").pack(pady=(10, 0))
+        tk.Button(popup, text="Close", command=popup.destroy, font=self.UI_FONT, bg="#e0e0e0", cursor="hand2").pack(pady=(10, 0))
 
     # --- LEFT PANEL: LOGIC FUNCTIONS ---
     def _get_target_dir(self, folder_type):
@@ -394,8 +370,7 @@ class AmphoreusExperiment:
             return None
         base_dir = os.path.join("./client_data", company)
         if folder_type == "accepted": return os.path.join(base_dir, "accepted")
-        elif folder_type == "blocked": return os.path.join(base_dir, "rejected")
-        elif folder_type == "as_written": return os.path.join(base_dir, "as_written")
+        elif folder_type == "feedback": return os.path.join(base_dir, "feedback")
         return base_dir
     
     def show_upload_dialog(self, folder_type):
@@ -443,13 +418,6 @@ class AmphoreusExperiment:
                 with open(filepath, 'w', encoding='utf-8') as f:
                     f.write(content)
                 print(f"Saved pasted text to {folder_type} folder as {filename}.")
-                
-                if folder_type == "as_written":
-                    print(f"Ruan Mei: Initializing Demiurge to index pasted style in {target_dir}...")
-                    demi = Demiurge(storage_dir=target_dir)
-                    demi.index_new_post(content)
-                    print(f"Indexed {filename} via Demiurge.")
-                
                 self.refresh_file_tree()
                 dialog.destroy()
             except Exception as e:
@@ -465,25 +433,10 @@ class AmphoreusExperiment:
         files = filedialog.askopenfilenames(title=f"Select files for {folder_type}")
         if files:
             os.makedirs(target_dir, exist_ok=True)
-            if folder_type == "as_written":
-                print(f"Ruan Mei: Initializing Demiurge to index styles in {target_dir}...")
-                demi = Demiurge(storage_dir=target_dir)
-                for file in files:
-                    try:
-                        with open(file, 'r', encoding='utf-8') as f:
-                            text = f.read()
-                        demi.index_new_post(text)
-                        shutil.copy(file, target_dir)
-                        print(f"Indexed and saved {os.path.basename(file)} via Demiurge.")
-                    except Exception as e: 
-                        print(f"Failed to index {file} via Demiurge: {e}")
-            else:
-                for file in files:
-                    try:
-                        shutil.copy(file, target_dir)
-                        print(f"Added {os.path.basename(file)} to {folder_type} folder.")
-                    except Exception as e: 
-                        print(f"Failed to copy {file}: {e}")
+            for file in files:
+                try:
+                    shutil.copy(file, target_dir)
+                except Exception as e: pass
             
             self.refresh_file_tree()
             if dialog_to_close:
@@ -511,7 +464,6 @@ class AmphoreusExperiment:
 
         self.console.insert(tk.END, f"\n[HYSILENS] Analyzing source for selected snippet using {model}...\n")
         self.console.see(tk.END)
-
         threading.Thread(target=self._hysilens_thread, args=(selected_text, company, model), daemon=True).start()
 
     def _hysilens_thread(self, snippet, company, model):
@@ -527,13 +479,64 @@ class AmphoreusExperiment:
 
         tk.Label(popup, text="🔍 Hysilens Analysis", font=("Arial", 14, "bold"), bg="white", fg="#333").pack(anchor="w", pady=(0, 10))
         
-        result_viewer = scrolledtext.ScrolledText(popup, bg="#f9f9f9", fg="#111", font=("Helvetica", 11), wrap="word", relief="solid", borderwidth=1)
+        # Changed font to bold inside popup
+        result_viewer = scrolledtext.ScrolledText(popup, bg="#f9f9f9", fg="#111", font=("Helvetica", 11, "bold"), wrap="word", relief="solid", borderwidth=1)
         result_viewer.pack(fill="both", expand=True)
         result_viewer.insert("1.0", result_text)
         result_viewer.config(state="disabled") 
         
         tk.Button(popup, text="Close", command=popup.destroy, font=self.UI_FONT, bg="#e0e0e0", cursor="hand2").pack(pady=(10, 0))
     
+    def run_anaxa(self):
+        """Captures highlighted text and prompts the user for a web-search query."""
+        try:
+            # Grab the highlighted text from the output viewer
+            selected_text = self.output_viewer.get(tk.SEL_FIRST, tk.SEL_LAST)
+        except tk.TclError:
+            messagebox.showinfo("No Selection", "Please highlight text in the document viewer first.")
+            return
+
+        # Pop up a dialog box asking for the specific question
+        user_query = simpledialog.askstring(
+            "Anaxa Web Search", 
+            "What would you like Anaxa to search the web for regarding this text?"
+        )
+        
+        if not user_query:
+            return # User cancelled the dialog
+
+        self.console.insert(tk.END, f"\n[ANAXA] Searching the live web for: '{user_query}'...\n")
+        self.console.see(tk.END)
+
+        # Run in a thread to keep the UI responsive
+        threading.Thread(target=self._anaxa_thread, args=(selected_text, user_query), daemon=True).start()
+
+    def _anaxa_thread(self, text, query):
+        """Executes the Anaxa API call and triggers the popup UI."""
+        result = self.anaxa.query_with_search(highlighted_text=text, user_query=query)
+        
+        # Once the thread finishes, schedule the UI popup on the main thread
+        self.root.after(0, lambda: self.show_anaxa_result(result, query))
+
+    def show_anaxa_result(self, result_text, query):
+        """Displays the Anaxa search results in a new popup window (like Hysilens)."""
+        popup = tk.Toplevel(self.root)
+        popup.title("Anaxa Web Search")
+        popup.geometry("600x400")
+        popup.configure(padx=15, pady=15, bg="white")
+        popup.transient(self.root)
+
+        # Display the user's query as the header
+        tk.Label(popup, text=f"🌐 Query: {query}", font=("Arial", 12, "bold"), bg="white", fg="#333", wraplength=550, justify="left").pack(anchor="w", pady=(0, 10))
+        
+        # Changed font to bold inside popup
+        result_viewer = scrolledtext.ScrolledText(popup, bg="#f9f9f9", fg="#111", font=("Helvetica", 11, "bold"), wrap="word", relief="solid", borderwidth=1)
+        result_viewer.pack(fill="both", expand=True)
+        result_viewer.insert("1.0", result_text)
+        result_viewer.config(state="disabled") 
+        
+        tk.Button(popup, text="Close", command=popup.destroy, font=self.UI_FONT, bg="#e0e0e0", cursor="hand2").pack(pady=(10, 0))
+
     def run_generation(self):
         client_name = self.client_name_var.get().strip()
         company = self.company_var.get().strip()
@@ -570,8 +573,12 @@ class AmphoreusExperiment:
         company = self.company_var.get().strip()
         client_name = self.client_name_var.get().strip()
         model_choice = self.model_var.get()
-        style_instruction = self.style_prompt_text.get("1.0", tk.END).strip()
         
+        # Determine if the user left the instruction blank or with the default text
+        style_instruction = self.style_prompt_text.get("1.0", tk.END).strip()
+        if "Leave blank for random stylistic noise" in style_instruction:
+            style_instruction = ""
+            
         if not company or not client_name:
             messagebox.showerror("Error", "Client Name and Company Keyword are required.")
             return
@@ -584,7 +591,7 @@ class AmphoreusExperiment:
 
     def _rewrite_thread(self, client_name, company, model_choice, style_instruction):
         try:
-            print(f"\n[CYRENE & DEMIURGE] Starting Rewrite Pipeline for {client_name}...")
+            print(f"\n[CYRENE] Starting Iterative Rewrite Pipeline for {client_name}...")
             
             if model_choice == "Gemini 3.1 Pro": filename = f"{company}_gemini_posts.md"
             elif model_choice == "GPT-5": filename = f"{company}_gpt_posts.md"
@@ -600,35 +607,42 @@ class AmphoreusExperiment:
             with open(input_filepath, "r", encoding="utf-8") as f:
                 raw_draft_text = f.read()
 
-            as_written_dir = os.path.join("./client_data", company, "as_written")
-            demi = Demiurge(storage_dir=as_written_dir)
+            # --- Extract only the posts, cutting out the preliminary analysis steps ---
+            parts = raw_draft_text.split("--- FINAL LINKEDIN POST DRAFTS ---")
+            clean_draft_text = parts[-1].strip() if len(parts) > 1 else raw_draft_text.strip()
+
             cyrene = Cyrene()
             
-            print(f"  -> Demiurge searching for styles matching: '{style_instruction}'")
-            reference_posts = demi.retrieve_style_references(style_instruction, top_k=2) if style_instruction else []
+            if style_instruction:
+                print(f"  -> Cyrene rewriting posts iteratively with user instruction: '{style_instruction}'")
+            else:
+                print(f"  -> Cyrene iteratively applying random stylistic noise...")
 
             output_filename = f"{company}_rewritten_posts.md"
             output_filepath = os.path.join("./client_data", company, "output", output_filename)
             
-            print("  -> Cyrene rewriting post(s) to match the retrieved style intent...")
-            rewrite_result = cyrene.rewrite_post(draft=raw_draft_text, reference_posts=reference_posts)
-            
+            # 1. Initialize the file with headers
             with open(output_filepath, "w", encoding="utf-8") as out_file:
                 out_file.write(f"# FINAL REWRITTEN POSTS: {client_name.upper()}\n")
-                out_file.write(f"Style Intent: {style_instruction}\n")
+                if style_instruction:
+                    out_file.write(f"Style Intent: {style_instruction}\n")
+                else:
+                    out_file.write(f"Style Intent: Random Stylistic Noise\n")
                 out_file.write("="*60 + "\n\n")
+            
+            # 2. Iterate through Cyrene's generator and append to the file live
+            for result in cyrene.rewrite_posts_iteratively(full_draft_text=clean_draft_text, style_instruction=style_instruction):
+                idx = result["index"]
+                total = result["total"]
+                print(f"     Finished rewriting post {idx}/{total}...")
                 
-                out_file.write("## Step 1: Fact Extraction\n")
-                out_file.write(f"{rewrite_result.get('fact_extraction', 'N/A')}\n\n")
-                
-                out_file.write("## Step 2: Style Analysis\n")
-                out_file.write(f"{rewrite_result.get('style_analysis', 'N/A')}\n\n")
-                
-                out_file.write("## Step 3: Rewrite Strategy\n")
-                out_file.write(f"{rewrite_result.get('strategy', 'N/A')}\n\n")
-                
-                out_file.write("## FINAL STYLIZED POST(S)\n")
-                out_file.write(f"{rewrite_result.get('final_post', 'N/A')}\n")
+                with open(output_filepath, "a", encoding="utf-8") as out_file:
+                    out_file.write(f"## POST {idx} REWRITE\n")
+                    out_file.write(f"**Step 1: Fact Extraction**\n{result.get('fact_extraction', 'N/A')}\n\n")
+                    out_file.write(f"**Step 2: Style Approach**\n{result.get('style_analysis', 'N/A')}\n\n")
+                    out_file.write(f"**Step 3: Rewrite Strategy**\n{result.get('strategy', 'N/A')}\n\n")
+                    out_file.write(f"**FINAL STYLIZED POST**\n{result.get('final_post', 'N/A')}\n")
+                    out_file.write("*" * 50 + "\n\n")
             
             print(f"\nRewrite pipeline complete! Saved to {output_filename}. Loading into viewer...")
             
@@ -684,6 +698,51 @@ class AmphoreusExperiment:
                 self.output_viewer.insert(tk.END, f"Error reading file:\n{e}")
         else: 
             self.output_viewer.insert(tk.END, f"Waiting for output...\n(Could not find {os.path.basename(filepath)})")
+
+    def search_doc_viewer(self):
+        """Searches the document viewer and highlights all matching text."""
+        query = self.doc_search_var.get()
+        
+        # Remove any existing search highlights
+        self.output_viewer.tag_remove("search_highlight", "1.0", tk.END)
+        
+        if not query:
+            return
+            
+        start_pos = "1.0"
+        first_match = None
+        
+        while True:
+            # nocase=True makes the search case-insensitive
+            start_pos = self.output_viewer.search(query, start_pos, nocase=True, stopindex=tk.END)
+            if not start_pos:
+                break
+                
+            if not first_match:
+                first_match = start_pos
+                
+            # Calculate the end position based on query length
+            end_pos = f"{start_pos}+{len(query)}c"
+            
+            # Apply the highlight tag
+            self.output_viewer.tag_add("search_highlight", start_pos, end_pos)
+            
+            # Move start_pos forward to continue searching the rest of the document
+            start_pos = end_pos
+            
+        # Configure the visual style of the highlight tag
+        self.output_viewer.tag_config("search_highlight", background="yellow", foreground="black")
+        
+        if first_match:
+            # Scroll the viewer so the first match is visible
+            self.output_viewer.see(first_match)
+        else:
+            messagebox.showinfo("Search", f"No matches found for '{query}'.")
+
+    def clear_doc_search(self):
+        """Clears the search bar and removes all highlights."""
+        self.doc_search_var.set("")
+        self.output_viewer.tag_remove("search_highlight", "1.0", tk.END)
 
 if __name__ == "__main__":
     os.makedirs("./client_data", exist_ok=True)

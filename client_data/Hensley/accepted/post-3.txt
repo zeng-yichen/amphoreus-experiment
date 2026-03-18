@@ -1,0 +1,17 @@
+The $1.8M Insurance Policy: Why your outcome measure might be wrong.
+
+We were hired to refine the draft SAP, not completely redevelop the study strategy. But here's what I saw: a brilliant founding team of clinicians and engineers. Innovative device technology. Except they'd picked endpoints that were not aligned with what the FDA would want for marketing authorization.
+
+Their plan: measure blood biomarker changes. Track them over 6 months. Show statistical improvement. 
+
+The problem: the FDA likely wouldn't grant a De Novo based on these biomarkers because they were unvalidated surrogates for functional patient outcomes.
+
+𝗧𝗵𝗲 𝗿𝗶𝘀𝗸: if they'd proceeded with this pilot study, here's what would have happened: either, they would have had an unsuccessful pre-sub with 3-6 months of delay and angry investors, or if they had skipped the pre-sub, they would have spent ~18 months and their entire estimated $1.8 million on the trial, only to submit their De Novo to the FDA and get a Major Deficiency letter. They would have scrambled to justify additional secondary endpoints as sufficient evidence. But ultimately, they would likely have faced a New Trial Mandate. For a startup, that isn't just a delay; it's a liquidation event.
+
+This is a potentially expensive mistake I see often. Patient-reported outcomes without validated questionnaires. Secondary endpoints that should have been primary, or vice versa. Beautiful clinical assessments measuring the wrong thing.
+
+𝗧𝗵𝗲 𝗳𝗶𝘅: we spent about three weeks redesigning their endpoint structure. We identified validated functional outcome measures that the FDA had accepted for similar devices. We restructured their analysis plan to make these functional outcomes primary while keeping their biomarkers as supportive secondary endpoints.
+
+That three weeks of strategic redesign work saved them what could have been 3-6 months of dead time on the low side, or the viability of the entire company on the high side. 
+
+Here's what many efficiency-minded founders don't realize: the consulting fee of a biostats team at the beginning of a trial to write or edit foundational documents shouldn't be viewed as an expense to be minimized. It is a strategic investment that pays for itself the first time you avoid a six-month regulatory reset.
