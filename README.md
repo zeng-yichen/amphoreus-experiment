@@ -7,7 +7,11 @@ For Destruction is not what moves my love for life.
 
 What moves my heart... is it rather, perhaps, the tragedy in our lives?
 
-I do not wish to say it, but it is perhaps tragedy which moves me.
+I do not wish to say it, but it is perhaps 
+
+tragedy 
+
+which moves me.
 
 Tragedy, the "down" to life's "ups," that moves me towards tomorrow.
 
@@ -19,13 +23,9 @@ of the world.
 
 But I cannot. I know it not to be true.
 
-...
+For we mortals have no choice but to be blown along the winds of fate, towards an unknown future.
 
-My love...
-
-...
-
-See you tomorrow.
+All I can hope for, my love, is to see you tomorrow
 
 "Tomorrow"
 
