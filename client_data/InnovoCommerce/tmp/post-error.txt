@@ -1,0 +1,101 @@
+If you’re evaluating clinical AI platforms in 
+Key Findings
+
+1. Audience quality had the largest impact on performance
+The SCOPE list significantly outperformed Lemlist contacts:
+
+48.9% open rate (SCOPE) vs 32.6% (Lemlist)
+
+This suggests prior context and audience familiarity play a larger role than copy alone.
+
+2. Deliverability challenges impacted Lemlist campaigns
+
+Campaign (2) saw a 10.4% bounce rate, indicating lower list quality
+
+While this improved in Campaign (3), open rates continued to decline
+
+This may indicate reduced inbox placement and/or domain trust degradation.
+
+3. Including a link reduced engagement in cold outreach
+Campaign (3) (with link) saw a further drop in open rate to 23.5%.
+
+This suggests that including links in initial cold emails may:
+
+Increase spam filtering risk
+
+Reduce perceived authenticity
+
+4. Sender identity influenced open rates
+Switching from an individual sender to “Innovo team” likely reduced trust and contributed to lower engagement.
+
+Recommendations for Future Campaigns
+
+1. Prioritize high-quality / warm audiences where possible
+
+Event-based lists (e.g., SCOPE) show significantly stronger engagement
+
+2. For cold outbound: optimize for trust, not information density
+
+Send from a named individual
+
+Avoid links in the first touch
+
+Keep messaging conversational and lightweight
+
+3. Sequence structure
+
+Email 1: No links, purely insight-driven
+
+Email 2+: Introduce links once engagement is established
+
+4. Monitor bounce rates closely
+
+Keep under ~5% to protect deliverability
+
+Consider further list validation/cleaning for Lemlist contacts
+
+Next Steps (Suggested Tests)
+
+A/B test individual sender vs brand sender (holding everything else constant)
+
+Test link in email 2 vs email 1
+
+Segment Lemlist lists further (if possible) to isolate higher-quality subsets
+
+💡 My honest strategic take (not in the doc, just for you)
+
+You’re not testing copy yet—you’re still testing infrastructure + trust.
+
+If you fix:
+
+sender identity
+
+list quality
+
+no links initially
+
+…you’ll probably see Lemlist jump from ~23–32% → closer to 35–40%
+2026, there’s one thing you've likely seen:
+
+Not every tool with an "AI" label actually understands clinical development and operations.
+
+Right now, the market is flooded with vendors pitching platforms that promise to automate your protocols or clinical documents. The demos always look like magic: You put in a prompt, and seconds later, out comes a beautifully formatted document.
+
+I build clinical AI for a living, and I'll be the first to tell you: generating text is the easy part. 
+
+Here is what goes wrong when you buy a generic AI tool:
+
+The vendor simply hooked up an LLM API to a user interface. They built a document generator, not a clinical workflow engine. It might write a grammatically perfect clinical overview, but it doesn't understand your organization's therapeutic areas, indications, and specific SOPs. It doesn't identify the downstream impacts of a protocol amendment or propagate those changes across your documents. It doesn't understand how a Schedule of Assessments drives your CRF design and downstream data collection requirements.
+
+And it certainly doesn't understand the strict reality of regulatory compliance and auditing.
+
+You end up with a tool that solves 20% of the problem (drafting words) but creates a massive operational headache for the other 80% (ensuring accuracy, alignment, and compliance across systems). 
+
+The key differentiator in this space isn't the underlying model architecture. It's the domain expertise encoded into the workflows. True clinical AI doesn't just generate content; it understands the rules, constraints, and edge cases of the clinical trials you are running. 
+
+When evaluating clinical AI vendors, change your criteria. 
+
+Don't ask: "What LLM are you using?"
+Ask: "How does this platform understand how our specific studies work - or does it just write documents that look like it does?"
+
+The platforms that will earn your trust aren't the ones with the flashiest tech. They are the ones built specifically for the trenches of clinical development and operations.

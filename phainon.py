@@ -10,6 +10,7 @@ from openai import OpenAI
 
 from cyrene import Cyrene
 from mydei import Mydei
+from permansor_terrae import PermansorTerrae
 
 google_client = genai.Client()
 anthropic_client = Anthropic()
@@ -82,7 +83,7 @@ def upload_and_wait(directory, client, skip_files):
         
     return uploaded_files
 
-def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted_files, feedback_files, abm_files):
+def run_gemini_posts_workflow(client_name, company_keyword, output_filepath, base_files, accepted_files, feedback_files, abm_files):
     print("Files ready. Initializing Gemini Chat Session...")
     all_uploaded_files = base_files + accepted_files + feedback_files + abm_files
     
@@ -94,6 +95,17 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
     with open(output_filepath, "w", encoding="utf-8") as out_file:
         out_file.write(f"RUAN MEI LINKEDIN POSTS (GEMINI): {client_name.upper()}\n")
         out_file.write("="*50 + "\n\n")
+
+        latest_path = os.path.join("./client_data", company_keyword, "latest.txt")
+        priority_directive = ""
+        if os.path.exists(latest_path):
+            priority_directive = """
+            CRITICAL PRIORITIZATION DIRECTIVE:
+            There is a transcript named 'latest.txt' which represents the most recent interview with the client. 
+            You MUST heavily prioritize insights, stories, and arguments from this specific document. 
+            Aim to draw at least 7 to 8 of your 12 post themes directly from 'latest.txt'. 
+            Use the older transcripts to fill out the remaining post themes and add historical depth.
+            """
 
         # --- STEP 1: Context Ingestion ---
         print("\nGemini Step 1: Feeding context...")
@@ -144,6 +156,7 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
         Begin with drafting 12 compelling overarching messages that you would like our posts to deliver. 
         Let's leverage a variety of {client_name}'s practices and philosophies to appeal to {client_name}'s ICP.
         {abm_instruction}
+        {priority_directive}
         CRITICAL INSTRUCTION: Output your response EXCLUSIVELY as a valid JSON array of 12 strings. 
         """
         response_3 = chat.send_message(prompt_3)
@@ -187,9 +200,15 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
             """
             response_5 = chat.send_message(prompt_5)
             
+            permansor = PermansorTerrae()
+
             out_file.write(f"POST {index + 1} THEME: {message}\n")
             out_file.write("-" * 25 + "\n")
             out_file.write(f"{response_5.text}\n\n")
+            print(f"  -> Permansor Terrae is fact-checking Post {i+1}...")
+            fact_check_report = permansor.fact_check_post(company_keyword, response_5.text)
+            out_file.write(f"### 🛡️ Permansor Terrae Fact-Check Report\n")
+            out_file.write(f"{fact_check_report}\n")
             out_file.write("*" * 50 + "\n\n")
 
     print("\nCleaning up files from Google servers...")
@@ -199,13 +218,24 @@ def run_gemini_posts_workflow(client_name, output_filepath, base_files, accepted
         except Exception as e:
             print(f"Failed to delete {f.name}: {e}")
 
-def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, feed_text, abm_text):
+def run_gpt5_posts_workflow(client_name, company_keyword, output_filepath, base_text, acc_text, feed_text, abm_text):
     print("Initializing GPT-5 Chat Session...")
     messages = [{"role": "system", "content": "You are a professional LinkedIn ghostwriter."}]
     
     with open(output_filepath, "w", encoding="utf-8") as out_file:
         out_file.write(f"RUAN MEI LINKEDIN POSTS (GPT-5): {client_name.upper()}\n")
         out_file.write("="*50 + "\n\n")
+
+        latest_path = os.path.join("./client_data", company_keyword, "latest.txt")
+        priority_directive = ""
+        if os.path.exists(latest_path):
+            priority_directive = """
+            CRITICAL PRIORITIZATION DIRECTIVE:
+            There is a transcript named 'latest.txt' which represents the most recent interview with the client. 
+            You MUST heavily prioritize insights, stories, and arguments from this specific document. 
+            Aim to draw at least 7 to 8 of your 12 post themes directly from 'latest.txt'. 
+            Use the older transcripts to fill out the remaining post themes and add historical depth.
+            """
 
         # --- STEP 1 ---
         print("\nGPT-5 Step 1: Feeding context...")
@@ -263,7 +293,7 @@ def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, f
             resp_2_5_text = resp_2_5.choices[0].message.content
             messages.append({"role": "assistant", "content": resp_2_5_text})
             out_file.write(f"--- STEP 2.5: ABM PROFILES INGESTION ---\n{resp_2_5_text}\n\n")
-            abm_instruction = "CRITICAL: Exactly 3 of these 12 messages MUST be Account-Based Marketing (ABM) posts dedicated to the specific targets provided in the ABM profiles. These ABM messages should favorably mention the target, address their specific pain points, and subtly position {client_name} as the solution to encourage a meeting."
+            abm_instruction = "CRITICAL: Exactly 2 of these 12 messages MUST be Account-Based Marketing (ABM) posts dedicated to the specific targets provided in the ABM profiles. These ABM messages should favorably mention the target, address their specific pain points, and subtly position {client_name} as the solution to encourage a meeting."
 
         # --- STEP 3 ---
         print("GPT-5 Step 3: Developing 12 overarching messages...")
@@ -272,6 +302,7 @@ def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, f
         Begin with drafting 12 compelling overarching messages that you would like our posts to deliver. 
         Let's leverage a variety of {client_name}'s practices and philosophies to appeal to {client_name}'s ICP.
         {abm_instruction}
+        {priority_directive}
         CRITICAL INSTRUCTION: Output your response EXCLUSIVELY as a valid JSON array of 12 strings. 
         """
         messages.append({"role": "user", "content": prompt_3})
@@ -296,6 +327,8 @@ def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, f
         print("GPT-5 Step 4: Drafting the 12 LinkedIn posts iteratively...")
         out_file.write("="*50 + "\n--- FINAL LINKEDIN POST DRAFTS ---\n" + "="*50 + "\n\n")
         
+        permansor = PermansorTerrae()
+
         for index, message in enumerate(messages_list):
             print(f"GPT-5 Generating Post {index + 1} of 12...")
             prompt_5 = f"""
@@ -317,9 +350,13 @@ def run_gpt5_posts_workflow(client_name, output_filepath, base_text, acc_text, f
             out_file.write(f"POST {index + 1} THEME: {message}\n")
             out_file.write("-" * 25 + "\n")
             out_file.write(f"{resp_5_text}\n\n")
+            print(f"  -> Permansor Terrae is fact-checking Post {i+1}...")
+            fact_check_report = permansor.fact_check_post(company_keyword, resp_5_text)
+            out_file.write(f"### 🛡️ Permansor Terrae Fact-Check Report\n")
+            out_file.write(f"{fact_check_report}\n")
             out_file.write("*" * 50 + "\n\n")
 
-def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text, feed_text, abm_text):
+def run_claude_posts_workflow(client_name, company_keyword, output_filepath, base_text, acc_text, feed_text, abm_text):
     print("Initializing Claude Chat Session...")
     messages = []
     sys_prompt = "You are a professional LinkedIn ghostwriter."
@@ -327,6 +364,17 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
     with open(output_filepath, "w", encoding="utf-8") as out_file:
         out_file.write(f"RUAN MEI LINKEDIN POSTS (CLAUDE): {client_name.upper()}\n")
         out_file.write("="*50 + "\n\n")
+
+        latest_path = os.path.join("./client_data", company_keyword, "latest.txt")
+        priority_directive = ""
+        if os.path.exists(latest_path):
+            priority_directive = """
+            CRITICAL PRIORITIZATION DIRECTIVE:
+            There is a transcript named 'latest.txt' which represents the most recent interview with the client. 
+            You MUST heavily prioritize insights, stories, and arguments from this specific document. 
+            Aim to draw at least 7 to 8 of your 12 post themes directly from 'latest.txt'. 
+            Use the older transcripts to fill out the remaining post themes and add historical depth.
+            """
 
         # --- STEP 1 ---
         print("\nClaude Step 1: Feeding context...")
@@ -403,6 +451,7 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
         Begin with drafting 12 compelling overarching messages that you would like our posts to deliver. 
         Let's leverage a variety of {client_name}'s practices and philosophies to appeal to {client_name}'s ICP.
         {abm_instruction}
+        {priority_directive}
         CRITICAL INSTRUCTION: Output your response EXCLUSIVELY as a valid JSON array of 12 strings. 
         """
         messages.append({"role": "user", "content": prompt_3})
@@ -451,6 +500,10 @@ def run_claude_posts_workflow(client_name, output_filepath, base_text, acc_text,
             out_file.write(f"POST {index + 1} THEME: {message}\n")
             out_file.write("-" * 25 + "\n")
             out_file.write(f"{resp_5_text}\n\n")
+            print(f"  -> Permansor Terrae is fact-checking Post {i+1}...")
+            fact_check_report = permansor.fact_check_post(company_keyword, resp_5_text)
+            out_file.write(f"### 🛡️ Permansor Terrae Fact-Check Report\n")
+            out_file.write(f"{fact_check_report}\n")
             out_file.write("*" * 50 + "\n\n")
             
             # Additional sleep after each post to avoid Anthropic rate limits
@@ -521,19 +574,19 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
     # 2. Execution Routing
     if model_choice == "Gemini 3.1 Pro":
         print(f"Running Solo Post Generation with Gemini for {client_name}...")
-        run_gemini_posts_workflow(client_name, google_output_filepath, base_files, accepted_files, feedback_files, abm_files)
+        run_gemini_posts_workflow(client_name, company_keyword, google_output_filepath, base_files, accepted_files, feedback_files, abm_files)
         import shutil
         shutil.copy(google_output_filepath, final_output_filepath)
         
     elif model_choice == "GPT-5":
         print(f"Running Solo Post Generation with GPT-5 for {client_name}...")
-        run_gpt5_posts_workflow(client_name, gpt_output_filepath, local_context, acc_posts, feed_files, abm_posts)
+        run_gpt5_posts_workflow(client_name, company_keyword, gpt_output_filepath, local_context, acc_posts, feed_files, abm_posts)
         import shutil
         shutil.copy(gpt_output_filepath, final_output_filepath)
         
     elif model_choice == "Claude Opus 4.6":
         print(f"Running Solo Post Generation with Claude for {client_name}...")
-        run_claude_posts_workflow(client_name, claude_output_filepath, local_context, acc_posts, feed_files, abm_posts)
+        run_claude_posts_workflow(client_name, company_keyword, claude_output_filepath, local_context, acc_posts, feed_files, abm_posts)
         import shutil
         shutil.copy(claude_output_filepath, final_output_filepath)
         

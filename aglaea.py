@@ -13,13 +13,12 @@ google_client = genai.Client()
 anthropic_client = Anthropic()
 openai_client = OpenAI()
 
-def get_local_context(directory, skip_files):
+def get_local_context(directory):
     """Extracts raw text from local files for non-Google models."""
     context_text = ""
     if not os.path.exists(directory):
         return context_text
     for filename in os.listdir(directory):
-        if filename in skip_files: continue
         filepath = os.path.join(directory, filename)
         
         if filename.lower().endswith(".txt"):
@@ -28,7 +27,7 @@ def get_local_context(directory, skip_files):
                 
     return context_text
 
-def upload_and_wait(directory, client, skip_files):
+def upload_and_wait(directory, client):
     """Helper function to convert docs, upload files, and wait for processing."""
     uploaded_files = []
     if not os.path.exists(directory):
@@ -51,7 +50,7 @@ def upload_and_wait(directory, client, skip_files):
         if filename.lower().endswith(".docx"):
             continue
             
-        if os.path.isfile(filepath) and filename not in skip_files:
+        if os.path.isfile(filepath):
             print(f"Uploading {filename} from {os.path.basename(directory)}...")
             f = client.files.upload(file=filepath)
             uploaded_files.append(f)
@@ -87,13 +86,13 @@ def run_gemini_briefing_workflow(client_name, company_keyword, output_filepath, 
         out_file.write(f"--- STEP 1: CONTEXT INGESTION ---\n{response_1.text}\n\n")
 
         if blocked_files:
-            print("Gemini Step 1.1: Analyzing Rejected Posts...")
+            print("Gemini Step 1.1: Analyzing Feedback Posts...")
             prompt_1a = """
-            I am attaching files containing LinkedIn posts this client has REJECTED.
+            I am attaching files containing LinkedIn posts for which this client has provided feedback.
             What topics, angles, or tones does the client dislike? We must avoid pulling the interview in these directions.
             """
             response_1a = chat.send_message([prompt_1a] + blocked_files)
-            out_file.write(f"--- STEP 1.1: AVOIDANCE TERRITORY (REJECTED POSTS) ---\n{response_1a.text}\n\n")
+            out_file.write(f"--- STEP 1.1: FEEDBACK PROCESSING ---\n{response_1a.text}\n\n")
 
         print("Gemini Step 2: Analyzing ICP...")
         prompt_2 = f"First, what is {client_name}'s ideal customer profile? What is his/her product? How would his/her product and philosophies resonate with his/her ideal customer?"
@@ -113,30 +112,36 @@ def run_gemini_briefing_workflow(client_name, company_keyword, output_filepath, 
         print("Gemini Step 4: Generating Dynamic Interview Script...")
         prompt_4 = f"""
         Now, equip the ghostwriter for their next interview with {client_name}. 
-        Instead of a static list of questions, create a 'Dynamic Interview Pseudo-Script'. This should act as a conversational decision tree that guides the ghostwriter organically through the interview.
+        Create a 'Dynamic Interview Pseudo-Script'. 
 
-        CRITICAL INSTRUCTION: Ensure the topics and angles explored here are NET-NEW. Do NOT redundantly ask questions about stories, topics, or themes that have already been exhausted in the past transcripts.
+        CRITICAL TONE INSTRUCTION: 
+        Write the questions exactly as a peer would ask them in a relaxed but professional meeting.
+        DO NOT use cringe "podcast-bro" cliches, forced enthusiasm, or fake-casual filler. 
+        BANNED PHRASES: "pull on that thread", "unpack that", "dropped this line", "dive in", "tell me a story about", "yelling at the TV".
+        Instead, be direct, understated, and genuinely curious (e.g., "Last time we spoke, you mentioned X. How are you approaching that now?" or "What's the reality on the ground when Y happens?").
+
+        CRITICAL THEME INSTRUCTION: 
+        Ensure the topics explored are NET-NEW. Do NOT redundantly ask about stories that have already been exhausted in the past transcripts.
 
         Format the script with the following sections:
         
         ### Phase 1: The Opener
-        Provide ONE high-impact, open-ended opening question related to {company_keyword} or their recent shifts that forces the client off autopilot.
+        Provide ONE direct, thought-provoking opening question related to {company_keyword} or a recent industry shift that forces the client off autopilot.
         
         ### Phase 2: The Conversation Tree
-        Provide 6 distinct branching paths based on how the client answers the opener. Each path should have 6 follow-up questions.
-        ALL QUESTIONS SHOULD BE WRITTEN IN STRAIGHTFORWARD, COLLOQUIAL, NATURAL CONVERSATION LANGUAGE. Questions should extract storytelling x virality, hot takes x thought leadership opinions, and overall content that will increase the brand recognition and image of the client and their company.
-        FOR EACH QUESTION, PROVIDE THE RELEVANCE OF THE QUESTION TO THE CLIENT'S ICP.
+        Provide 10 distinct branching paths based on how the client might answer the opener. Each path should have 5 natural follow-up questions.
+        Provide the strategic relevance of each path to the client's ICP.
 
-        ### Phase 3: Digging for Stories (The "Yes, and..." technique)
-        Provide 10 tactical follow-up prompts the ghostwriter can use at any time to transition from high-level philosophy into concrete, ghostwriting-ready anecdotes.
+        ### Phase 3: Tactical Follow-Ups (Digging Deeper)
+        Provide 10 understated, natural "probing" questions the ghostwriter can use to ask for specific examples or clarify mechanisms (e.g., "What does that actually look like in practice?" or "Can you walk me through a specific time that happened?").
         """
         response_4 = chat.send_message(prompt_4)
         out_file.write(f"--- STEP 4: DYNAMIC INTERVIEW SCRIPT ---\n{response_4.text}\n\n")
 
-        print("Gemini Step 5: Executive Polish...")
-        prompt_5 = "Review everything we've discussed. Synthesize it into a clean, executive summary."
-        response_5 = chat.send_message(prompt_5)
-        out_file.write(f"--- STEP 5: EXECUTIVE SUMMARY ---\n{response_5.text}\n\n")
+        # print("Gemini Step 5: Executive Polish...")
+        # prompt_5 = "Review everything we've discussed. Synthesize it into a clean, executive summary."
+        # response_5 = chat.send_message(prompt_5)
+        # out_file.write(f"--- STEP 5: EXECUTIVE SUMMARY ---\n{response_5.text}\n\n")
 
     print("\nCleaning up files from Google servers...")
     for f in all_uploaded_files:
@@ -303,12 +308,12 @@ def generate_briefing(client_name, company_keyword, model_choice="All (Ensemble)
     local_context, blk_posts = "", ""
     
     if model_choice in ["All (Ensemble)", "Gemini 3.1 Pro"]:
-        base_files = upload_and_wait(directory_path, google_client, skip_files=[f for f in os.listdir(directory_path) if f.startswith(company_keyword)])
-        blocked_files = upload_and_wait(blocked_path, google_client, skip_files=[])
+        base_files = upload_and_wait(directory_path, google_client)
+        blocked_files = upload_and_wait(blocked_path, google_client)
         
     if model_choice in ["All (Ensemble)", "GPT-5", "Claude Opus 4.6"]:
-        local_context = get_local_context(directory_path, skip_files=[f for f in os.listdir(directory_path) if f.startswith(company_keyword)])
-        blk_posts = "\n--- REJECTED POSTS ---\n" + get_local_context(blocked_path, skip_files=[]) if os.path.exists(blocked_path) else ""
+        local_context = get_local_context(directory_path)
+        blk_posts = "\n--- REJECTED POSTS ---\n" + get_local_context(blocked_path) if os.path.exists(blocked_path) else ""
 
     if model_choice == "Gemini 3.1 Pro":
         run_gemini_briefing_workflow(client_name, company_keyword, google_output_filepath, base_files, blocked_files)

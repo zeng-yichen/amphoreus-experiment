@@ -1,3 +1,0 @@
-# ABM Target Profile: 60 Degrees Pharmaceuticals | https://60degreespharma.com | https://www.zymewire.com/company/51c215d67206890ab00000a4
-
-Error gathering ABM data: 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-3.1-pro is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}

@@ -139,7 +139,7 @@ class AmphoreusExperiment:
         self.run_btn.pack(fill="x", pady=8)
 
         # --- 4. STYLE TRANSFER (REWRITE) ---
-        frame_rewrite = tk.LabelFrame(self.left_panel, text="4. Stylistic Rewrite (Cyrene)", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
+        frame_rewrite = tk.LabelFrame(self.left_panel, text="4. Stylistic Rewrite with Cyrene", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
         frame_rewrite.pack(fill="x", pady=2)
         
         tk.Label(frame_rewrite, text="Style Instruction (Optional):", bg="white", font=self.UI_FONT).pack(anchor="w", pady=(2, 2))
@@ -175,9 +175,9 @@ class AmphoreusExperiment:
         self._create_clickable_label(header_frame, "✖ Clear", self.clear_doc_search).pack(side="right", padx=(5, 10))
         self._create_clickable_label(header_frame, "🔍 Find", self.search_doc_viewer).pack(side="right", padx=(5, 5))
         
-        search_entry = tk.Entry(header_frame, textvariable=self.doc_search_var, font=self.UI_FONT, width=20, relief="solid", borderwidth=1, highlightthickness=1)
-        search_entry.pack(side="right")
-        search_entry.bind("<Return>", lambda event: self.search_doc_viewer())
+        self.doc_search_entry = tk.Entry(header_frame, textvariable=self.doc_search_var, font=self.UI_FONT, width=20, relief="solid", borderwidth=1, highlightthickness=1)
+        self.doc_search_entry.pack(side="right")
+        self.doc_search_entry.bind("<Return>", lambda event: self.search_doc_viewer())
         
         # ---------------------------------------------------------------------
 
@@ -187,8 +187,8 @@ class AmphoreusExperiment:
         self.output_viewer.vbar.configure(troughcolor="white", bg="white", activebackground="#e0e0e0", borderwidth=0)
 
         self.viewer_menu = tk.Menu(self.output_viewer, tearoff=0, bg="white", font=("Arial", 10, "bold"))
-        self.viewer_menu.add_command(label="🔍 Identify Source (Hysilens)", command=self.run_hysilens)
-        self.viewer_menu.add_command(label="🌐 Ask Anaxa (Web Search)", command=self.run_anaxa)
+        self.viewer_menu.add_command(label="🔍 Identify Source with Hysilens", command=self.run_hysilens)
+        self.viewer_menu.add_command(label="🌐 Ask Anaxa", command=self.run_anaxa)
 
         self.output_viewer.bind("<Button-3>", self.show_context_menu)
         self.output_viewer.bind("<Button-2>", self.show_context_menu)
@@ -219,10 +219,10 @@ class AmphoreusExperiment:
         
         tk.Label(search_frame, text="Search Doc:", bg="white", font=self.UI_FONT).pack(side="left")
         self.search_var = tk.StringVar()
-        exp_search_entry = tk.Entry(search_frame, textvariable=self.search_var, font=self.UI_FONT, relief="solid", borderwidth=1, highlightthickness=1)
-        exp_search_entry.pack(side="left", fill="x", expand=True, padx=5)
+        self.exp_search_entry = tk.Entry(search_frame, textvariable=self.search_var, font=self.UI_FONT, relief="solid", borderwidth=1, highlightthickness=1)
+        self.exp_search_entry.pack(side="left", fill="x", expand=True, padx=5)
         
-        exp_search_entry.bind("<Return>", lambda e: self.search_document())
+        self.exp_search_entry.bind("<Return>", lambda e: self.search_document())
         self._create_clickable_label(search_frame, "🔍 Find", self.search_document).pack(side="right")
 
         # Intentionally unbolded per request: "...and Data Explorer"
@@ -230,7 +230,7 @@ class AmphoreusExperiment:
         self.doc_explorer_viewer.pack(fill="both", expand=True, pady=(0, 10))
         self.doc_explorer_viewer.vbar.configure(troughcolor="white", bg="white", activebackground="#e0e0e0", borderwidth=0)
         
-        self.qa_frame = tk.LabelFrame(self.right_panel, text="Client Strategy Q&A (Cerydra)", font=self.HEADER_FONT, padx=5, pady=5, bg="white", relief="flat", bd=0)
+        self.qa_frame = tk.LabelFrame(self.right_panel, text="Client Strategy Q&A with Cerydra", font=self.HEADER_FONT, padx=5, pady=5, bg="white", relief="flat", bd=0)
         self.qa_frame.pack(fill="x", pady=(5, 0))
 
         tk.Label(self.qa_frame, text="Paste Draft/Text to Evaluate (Optional):", bg="white", font=self.UI_FONT).pack(anchor="w")
@@ -245,6 +245,51 @@ class AmphoreusExperiment:
         self.query_btn.pack(anchor="e", pady=5)
         
         self.refresh_file_tree()
+
+        # ==========================================
+        #               KEYBOARD SHORTCUTS
+        # ==========================================
+        self.root.bind("<Command-f>", self._handle_find_shortcut)
+        self.root.bind("<Control-f>", self._handle_find_shortcut)
+
+    def _handle_find_shortcut(self, event):
+        """Routes Cmd/Ctrl + F to the correct search bar based on where focus currently is."""
+        focused = self.root.focus_get()
+        try:
+            current = focused
+            while current:
+                if current == self.right_panel:
+                    self.exp_search_entry.focus_set()
+                    self.exp_search_entry.select_range(0, tk.END)
+                    return "break"
+                elif current == self.center_panel:
+                    self.doc_search_entry.focus_set()
+                    self.doc_search_entry.select_range(0, tk.END)
+                    return "break"
+                
+                parent_name = current.winfo_parent()
+                if not parent_name:
+                    break
+                current = current._nametowidget(parent_name)
+        except Exception:
+            pass
+            
+        # Default fallback: always send to the Document Viewer search bar
+        if hasattr(self, 'doc_search_entry'):
+            self.doc_search_entry.focus_set()
+            self.doc_search_entry.select_range(0, tk.END)
+        return "break"
+
+    # --- ARCHIVE TRANSCRIPT HELPER ---
+    def _archive_latest_transcript(self, target_dir):
+        """Finds any existing 'latest.txt' or 'latest.docx' and renames them to 'Transcript {N}'."""
+        for ext in [".txt", ".docx"]:
+            latest_path = os.path.join(target_dir, f"latest{ext}")
+            if os.path.exists(latest_path):
+                i = 1
+                while os.path.exists(os.path.join(target_dir, f"Transcript {i}.txt")) or os.path.exists(os.path.join(target_dir, f"Transcript {i}.docx")):
+                    i += 1
+                os.rename(latest_path, os.path.join(target_dir, f"Transcript {i}{ext}"))
 
     # --- UI HELPERS ---
     def _create_clickable_label(self, parent_frame, text, command):
@@ -391,10 +436,19 @@ class AmphoreusExperiment:
         tk.Frame(dialog, height=2, bd=1, relief="sunken", bg="#cccccc").pack(fill="x", pady=10)
 
         tk.Label(dialog, text="Option 2: Paste Text Directly", font=self.HEADER_FONT, bg="white").pack(anchor="w", pady=(5, 5))
-        tk.Label(dialog, text="Filename (e.g., interview_1):", bg="white", font=self.UI_FONT).pack(anchor="w")
         
+        # Modify the filename field logic depending on folder_type
+        tk.Label(dialog, text="Filename (e.g., interview_1):", bg="white", font=self.UI_FONT).pack(anchor="w")
         filename_var = tk.StringVar()
-        tk.Entry(dialog, textvariable=filename_var, font=self.UI_FONT, relief="solid", borderwidth=1, highlightthickness=1).pack(fill="x", pady=(0, 10))
+        
+        if folder_type == "base":
+            filename_var.set("latest.txt")
+            entry = tk.Entry(dialog, textvariable=filename_var, font=self.UI_FONT, relief="solid", borderwidth=1, highlightthickness=1)
+            entry.config(state="disabled")
+            entry.pack(fill="x", pady=(0, 10))
+            tk.Label(dialog, text="*Base documents are automatically saved as 'latest.txt'", bg="white", fg="gray", font=("Arial", 9, "bold")).pack(anchor="w", pady=(0, 5))
+        else:
+            tk.Entry(dialog, textvariable=filename_var, font=self.UI_FONT, relief="solid", borderwidth=1, highlightthickness=1).pack(fill="x", pady=(0, 10))
 
         tk.Label(dialog, text="Paste Text Below:", bg="white", font=self.UI_FONT).pack(anchor="w")
         text_area = scrolledtext.ScrolledText(dialog, height=12, font=self.UI_FONT, relief="solid", borderwidth=1, highlightthickness=1)
@@ -402,14 +456,22 @@ class AmphoreusExperiment:
 
         def save_pasted_text():
             content = text_area.get(1.0, tk.END).strip()
-            filename = filename_var.get().strip()
             
-            if not content or not filename:
-                messagebox.showerror("Missing Information", "Please provide both a filename and text content.", parent=dialog)
+            # Archive the old transcript if it's a base folder
+            if folder_type == "base":
+                self._archive_latest_transcript(target_dir)
+                filename = "latest.txt"
+            else:
+                filename = filename_var.get().strip()
+                if not filename:
+                    messagebox.showerror("Missing Information", "Please provide a filename.", parent=dialog)
+                    return
+                if not filename.lower().endswith('.txt'):
+                    filename += '.txt'
+
+            if not content:
+                messagebox.showerror("Missing Information", "Please provide text content.", parent=dialog)
                 return
-                
-            if not filename.lower().endswith('.txt'):
-                filename += '.txt'
                 
             os.makedirs(target_dir, exist_ok=True)
             filepath = os.path.join(target_dir, filename)
@@ -435,7 +497,14 @@ class AmphoreusExperiment:
             os.makedirs(target_dir, exist_ok=True)
             for file in files:
                 try:
-                    shutil.copy(file, target_dir)
+                    # If it's a base file, archive the existing "latest" and set the new file as "latest"
+                    if folder_type == "base":
+                        self._archive_latest_transcript(target_dir)
+                        _, ext = os.path.splitext(file)
+                        dest_path = os.path.join(target_dir, f"latest{ext}")
+                        shutil.copyfile(file, dest_path)
+                    else:
+                        shutil.copy(file, target_dir)
                 except Exception as e: pass
             
             self.refresh_file_tree()
