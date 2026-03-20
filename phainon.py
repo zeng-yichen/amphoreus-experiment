@@ -56,7 +56,7 @@ def upload_and_wait(directory, client, skip_files):
             
             # Only convert if we haven't already converted it previously
             if not os.path.exists(txt_filepath):
-                print(f"Converting {filename} to TXT...")
+                print(f"[Phainon] Converting {filename} to TXT...")
                 doc = docx.Document(filepath)
                 with open(txt_filepath, "w", encoding="utf-8") as f:
                     f.write("\n".join([p.text for p in doc.paragraphs]))
@@ -70,7 +70,7 @@ def upload_and_wait(directory, client, skip_files):
             continue
             
         if os.path.isfile(filepath) and filename not in skip_files:
-            print(f"Uploading {filename} from {os.path.basename(directory)}...")
+            print(f"[Phainon] Uploading {filename} from {os.path.basename(directory)}...")
             f = client.files.upload(file=filepath)
             uploaded_files.append(f)
             
@@ -84,7 +84,7 @@ def upload_and_wait(directory, client, skip_files):
     return uploaded_files
 
 def run_gemini_posts_workflow(client_name, company_keyword, output_filepath, base_files, accepted_files, feedback_files, abm_files):
-    print("Files ready. Initializing Gemini Chat Session...")
+    print("[Phainon] Files ready. Initializing Gemini Chat Session...")
     all_uploaded_files = base_files + accepted_files + feedback_files + abm_files
     
     chat = google_client.chats.create(
@@ -99,6 +99,7 @@ def run_gemini_posts_workflow(client_name, company_keyword, output_filepath, bas
         latest_path = os.path.join("./client_data", company_keyword, "latest.txt")
         priority_directive = ""
         if os.path.exists(latest_path):
+            print("[Phainon] Priority Directive Activated")
             priority_directive = """
             CRITICAL PRIORITIZATION DIRECTIVE:
             There is a transcript named 'latest.txt' which represents the most recent interview with the client. 
@@ -108,7 +109,7 @@ def run_gemini_posts_workflow(client_name, company_keyword, output_filepath, bas
             """
 
         # --- STEP 1: Context Ingestion ---
-        print("\nGemini Step 1: Feeding context...")
+        print("\n[Phainon] Gemini Step 1: Feeding context...")
         prompt_1 = f"""
         I am attaching several files. Among these are interview transcripts between our organization Virio (an organization that writes LinkedIn posts for startup founders and executives)
         and a startup founder/executive named {client_name}, as well as a PDF export of their LinkedIn profile. 
@@ -119,7 +120,7 @@ def run_gemini_posts_workflow(client_name, company_keyword, output_filepath, bas
 
         # --- STEP 1.1: Accepted Posts Analysis ---
         if accepted_files:
-            print("Gemini Step 1.1: Analyzing Accepted Posts...")
+            print("[Phainon] Gemini Step 1.1: Analyzing Accepted Posts...")
             prompt_1a = """
             I am now attaching files containing LinkedIn posts that this client has previously APPROVED and loved.
             Thoroughly analyze these approved posts. What specific formatting choices, sentence length/structures, post length, tone, and overarching themes does the client prefer?
@@ -129,13 +130,13 @@ def run_gemini_posts_workflow(client_name, company_keyword, output_filepath, bas
 
         # --- STEP 1.2: Feedback Analysis ---
         if feedback_files:
-            print("Gemini Step 1.2: Analyzing Client Feedback & Revisions...")
+            print("[Phainon] Gemini Step 1.2: Analyzing Client Feedback & Revisions...")
             prompt_1b = "I am attaching drafts containing direct revisions, comments, and feedback from the client. Thoroughly analyze this feedback. What specific corrections did they make? Prioritize understanding their comments and respecting these rules for all future posts."
             response_1b = chat.send_message([prompt_1b] + feedback_files)
             out_file.write(f"--- STEP 1.2: CLIENT FEEDBACK ANALYSIS ---\n{response_1b.text}\n\n")
 
         # --- STEP 2: ICP & Product Analysis ---
-        print("Gemini Step 2: Analyzing ICP...")
+        print("[Phainon] Gemini Step 2: Analyzing ICP...")
         prompt_2 = f"First, what is {client_name}'s ideal customer profile? What is his/her product? How would his/her product and philosophies resonate with his/her ideal customer?"
         response_2 = chat.send_message(prompt_2)
         out_file.write(f"--- STEP 2: ICP & PRODUCT ANALYSIS ---\n{response_2.text}\n\n")
@@ -143,14 +144,14 @@ def run_gemini_posts_workflow(client_name, company_keyword, output_filepath, bas
         # --- STEP 2.5: ABM Targets ---
         abm_instruction = ""
         if abm_files:
-            print("Gemini Step 2.5: Ingesting ABM Profiles...")
+            print("[Phainon] Gemini Step 2.5: Ingesting ABM Profiles...")
             prompt_2_5 = "I am attaching Account-Based Marketing (ABM) target profiles. Please review these targets, their predicted pain points, and recommended ingress strategies."
             response_2_5 = chat.send_message([prompt_2_5] + abm_files)
             out_file.write(f"--- STEP 2.5: ABM PROFILES INGESTION ---\n{response_2_5.text}\n\n")
             abm_instruction = "CRITICAL: Exactly 2 of these 12 messages MUST be Account-Based Marketing (ABM) posts dedicated to the specific targets provided in the ABM profiles. These ABM messages should favorably mention the target, address their specific pain points, and subtly position {client_name} as the solution to encourage a meeting."
 
         # --- STEP 3: Overarching Strategy ---
-        print("Gemini Step 3: Developing 12 overarching messages...")
+        print("[Phainon] Gemini Step 3: Developing 12 overarching messages...")
         prompt_3 = f"""
         We need 12 posts that range from BOFU to MOFU to TOFU. 
         Begin with drafting 12 compelling overarching messages that you would like our posts to deliver. 
@@ -171,15 +172,15 @@ def run_gemini_posts_workflow(client_name, company_keyword, output_filepath, bas
                 out_file.write(f"{i+1}. {msg}\n")
             out_file.write("\n")
         except json.JSONDecodeError:
-            print("Error parsing JSON. Exiting Gemini thread.")
+            print("[Phainon] Error parsing JSON. Exiting Gemini thread.")
             return
 
         # --- STEP 4: Iterative Generation ---
-        print("Gemini Step 4: Drafting the 12 LinkedIn posts iteratively...")
+        print("[Phainon] Gemini Step 4: Drafting the 12 LinkedIn posts iteratively...")
         out_file.write("="*50 + "\n--- FINAL LINKEDIN POST DRAFTS ---\n" + "="*50 + "\n\n")
         
         for index, message in enumerate(messages_list):
-            print(f"Generating Post {index + 1} of 12...")
+            print(f"[Phainon] Generating Post {index + 1} of 12...")
             prompt_5 = f"""
             Theme for this post: "{message}"
             
@@ -205,21 +206,21 @@ def run_gemini_posts_workflow(client_name, company_keyword, output_filepath, bas
             out_file.write(f"POST {index + 1} THEME: {message}\n")
             out_file.write("-" * 25 + "\n")
             out_file.write(f"{response_5.text}\n\n")
-            print(f"  -> Permansor Terrae is fact-checking Post {i+1}...")
+            print(f"  -> Fact-checking Post {i+1}...")
             fact_check_report = permansor.fact_check_post(company_keyword, response_5.text)
-            out_file.write(f"### 🛡️ Permansor Terrae Fact-Check Report\n")
+            out_file.write(f"### 🛡️ Fact-Check Report\n")
             out_file.write(f"{fact_check_report}\n")
             out_file.write("*" * 50 + "\n\n")
 
-    print("\nCleaning up files from Google servers...")
+    print("\n[Phainon] Cleaning up files from Google servers...")
     for f in all_uploaded_files:
         try:
             google_client.files.delete(name=f.name)
         except Exception as e:
-            print(f"Failed to delete {f.name}: {e}")
+            print(f"[Phainon] Failed to delete {f.name}: {e}")
 
 def run_gpt5_posts_workflow(client_name, company_keyword, output_filepath, base_text, acc_text, feed_text, abm_text):
-    print("Initializing GPT-5 Chat Session...")
+    print("[Phainon] Initializing GPT-5 Chat Session...")
     messages = [{"role": "system", "content": "You are a professional LinkedIn ghostwriter."}]
     
     with open(output_filepath, "w", encoding="utf-8") as out_file:
@@ -238,7 +239,7 @@ def run_gpt5_posts_workflow(client_name, company_keyword, output_filepath, base_
             """
 
         # --- STEP 1 ---
-        print("\nGPT-5 Step 1: Feeding context...")
+        print("\n[Phainon] GPT-5 Step 1: Feeding context...")
         prompt_1 = f"""
         I am attaching several files. Among these are interview transcripts between our organization Virio (an organization that writes LinkedIn posts for startup founders and executives)
         and a startup founder/executive named {client_name}, as well as a PDF export of their LinkedIn profile. 
@@ -252,7 +253,7 @@ def run_gpt5_posts_workflow(client_name, company_keyword, output_filepath, base_
 
         # --- STEP 1.1 ---
         if acc_text:
-            print("GPT-5 Step 1.1: Analyzing Accepted Posts...")
+            print("[Phainon] GPT-5 Step 1.1: Analyzing Accepted Posts...")
             prompt_1a = """
             I am now attaching files containing LinkedIn posts that this client has previously APPROVED and loved.
             Thoroughly analyze these approved posts. What specific tone, formatting choices, sentence structures, and overarching themes does the client prefer?
@@ -265,14 +266,14 @@ def run_gpt5_posts_workflow(client_name, company_keyword, output_filepath, base_
 
         # --- STEP 1.2 ---
         if feed_text:
-            print("GPT-5 Step 1.2: Analyzing Client Feedback & Revisions...")
+            print("[Phainon] GPT-5 Step 1.2: Analyzing Client Feedback & Revisions...")
             messages.append({"role": "user", "content": "Thoroughly analyze these drafts containing the client's direct revisions and feedback. Pay close attention to their corrections and rules. You must prioritize understanding and respecting this feedback for all future posts." + f"\n\nCLIENT FEEDBACK & REVISIONS:\n{feedback_text}"})
             resp_1b = openai_client.chat.completions.create(model="gpt-5", messages=messages)
             messages.append({"role": "assistant", "content": resp_1b.choices[0].message.content})
             out_file.write(f"--- STEP 1.2: CLIENT FEEDBACK ANALYSIS ---\n{resp_1b.choices[0].message.content}\n\n")
 
         # --- STEP 2 ---
-        print("GPT-5 Step 2: Analyzing ICP...")
+        print("[Phainon] GPT-5 Step 2: Analyzing ICP...")
         prompt_2 = f"First, what is {client_name}'s ideal customer profile? What is his/her product? How would his/her product and philosophies resonate with his/her ideal customer?"
         messages.append({"role": "user", "content": prompt_2})
         resp_2 = openai_client.chat.completions.create(model="gpt-5", messages=messages)
@@ -283,7 +284,7 @@ def run_gpt5_posts_workflow(client_name, company_keyword, output_filepath, base_
         # --- STEP 2.5 ---
         abm_instruction = ""
         if abm_text:
-            print("GPT-5 Step 2.5: Ingesting ABM Profiles...")
+            print("Phainon] GPT-5 Step 2.5: Ingesting ABM Profiles...")
             prompt_2_5 = f"""
             I am attaching Account-Based Marketing (ABM) target profiles. Please review these targets, their predicted pain points, and recommended ingress strategies.
             \n\nABM PROFILES:\n{abm_text}
@@ -296,7 +297,7 @@ def run_gpt5_posts_workflow(client_name, company_keyword, output_filepath, base_
             abm_instruction = "CRITICAL: Exactly 2 of these 12 messages MUST be Account-Based Marketing (ABM) posts dedicated to the specific targets provided in the ABM profiles. These ABM messages should favorably mention the target, address their specific pain points, and subtly position {client_name} as the solution to encourage a meeting."
 
         # --- STEP 3 ---
-        print("GPT-5 Step 3: Developing 12 overarching messages...")
+        print("[Phainon] GPT-5 Step 3: Developing 12 overarching messages...")
         prompt_3 = f"""
         We need 12 posts that range from BOFU to MOFU to TOFU. 
         Begin with drafting 12 compelling overarching messages that you would like our posts to deliver. 
@@ -320,17 +321,17 @@ def run_gpt5_posts_workflow(client_name, company_keyword, output_filepath, base_
                 out_file.write(f"{i+1}. {msg}\n")
             out_file.write("\n")
         except json.JSONDecodeError:
-            print("Error parsing JSON from GPT-5. Exiting thread.")
+            print("[Phainon] Error parsing JSON from GPT-5. Exiting thread.")
             return
 
         # --- STEP 4 ---
-        print("GPT-5 Step 4: Drafting the 12 LinkedIn posts iteratively...")
+        print("[Phainon] GPT-5 Step 4: Drafting the 12 LinkedIn posts iteratively...")
         out_file.write("="*50 + "\n--- FINAL LINKEDIN POST DRAFTS ---\n" + "="*50 + "\n\n")
         
         permansor = PermansorTerrae()
 
         for index, message in enumerate(messages_list):
-            print(f"GPT-5 Generating Post {index + 1} of 12...")
+            print(f"[Phainon] GPT-5 Generating Post {index + 1} of 12...")
             prompt_5 = f"""
             Theme for this post: "{message}"
             
@@ -350,14 +351,14 @@ def run_gpt5_posts_workflow(client_name, company_keyword, output_filepath, base_
             out_file.write(f"POST {index + 1} THEME: {message}\n")
             out_file.write("-" * 25 + "\n")
             out_file.write(f"{resp_5_text}\n\n")
-            print(f"  -> Permansor Terrae is fact-checking Post {i+1}...")
+            print(f"  -> Fact-checking Post {i+1}...")
             fact_check_report = permansor.fact_check_post(company_keyword, resp_5_text)
-            out_file.write(f"### 🛡️ Permansor Terrae Fact-Check Report\n")
+            out_file.write(f"### 🛡️ Fact-Check Report\n")
             out_file.write(f"{fact_check_report}\n")
             out_file.write("*" * 50 + "\n\n")
 
 def run_claude_posts_workflow(client_name, company_keyword, output_filepath, base_text, acc_text, feed_text, abm_text):
-    print("Initializing Claude Chat Session...")
+    print("[Phainon] Initializing Claude Chat Session...")
     messages = []
     sys_prompt = "You are a professional LinkedIn ghostwriter."
     
@@ -377,7 +378,7 @@ def run_claude_posts_workflow(client_name, company_keyword, output_filepath, bas
             """
 
         # --- STEP 1 ---
-        print("\nClaude Step 1: Feeding context...")
+        print("\n[Phainon] Claude Step 1: Feeding context...")
         prompt_1 = f"""
         I am attaching several files. Among these are interview transcripts between our organization Virio (an organization that writes LinkedIn posts for startup founders and executives)
         and a startup founder/executive named {client_name}, as well as a PDF export of their LinkedIn profile. 
@@ -388,12 +389,12 @@ def run_claude_posts_workflow(client_name, company_keyword, output_filepath, bas
         resp_1_text = resp_1.content[0].text
         messages.append({"role": "assistant", "content": resp_1_text})
         out_file.write(f"--- STEP 1: CONTEXT INGESTION ---\n{resp_1_text}\n\n")
-        print("Waiting 60 seconds to respect Anthropic rate limits...")
+        print("[Phainon] Waiting 60 seconds to respect Anthropic rate limits...")
         time.sleep(60)
 
         # --- STEP 1.1 ---
         if acc_text:
-            print("Claude Step 1.1: Analyzing Accepted Posts...")
+            print("[Phainon] Claude Step 1.1: Analyzing Accepted Posts...")
             prompt_1a = """
             I am now attaching files containing LinkedIn posts that this client has previously APPROVED and loved.
             Thoroughly analyze these approved posts. What specific tone, formatting choices, sentence structures, and overarching themes does the client prefer?
@@ -408,29 +409,29 @@ def run_claude_posts_workflow(client_name, company_keyword, output_filepath, bas
 
         # --- STEP 1.2 ---
         if feed_text:
-            print("Claude Step 1.2: Analyzing Client Feedback & Revisions...")
+            print("[Phainon] Claude Step 1.2: Analyzing Client Feedback & Revisions...")
             messages.append({"role": "user", "content": "Thoroughly analyze these drafts containing the client's direct revisions and feedback. Pay close attention to their corrections and rules. You must prioritize understanding and respecting this feedback for all future posts." + f"\n\nCLIENT FEEDBACK & REVISIONS:\n{feedback_text}"})
             resp_1b = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
             messages.append({"role": "assistant", "content": resp_1b.content[0].text})
             out_file.write(f"--- STEP 1.2: CLIENT FEEDBACK ANALYSIS ---\n{resp_1b.content[0].text}\n\n")
-            print("Waiting 60 seconds to respect Anthropic rate limits...")
+            print("[Phainon] Waiting 60 seconds to respect Anthropic rate limits...")
             time.sleep(60)
 
         # --- STEP 2 ---
-        print("Claude Step 2: Analyzing ICP...")
+        print("[Phainon] Claude Step 2: Analyzing ICP...")
         prompt_2 = f"First, what is {client_name}'s ideal customer profile? What is his/her product? How would his/her product and philosophies resonate with his/her ideal customer?"
         messages.append({"role": "user", "content": prompt_2})
         resp_2 = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
         resp_2_text = resp_2.content[0].text
         messages.append({"role": "assistant", "content": resp_2_text})
         out_file.write(f"--- STEP 2: ICP & PRODUCT ANALYSIS ---\n{resp_2_text}\n\n")
-        print("Waiting 60 seconds to respect Anthropic rate limits...")
+        print("[Phainon] Waiting 60 seconds to respect Anthropic rate limits...")
         time.sleep(60)
         
         # --- STEP 2.5 ---
         abm_instruction = ""
         if abm_text:
-            print("Claude Step 2.5: Ingesting ABM Profiles...")
+            print("[Phainon] Claude Step 2.5: Ingesting ABM Profiles...")
             prompt_2_5 = f"""
             I am attaching Account-Based Marketing (ABM) target profiles. Please review these targets, their predicted pain points, and recommended ingress strategies.
             \n\nABM PROFILES:\n{abm_text}
@@ -441,11 +442,11 @@ def run_claude_posts_workflow(client_name, company_keyword, output_filepath, bas
             messages.append({"role": "assistant", "content": resp_2_5_text})
             out_file.write(f"--- STEP 2.5: ABM PROFILES INGESTION ---\n{resp_2_5_text}\n\n")
             abm_instruction = "CRITICAL: Exactly 3 of these 12 messages MUST be Account-Based Marketing (ABM) posts dedicated to the specific targets provided in the ABM profiles. These ABM messages should favorably mention the target, address their specific pain points, and subtly position {client_name} as the solution to encourage a meeting."
-            print("Waiting 60 seconds to respect Anthropic rate limits...")
+            print("[Phainon] Waiting 60 seconds to respect Anthropic rate limits...")
             time.sleep(60)
 
         # --- STEP 3 ---
-        print("Claude Step 3: Developing 12 overarching messages...")
+        print("[Phainon] Claude Step 3: Developing 12 overarching messages...")
         prompt_3 = f"""
         We need 12 posts that range from BOFU to MOFU to TOFU. 
         Begin with drafting 12 compelling overarching messages that you would like our posts to deliver. 
@@ -469,18 +470,18 @@ def run_claude_posts_workflow(client_name, company_keyword, output_filepath, bas
                 out_file.write(f"{i+1}. {msg}\n")
             out_file.write("\n")
         except json.JSONDecodeError:
-            print("Error parsing JSON from Claude. Exiting thread.")
+            print("[Phainon] Error parsing JSON from Claude. Exiting thread.")
             return
         
-        print("Waiting 60 seconds to respect Anthropic rate limits...")
+        print("[Phainon] Waiting 60 seconds to respect Anthropic rate limits...")
         time.sleep(60)
 
         # --- STEP 4 ---
-        print("Claude Step 4: Drafting the 12 LinkedIn posts iteratively...")
+        print("[Phainon] Claude Step 4: Drafting the 12 LinkedIn posts iteratively...")
         out_file.write("="*50 + "\n--- FINAL LINKEDIN POST DRAFTS ---\n" + "="*50 + "\n\n")
         
         for index, message in enumerate(messages_list):
-            print(f"Claude Generating Post {index + 1} of 12...")
+            print(f"[Phainon] Claude Generating Post {index + 1} of 12...")
             prompt_5 = f"""
             Theme for this post: "{message}"
             
@@ -500,14 +501,14 @@ def run_claude_posts_workflow(client_name, company_keyword, output_filepath, bas
             out_file.write(f"POST {index + 1} THEME: {message}\n")
             out_file.write("-" * 25 + "\n")
             out_file.write(f"{resp_5_text}\n\n")
-            print(f"  -> Permansor Terrae is fact-checking Post {i+1}...")
+            print(f"  -> Fact-checking Post {i+1}...")
             fact_check_report = permansor.fact_check_post(company_keyword, resp_5_text)
-            out_file.write(f"### 🛡️ Permansor Terrae Fact-Check Report\n")
+            out_file.write(f"### 🛡️ Fact-Check Report\n")
             out_file.write(f"{fact_check_report}\n")
             out_file.write("*" * 50 + "\n\n")
             
             # Additional sleep after each post to avoid Anthropic rate limits
-            print("Waiting 60 seconds to respect Anthropic rate limits...")
+            print("[Phainon] Waiting 60 seconds to respect Anthropic rate limits...")
             time.sleep(60)
 
 def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice="All (Ensemble)"):
@@ -527,14 +528,14 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
     final_output_filename = f"{company_keyword}_posts.md"
     final_output_filepath = os.path.join(output_path, final_output_filename)
 
-    print(f"Scanning directories for {client_name}...")
+    print(f"[Phainon] Scanning directories for {client_name}...")
     if not os.path.exists(directory_path):
-        print(f"Error: Directory '{directory_path}' not found.")
+        print(f"[Phainon] Error: Directory '{directory_path}' not found.")
         return
 
     # --- ADDED MYDEI INTEGRATION HERE ---
     os.makedirs(abm_path, exist_ok=True)
-    print("Calling Mydei to dynamically generate ABM Briefing...")
+    print("[Phainon] Calling Mydei to dynamically generate ABM Briefing...")
     mydei = Mydei()
     abm_briefing = mydei.generate_abm_briefing(company_keyword)
     
@@ -545,11 +546,11 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
             os.remove(filepath)
             
     if "NO ABM TARGETS FOUND" not in abm_briefing:
-        print("Mydei found ABM targets. Saving to briefing file...")
+        print("[Phainon] Mydei found ABM targets. Saving to briefing file...")
         with open(os.path.join(abm_path, "mydei_briefing.md"), "w", encoding="utf-8") as f:
             f.write(abm_briefing)
     else:
-        print("Mydei found no ABM targets. Proceeding without ABM posts.")
+        print("[Phainon] Mydei found no ABM targets. Proceeding without ABM posts.")
     # -------------------------------------
     
     # 1. Load context based on model choice
@@ -573,25 +574,25 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
 
     # 2. Execution Routing
     if model_choice == "Gemini 3.1 Pro":
-        print(f"Running Solo Post Generation with Gemini for {client_name}...")
+        print(f"[Phainon] Running Solo Post Generation with Gemini for {client_name}...")
         run_gemini_posts_workflow(client_name, company_keyword, google_output_filepath, base_files, accepted_files, feedback_files, abm_files)
         import shutil
         shutil.copy(google_output_filepath, final_output_filepath)
         
     elif model_choice == "GPT-5":
-        print(f"Running Solo Post Generation with GPT-5 for {client_name}...")
+        print(f"[Phainon] Running Solo Post Generation with GPT-5 for {client_name}...")
         run_gpt5_posts_workflow(client_name, company_keyword, gpt_output_filepath, local_context, acc_posts, feed_files, abm_posts)
         import shutil
         shutil.copy(gpt_output_filepath, final_output_filepath)
         
     elif model_choice == "Claude Opus 4.6":
-        print(f"Running Solo Post Generation with Claude for {client_name}...")
+        print(f"[Phainon] Running Solo Post Generation with Claude for {client_name}...")
         run_claude_posts_workflow(client_name, company_keyword, claude_output_filepath, local_context, acc_posts, feed_files, abm_posts)
         import shutil
         shutil.copy(claude_output_filepath, final_output_filepath)
         
     else:
-        print(f"Triggering Parallel Posts Ensemble for {client_name}...")
+        print(f"[Phainon] Triggering Parallel Posts Ensemble for {client_name}...")
         with concurrent.futures.ThreadPoolExecutor() as executor:
             f_gemini = executor.submit(run_gemini_posts_workflow, client_name, google_output_filepath, base_files, accepted_files, feedback_files, abm_files)
             f_gpt = executor.submit(run_gpt5_posts_workflow, client_name, gpt_output_filepath, local_context, acc_posts, feed_files, abm_posts)
@@ -601,7 +602,7 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
             f_gpt.result()
             f_claude.result()
             
-        print("Ensemble generation complete. Synthesizing posts using Cyrene...")
+        print("[Phainon] Ensemble generation complete. Synthesizing posts using Cyrene...")
         
         try:
             with open(google_output_filepath, "r", encoding="utf-8") as f:
@@ -627,10 +628,10 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
                 out_file.write("## FINAL SYNTHESIZED POST(S)\n")
                 out_file.write(f"{synthesis.get('synthesized_draft', 'N/A')}\n")
                 
-            print(f"Synthesis successful! Saved to {final_output_filepath}")
+            print(f"[Phainon] Synthesis successful! Saved to {final_output_filepath}")
             
         except Exception as e:
-            print(f"Synthesis failed with error: {e}")
+            print(f"[Phainon] Synthesis failed with error: {e}")
             with open(final_output_filepath, "w", encoding="utf-8") as out_file:
                 out_file.write(f"# ENSEMBLE GENERATION COMPLETE: {client_name.upper()}\n\n")
                 out_file.write(f"Synthesis failed due to error: {e}\n\n")
@@ -639,4 +640,4 @@ def generate_iterative_linkedin_posts(client_name, company_keyword, model_choice
                 out_file.write(f"- GPT-5: `{gpt_output_filename}`\n")
                 out_file.write(f"- Claude Opus 4.6: `{claude_output_filename}`\n")
 
-    print(f"\nProcess complete! Please check the output at: {final_output_filepath}")
+    print(f"\n[Phainon] Process complete! Please check the output at: {final_output_filepath}")

@@ -54,6 +54,7 @@ class PermansorTerrae:
         - [INTERNAL VERIFICATION]: (Pass/Fail) Brief explanation of whether the post aligns with the client's local transcripts.
         - [EXTERNAL VERIFICATION]: (Pass/Fail) Brief explanation of whether the industry claims/stats hold up to live web search.
         - [CORRECTIONS NEEDED]: List any specific factual errors or hallucinations that need to be fixed. If none, say "None."
+        - [CORRECTED POST]: If corrections were needed, provide the complete, updated draft here. CRITICAL DIRECTIVE: DO NOT CHANGE THE CONTENT, STYLE, TONE, OR ANY OTHER ASPECT OF THE DRAFT OTHER THAN THE IMPLEMENTATION OF THE FACTUAL CORRECTION(S). If no corrections were needed, output the original draft exactly as provided.
         """
 
         prompt = f"""
@@ -65,7 +66,7 @@ class PermansorTerrae:
         {post_content}
         </drafted_post>
         
-        Execute your fact-check.
+        Execute your fact-check and provide the corrected draft.
         """
 
         try:
