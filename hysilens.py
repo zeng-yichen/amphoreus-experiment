@@ -1,10 +1,11 @@
 import os
 from google import genai
 from google.genai import types
+import vortex as P
 
 class Hysilens:
-    def __init__(self, base_dir="./client_data"):
-        self.base_dir = base_dir
+    def __init__(self, base_dir=None):
+        self.base_dir = base_dir or str(P.MEMORY_ROOT)
         
         # Initialize the new Gemini API Client
         # The new SDK automatically picks up the GEMINI_API_KEY environment variable.

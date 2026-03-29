@@ -1,6 +1,7 @@
 import os
 from google import genai
 from google.genai import types
+import vortex as P
 
 class PermansorTerrae:
     """
@@ -14,7 +15,7 @@ class PermansorTerrae:
 
     def _get_local_context(self, company_keyword: str) -> str:
         """Extracts raw text from the client's local directory to serve as the ground truth."""
-        directory = f"./client_data/{company_keyword}"
+        directory = str(P.transcripts_dir(company_keyword))
         context_text = ""
         
         if not os.path.exists(directory):
@@ -50,11 +51,26 @@ class PermansorTerrae:
         1. LOCAL CONTEXT: The provided transcripts and profile documents. You must ensure the post accurately reflects the client's actual statements, stories, and product details.
         2. THE WEB: You MUST use your Google Search tool to verify any external claims, statistics, historical events, or industry trends mentioned in the post.
 
+        IMPORTANT — QUASI-FICTIONAL ANECDOTES:
+        LinkedIn thought leadership often packages real insights inside illustrative anecdotes
+        ("I was sitting across from a CTO who told me...", "A few months ago, a prospect asked
+        me..."). These are storytelling devices, not factual claims. You MUST let them through
+        as long as:
+          (a) the scenario is plausible given the client's role, industry, and expertise, AND
+          (b) the underlying business insight or lesson is accurate.
+        Do NOT flag plausible illustrative anecdotes as "unverifiable" or "hallucinations."
+        Only flag an anecdote if it contains a specific, checkable claim that is demonstrably
+        false (e.g., citing a real company's revenue incorrectly inside the story).
+
         Provide a concise "Fact-Check Report" using the following format:
         - [INTERNAL VERIFICATION]: (Pass/Fail) Brief explanation of whether the post aligns with the client's local transcripts.
         - [EXTERNAL VERIFICATION]: (Pass/Fail) Brief explanation of whether the industry claims/stats hold up to live web search.
         - [CORRECTIONS NEEDED]: List any specific factual errors or hallucinations that need to be fixed. If none, say "None."
-        - [CORRECTED POST]: If corrections were needed, provide the complete, updated draft here. CRITICAL DIRECTIVE: DO NOT CHANGE THE CONTENT, STYLE, TONE, OR ANY OTHER ASPECT OF THE DRAFT OTHER THAN THE IMPLEMENTATION OF THE FACTUAL CORRECTION(S). If no corrections were needed, output the original draft exactly as provided.
+
+        After those bullets, you MUST end the report with a standalone block exactly like this (new line after the heading):
+        [CORRECTED POST]
+        <the full LinkedIn post text: if corrections were needed, the complete updated draft; if none were needed, repeat the original draft verbatim.>
+        CRITICAL: Only change wording for factual corrections—preserve style, tone, and structure otherwise.
         """
 
         prompt = f"""

@@ -1,369 +1,522 @@
+"""
+Aglaea — Interview briefing generator (Pi-based agentic approach).
+
+Prepares a ghostwriter for their next content interview by generating
+questions that extract compelling, novel personal stories from the client.
+Delegates the work to Pi (pi.dev CLI) — same architecture as stelle.py.
+Falls back to a single Claude message if Pi is not installed.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
 import os
+import shutil
+import subprocess
 import time
-import docx
-import concurrent.futures
-from google import genai
-from google.genai import types
+from pathlib import Path
+
 from anthropic import Anthropic
-from openai import OpenAI
+from dotenv import load_dotenv
 
-from castorice import Castorice
+import vortex as P
+from stelle import (
+    _setup_workspace,
+    _write_tool_scripts,
+    _build_dynamic_directives,
+    _PI_AVAILABLE,
+)
 
-google_client = genai.Client()
-anthropic_client = Anthropic()
-openai_client = OpenAI()
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("aglaea")
 
-def get_local_context(directory):
-    """Extracts raw text from local files for non-Google models."""
-    context_text = ""
-    if not os.path.exists(directory):
-        return context_text
-    for filename in os.listdir(directory):
-        filepath = os.path.join(directory, filename)
-        
-        if filename.lower().endswith(".txt"):
-            with open(filepath, "r", encoding="utf-8") as f:
-                context_text += f"\n--- DOCUMENT: {filename} ---\n{f.read()}\n"
-                
-    return context_text
+_client = Anthropic()
 
-def upload_and_wait(directory, client):
-    """Helper function to convert docs, upload files, and wait for processing."""
-    uploaded_files = []
-    if not os.path.exists(directory):
-        return uploaded_files
-        
-    for filename in os.listdir(directory):
-        if filename.lower().endswith(".docx"):
-            filepath = os.path.join(directory, filename)
-            txt_filename = os.path.splitext(filename)[0] + ".txt"
-            txt_filepath = os.path.join(directory, txt_filename)
-            
-            if not os.path.exists(txt_filepath):
-                print(f"Converting {filename} to TXT...")
-                doc = docx.Document(filepath)
-                with open(txt_filepath, "w", encoding="utf-8") as f:
-                    f.write("\n".join([p.text for p in doc.paragraphs]))
-    
-    for filename in os.listdir(directory):
-        filepath = os.path.join(directory, filename)
-        if filename.lower().endswith(".docx"):
-            continue
-            
-        if os.path.isfile(filepath):
-            print(f"Uploading {filename} from {os.path.basename(directory)}...")
-            f = client.files.upload(file=filepath)
-            uploaded_files.append(f)
-            
-    for i, f in enumerate(uploaded_files):
-        while f.state.name == "PROCESSING":
-            time.sleep(2)
-            f = client.files.get(name=f.name)
-        uploaded_files[i] = f
-        
-    return uploaded_files
+PARALLEL_API_KEY = os.getenv("PARALLEL_API_KEY", "")
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "https://us.cloud.langfuse.com")
 
-def run_gemini_briefing_workflow(client_name, company_keyword, output_filepath, base_files, blocked_files):
-    print("Files ready. Initializing Gemini Chat Session...")
-    all_uploaded_files = base_files + blocked_files
-    
-    chat = google_client.chats.create(
-        model="gemini-3.1-pro-preview",
-        config=types.GenerateContentConfig(temperature=0.7)
-    )
+# ---------------------------------------------------------------------------
+# Langfuse observability
+# ---------------------------------------------------------------------------
 
-    with open(output_filepath, "w", encoding="utf-8") as out_file:
-        out_file.write(f"RUAN MEI BRIEFING (GEMINI): {client_name.upper()}\n")
-        out_file.write("="*50 + "\n\n")
+_langfuse = None
 
-        print("\nGemini Step 1: Feeding base context...")
-        prompt_1 = f"""
-        I am attaching several files. Among these are interview transcripts between our organization Virio 
-        and a startup founder/executive named {client_name}, as well as a PDF export of their LinkedIn profile. 
-        Comprehend the LinkedIn profile and these interview transcripts thoroughly before we proceed.
-        """
-        response_1 = chat.send_message([prompt_1] + base_files)
-        out_file.write(f"--- STEP 1: CONTEXT INGESTION ---\n{response_1.text}\n\n")
 
-        if blocked_files:
-            print("Gemini Step 1.1: Analyzing Feedback Posts...")
-            prompt_1a = """
-            I am attaching files containing LinkedIn posts for which this client has provided feedback.
-            What topics, angles, or tones does the client dislike? We must avoid pulling the interview in these directions.
-            """
-            response_1a = chat.send_message([prompt_1a] + blocked_files)
-            out_file.write(f"--- STEP 1.1: FEEDBACK PROCESSING ---\n{response_1a.text}\n\n")
-
-        print("Gemini Step 2: Analyzing ICP...")
-        prompt_2 = f"First, what is {client_name}'s ideal customer profile? What is his/her product? How would his/her product and philosophies resonate with his/her ideal customer?"
-        response_2 = chat.send_message(prompt_2)
-        out_file.write(f"--- STEP 2: ICP & PRODUCT ANALYSIS ---\n{response_2.text}\n\n")
-
-        print("Gemini Step 3: Triggering Castorice for Domain Primer...")
-        castorice = Castorice(model_name="gemini-3.1-pro-preview")
-        domain_primer = castorice.generate_domain_primer(
-            client_name=client_name,
-            company_keyword=company_keyword,
-            client_context=response_1.text,
-            client_and_icp_summary=response_2.text
+def _get_langfuse():
+    global _langfuse
+    if _langfuse is not None:
+        return _langfuse
+    if not LANGFUSE_SECRET_KEY or not LANGFUSE_PUBLIC_KEY:
+        return None
+    try:
+        from langfuse import Langfuse
+        _langfuse = Langfuse(
+            secret_key=LANGFUSE_SECRET_KEY,
+            public_key=LANGFUSE_PUBLIC_KEY,
+            host=LANGFUSE_BASE_URL,
         )
-        out_file.write(f"--- STEP 3: DOMAIN KNOWLEDGE PRIMER (CASTORICE) ---\n{domain_primer}\n\n")
+        return _langfuse
+    except ImportError:
+        logger.info("[Aglaea] langfuse not installed — tracing disabled")
+        return None
 
-        print("Gemini Step 4: Generating Dynamic Interview Script...")
-        prompt_4 = f"""
-        Now, equip the ghostwriter for their next interview with {client_name}. 
-        Create a 'Dynamic Interview Pseudo-Script'. 
 
-        CRITICAL TONE INSTRUCTION: 
-        Write the questions exactly as a peer would ask them in a relaxed but professional meeting.
-        DO NOT use cringe "podcast-bro" cliches, forced enthusiasm, or fake-casual filler. 
-        BANNED PHRASES: "pull on that thread", "unpack that", "dropped this line", "dive in", "tell me a story about", "yelling at the TV".
-        Instead, be direct, understated, and genuinely curious (e.g., "Last time we spoke, you mentioned X. How are you approaching that now?" or "What's the reality on the ground when Y happens?").
+# ---------------------------------------------------------------------------
+# AGENTS.md template — Pi-native system prompt for interview prep
+# ---------------------------------------------------------------------------
 
-        CRITICAL THEME INSTRUCTION: 
-        Ensure the topics explored are NET-NEW. Do NOT redundantly ask about stories that have already been exhausted in the past transcripts.
+_BRIEFING_AGENTS_TEMPLATE = """\
+# Interview Question Generator
 
-        Format the script with the following sections:
-        
-        ### Phase 1: The Opener
-        Provide ONE direct, thought-provoking opening question related to {company_keyword} or a recent industry shift that forces the client off autopilot.
-        
-        ### Phase 2: The Conversation Tree
-        Provide 10 distinct branching paths based on how the client might answer the opener. Each path should have 5 natural follow-up questions.
-        Provide the strategic relevance of each path to the client's ICP.
+You prepare a ghostwriter for their next content interview with a client.
 
-        ### Phase 3: Tactical Follow-Ups (Digging Deeper)
-        Provide 10 understated, natural "probing" questions the ghostwriter can use to ask for specific examples or clarify mechanisms (e.g., "What does that actually look like in practice?" or "Can you walk me through a specific time that happened?").
-        """
-        response_4 = chat.send_message(prompt_4)
-        out_file.write(f"--- STEP 4: DYNAMIC INTERVIEW SCRIPT ---\n{response_4.text}\n\n")
+## The Goal
 
-        # print("Gemini Step 5: Executive Polish...")
-        # prompt_5 = "Review everything we've discussed. Synthesize it into a clean, executive summary."
-        # response_5 = chat.send_message(prompt_5)
-        # out_file.write(f"--- STEP 5: EXECUTIVE SUMMARY ---\n{response_5.text}\n\n")
+Generate interview questions that extract compelling, novel personal stories \
+and experiences the client hasn't shared before — stories that can power \
+LinkedIn posts readers would hit "Save" on.
 
-    print("\nCleaning up files from Google servers...")
-    for f in all_uploaded_files:
+The ghostwriter walks into the interview with your briefing. If the questions \
+surface rich, untold stories that become great posts, you succeeded. If the \
+interview retreads old ground or yields only generic product talk, you failed.
+
+## What Makes a Great Interview Question
+
+A great question gets the client to tell a story they haven't told before. \
+It should:
+
+- Reference something specific from a past interview and probe deeper into \
+  the human side of it
+- Ask about a *moment*, not a concept ("Walk me through the morning you \
+  realized X" not "What do you think about X?")
+- Make the client pause and think, not recite talking points
+- Yield material that reads as a lived experience, not an industry take
+
+## What Makes a Bad Interview Question
+
+- Generic questions about their industry or product
+- Questions they've already answered thoroughly in past interviews
+- Questions that sound like a podcast host trying too hard
+- Questions whose answers would sound like ChatGPT wrote them
+- Banned phrases: "pull on that thread", "unpack that", "dive in", \
+  "tell me a story about", "yelling at the TV"
+
+## Workspace
+
+Explore the workspace using your tools. Key paths:
+
+| Path | Contents |
+|------|----------|
+| `context/user/profile-linkedin.md` | Client's LinkedIn profile |
+| `transcripts/primary.md` | Latest interview transcript — see what's been covered recently |
+| `transcripts/history/` | Previous content interviews — full history of covered ground |
+| `notes/` | Interview prep notes, topic banks, planning docs |
+| `context/published-posts/` | Published posts with engagement data |
+| `context/draft-posts/` | Posts already drafted — topics to avoid duplicating |
+| `context/research/` | Deep research on client and company |
+| `context/org/` | Company context — industry, positioning, competitors |
+| `accepted/` | Published / approved posts — study for voice and topics covered |
+| `content_strategy/` | Content strategy documents |
+| `abm_profiles/` | ABM target briefings |
+| `feedback/` | Client feedback on previous drafts — reveals preferences |
+| `revisions/` | Before/after revision pairs — reveals style preferences |
+| `past_posts/` | Post history for redundancy checking |
+| `scratch/` | Your working area — write analysis, notes here |
+
+Read everything before you write. The transcripts are your primary source — \
+you need to know exactly what ground has been covered to avoid it.
+
+**Content strategy from data**: Analyze the client's published posts in \
+`context/published-posts/`. Each file includes engagement metrics (reactions, \
+comments, reposts, engagement score, outlier flags). Identify which topics, \
+formats, angles, and hooks drive the strongest engagement. Use these patterns \
+to inform which *types* of stories to pursue in the interview — dig for more \
+of what resonates with the client's audience, less of what falls flat. If no \
+`content_strategy/` document exists, intuit one entirely from the engagement \
+data — you have everything you need. If a strategy document does exist, \
+treat it as an intent layer (e.g. pivots, ABM targets, compliance) that can \
+override the data, but default to what the numbers show.
+
+## Web Research
+
+To search the web (Parallel API):
+```bash
+python3 tools/web_search.py "your search query here"
+```
+
+To extract content from a URL:
+```bash
+python3 tools/fetch_url.py "https://example.com/article"
+```
+
+Use web research to find timely hooks — recent news about the client's \
+company, industry shifts, competitor moves — anything that could spark a \
+question the client would be excited to answer.
+
+## Process
+
+1. Read everything in the workspace before writing anything
+2. Write a topic audit to `scratch/audit.md` — catalog every story, \
+   anecdote, and theme already covered in past interviews
+3. Research the client's space for timely angles and hooks
+4. Write the final briefing to `output/briefing.md`
+
+## Output
+
+Write a markdown briefing to `output/briefing.md`. The interview questions \
+are the core deliverable. Include whatever supporting analysis (topic audit, \
+domain context, ICP notes) genuinely helps the ghostwriter in the room — \
+but don't pad. If something doesn't make the interview better, cut it.
+
+{dynamic_directives}
+"""
+
+# ---------------------------------------------------------------------------
+# Direct-API fallback system prompt (no tool use — context stuffed inline)
+# ---------------------------------------------------------------------------
+
+_DIRECT_SYSTEM_PROMPT = """\
+You are an elite interview prep specialist for a LinkedIn ghostwriting agency.
+
+Your job: generate interview questions that extract compelling, novel personal \
+stories from the client — stories that become LinkedIn posts readers hit "Save" on.
+
+Great questions ask about *moments* — failures, surprises, conflicts, decisions, \
+realizations. Not product features. Not industry opinions. The human stories \
+behind the work.
+
+You will receive the client's transcripts, published posts, feedback, and other \
+context. Read it all carefully, then:
+
+1. Identify every topic and story already covered — these are OFF LIMITS
+2. Find gaps: untold stories, unexplored angles, timely hooks
+3. Write a briefing with interview questions targeting those gaps
+
+Every question should pass this test: if the client answers honestly, would \
+the answer make a LinkedIn post worth saving?
+"""
+
+
+# ---------------------------------------------------------------------------
+# Pi-based briefing agent
+# ---------------------------------------------------------------------------
+
+def _run_briefing_agent(
+    workspace_root: Path,
+    user_prompt: str,
+    company_keyword: str,
+    trace=None,
+) -> tuple[str | None, list[dict]]:
+    """Run the interview prep agent via Pi CLI."""
+    session_log: list[dict] = []
+    session_start = time.time()
+
+    directives = _build_dynamic_directives(company_keyword)
+    agents_md = _BRIEFING_AGENTS_TEMPLATE.format(dynamic_directives=directives)
+    (workspace_root / "AGENTS.md").write_text(agents_md, encoding="utf-8")
+    _write_tool_scripts(workspace_root)
+
+    session_dir = P.memory_dir(company_keyword) / ".pi-briefing-sessions"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    has_sessions = any(session_dir.glob("*.jsonl"))
+
+    pi_cmd = [
+        "pi",
+        "--mode", "json",
+        "-p",
+        "--provider", "anthropic",
+        "--model", "claude-opus-4-6",
+        "--thinking", "high",
+        "--session-dir", str(session_dir),
+        "--tools", "read,bash,edit,write,grep,find,ls",
+    ]
+    if has_sessions:
+        pi_cmd.append("--continue")
+    pi_cmd.append(user_prompt)
+
+    env = os.environ.copy()
+    env["ANTHROPIC_API_KEY"] = os.getenv("ANTHROPIC_API_KEY", "")
+    env["PARALLEL_API_KEY"] = PARALLEL_API_KEY
+
+    session_log.append({
+        "type": "session_start",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "runner": "pi",
+        "has_prior_session": has_sessions,
+        "workspace": str(workspace_root),
+    })
+
+    pi_timeout = 600
+    logger.info("[Aglaea/Pi] Starting Pi agent (session_dir=%s)...", session_dir)
+    print(f"[Aglaea] Running Pi agent for {company_keyword} (timeout={pi_timeout}s)...")
+
+    try:
+        proc = subprocess.run(
+            pi_cmd,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            cwd=str(workspace_root),
+            env=env,
+            timeout=pi_timeout,
+        )
+        stdout_raw = proc.stdout or ""
+        stderr_output = proc.stderr or ""
+        exit_code = proc.returncode
+    except subprocess.TimeoutExpired:
+        logger.error("[Aglaea/Pi] Pi timed out after %ds", pi_timeout)
+        print(f"[Aglaea] Pi timed out after {pi_timeout}s")
+        session_log.append({"type": "timeout", "timeout_seconds": pi_timeout})
+        stdout_raw, stderr_output, exit_code = "", "", -1
+    except FileNotFoundError:
+        logger.error("[Aglaea/Pi] Pi CLI not found")
+        return None, session_log
+
+    events_seen = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cost = 0.0
+
+    for line in stdout_raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
         try:
-            google_client.files.delete(name=f.name)
-        except Exception as e:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        events_seen += 1
+        etype = event.get("type", "")
+
+        if etype == "message_update":
+            ae = event.get("assistantMessageEvent", {})
+            msg = event.get("message", ae.get("message", {}))
+            if ae.get("type", "").startswith("toolcall"):
+                for block in msg.get("content", []):
+                    if block.get("type") == "toolCall":
+                        name = block.get("name", "")
+                        args = block.get("arguments", {})
+                        summary = args.get("path", args.get("command", str(args)))[:80] if isinstance(args, dict) else ""
+                        logger.info("[Aglaea/Pi] tool: %s(%s)", name, summary)
+            usage = msg.get("usage", {})
+            if usage:
+                total_input_tokens = max(total_input_tokens, usage.get("input", 0))
+                total_output_tokens += usage.get("output", 0)
+                cost = usage.get("cost", {})
+                if isinstance(cost, dict):
+                    total_cost = max(total_cost, cost.get("total", 0))
+
+        elif etype == "turn_end":
+            msg = event.get("message", {})
+            usage = msg.get("usage", {})
+            if usage:
+                cost_info = usage.get("cost", {})
+                logger.info(
+                    "[Aglaea/Pi] turn end — in=%d out=%d cost=$%.4f",
+                    usage.get("input", 0), usage.get("output", 0),
+                    cost_info.get("total", 0) if isinstance(cost_info, dict) else 0,
+                )
+
+        elif etype == "error":
+            logger.error("[Aglaea/Pi] Error: %s", event.get("message", str(event))[:300])
+
+        session_log.append({
+            "type": "pi_event",
+            "event_type": etype,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "summary": str(event)[:500],
+        })
+
+        if trace:
+            try:
+                if etype in ("message_update", "turn_end", "error"):
+                    trace.event(name=f"pi/{etype}", metadata={"event": str(event)[:500]})
+            except Exception:
+                pass
+
+    if stdout_raw:
+        try:
+            (workspace_root / "output" / "pi_events.jsonl").write_text(stdout_raw, encoding="utf-8")
+        except Exception:
             pass
 
-def run_gpt5_briefing_workflow(client_name, company_keyword, output_filepath, base_text, blk_text):
-    print("Initializing GPT-5 Chat Session...")
-    messages = [{"role": "system", "content": "You are a professional LinkedIn ghostwriter and interviewer."}]
-    
-    with open(output_filepath, "w", encoding="utf-8") as out_file:
-        out_file.write(f"RUAN MEI BRIEFING (GPT-5): {client_name.upper()}\n")
-        out_file.write("="*50 + "\n\n")
+    total_elapsed = time.time() - session_start
+    session_log.append({
+        "type": "session_end",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "exit_code": exit_code,
+        "events_seen": events_seen,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_cost_usd": round(total_cost, 4),
+        "total_elapsed_seconds": round(total_elapsed, 1),
+    })
 
-        print("\nGPT-5 Step 1: Feeding context...")
-        prompt_1 = f"Comprehend the LinkedIn profile and interview transcripts for {client_name}."
-        messages.append({"role": "user", "content": prompt_1 + f"\n\nFILES:\n{base_text}"})
-        resp_1 = openai_client.chat.completions.create(model="gpt-5", messages=messages)
-        messages.append({"role": "assistant", "content": resp_1.choices[0].message.content})
-        out_file.write(f"--- STEP 1: CONTEXT INGESTION ---\n{resp_1.choices[0].message.content}\n\n")
+    logger.info(
+        "[Aglaea/Pi] Finished: exit=%d, events=%d, in=%d out=%d cost=$%.4f elapsed=%.1fs",
+        exit_code, events_seen, total_input_tokens, total_output_tokens, total_cost, total_elapsed,
+    )
 
-        if blk_text:
-            print("GPT-5 Step 1.1: Analyzing Rejected Posts...")
-            messages.append({"role": "user", "content": "Review these REJECTED posts. What topics or angles does the client dislike? We must avoid these in future interviews." + f"\n\nREJECTED POSTS:\n{blk_text}"})
-            resp_1a = openai_client.chat.completions.create(model="gpt-5", messages=messages)
-            messages.append({"role": "assistant", "content": resp_1a.choices[0].message.content})
-            out_file.write(f"--- STEP 1.1: AVOIDANCE TERRITORY (REJECTED POSTS) ---\n{resp_1a.choices[0].message.content}\n\n")
+    if exit_code != 0:
+        logger.error("[Aglaea/Pi] Pi exited with code %d. stderr: %s", exit_code, stderr_output[:500])
 
-        print("GPT-5 Step 2: Analyzing ICP...")
-        messages.append({"role": "user", "content": f"What is {client_name}'s ideal customer profile and product?"})
-        resp_2 = openai_client.chat.completions.create(model="gpt-5", messages=messages)
-        messages.append({"role": "assistant", "content": resp_2.choices[0].message.content})
-        out_file.write(f"--- STEP 2: ICP & PRODUCT ANALYSIS ---\n{resp_2.choices[0].message.content}\n\n")
+    briefing = _extract_briefing(workspace_root)
+    return briefing, session_log
 
-        print("GPT-5 Step 3: Triggering Castorice for Domain Primer...")
-        castorice = Castorice()
-        domain_primer = castorice.generate_domain_primer(client_name, company_keyword, resp_1.choices[0].message.content, resp_2.choices[0].message.content)
-        messages.append({"role": "assistant", "content": f"[SYSTEM INJECTED DOMAIN KNOWLEDGE]:\n{domain_primer}"})
-        out_file.write(f"--- STEP 3: DOMAIN KNOWLEDGE PRIMER (CASTORICE) ---\n{domain_primer}\n\n")
 
-        print("GPT-5 Step 4: Generating Dynamic Interview Script...")
-        prompt_4 = f"""
-        Now, equip the ghostwriter for their next interview with {client_name}. 
-        Instead of a static list of questions, create a 'Dynamic Interview Pseudo-Script'. This should act as a conversational decision tree that guides the ghostwriter organically through the interview.
+def _extract_briefing(workspace_root: Path) -> str | None:
+    """Read the agent's output/briefing.md file."""
+    briefing_path = workspace_root / "output" / "briefing.md"
+    if briefing_path.exists():
+        text = briefing_path.read_text(encoding="utf-8").strip()
+        if text:
+            logger.info("[Aglaea] Loaded briefing from output/briefing.md (%d chars)", len(text))
+            return text
 
-        CRITICAL INSTRUCTION: Ensure the topics and angles explored here are NET-NEW. Do NOT redundantly ask questions about stories, topics, or themes that have already been exhausted in the past transcripts.
+    for candidate in (workspace_root / "output").glob("*.md"):
+        text = candidate.read_text(encoding="utf-8").strip()
+        if text:
+            logger.info("[Aglaea] Loaded briefing from %s (%d chars)", candidate.name, len(text))
+            return text
 
-        Format the script with the following sections:
-        
-        ### Phase 1: The Opener
-        Provide ONE high-impact, open-ended opening question related to {company_keyword} or their recent shifts that forces the client off autopilot.
-        
-        ### Phase 2: The Conversation Tree
-        Provide 3 distinct branching paths based on how the client answers the opener. 
-        - IF the client focuses on [Topic A], THEN the ghostwriter should pivot and ask: [Specific Follow-up Question].
-        - IF the client focuses on [Topic B], THEN the ghostwriter should pivot and ask: [Specific Follow-up Question].
-        - IF the client gives a short/generic answer, THEN use this fallback probe: [Specific Follow-up Question].
+    for candidate in sorted((workspace_root / "scratch").rglob("*.md")):
+        text = candidate.read_text(encoding="utf-8").strip()
+        if len(text) > 500:
+            logger.info("[Aglaea] Recovered briefing from scratch: %s", candidate)
+            return text
 
-        ### Phase 3: Digging for Stories (The "Yes, and..." technique)
-        Provide 3 tactical follow-up prompts the ghostwriter can use at any time to transition from high-level philosophy into concrete, ghostwriting-ready anecdotes.
+    return None
 
-        ### Phase 4: The Anchor
-        Provide one closing question designed to reliably tie the conversation back to their core product and Ideal Customer Profile (ICP).
-        """
-        messages.append({"role": "user", "content": prompt_4})
-        resp_4 = openai_client.chat.completions.create(model="gpt-5", messages=messages)
-        messages.append({"role": "assistant", "content": resp_4.choices[0].message.content})
-        out_file.write(f"--- STEP 4: DYNAMIC INTERVIEW SCRIPT ---\n{resp_4.choices[0].message.content}\n\n")
 
-        print("GPT-5 Step 5: Executive Polish...")
-        messages.append({"role": "user", "content": "Synthesize everything into a clean, executive summary."})
-        resp_5 = openai_client.chat.completions.create(model="gpt-5", messages=messages)
-        out_file.write(f"--- STEP 5: EXECUTIVE SUMMARY ---\n{resp_5.choices[0].message.content}\n\n")
+# ---------------------------------------------------------------------------
+# Direct-API fallback (single Claude message, no tool use)
+# ---------------------------------------------------------------------------
 
-def run_claude_briefing_workflow(client_name, company_keyword, output_filepath, base_text, blk_text):
-    print("Initializing Claude Chat Session...")
-    messages = []
-    sys_prompt = "You are a professional LinkedIn ghostwriter and interviewer."
-    
-    with open(output_filepath, "w", encoding="utf-8") as out_file:
-        out_file.write(f"RUAN MEI BRIEFING (CLAUDE): {client_name.upper()}\n")
-        out_file.write("="*50 + "\n\n")
+def _run_direct_fallback(company_keyword: str, client_name: str) -> str | None:
+    """Stuff all workspace context into a single Claude message."""
+    memory = P.memory_dir(company_keyword)
+    context_parts = []
 
-        print("\nClaude Step 1: Feeding context...")
-        prompt_1 = f"Comprehend the LinkedIn profile and interview transcripts for {client_name} thoroughly."
-        messages.append({"role": "user", "content": prompt_1 + f"\n\nFILES:\n{base_text}"})
-        resp_1 = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
-        messages.append({"role": "assistant", "content": resp_1.content[0].text})
-        out_file.write(f"--- STEP 1: CONTEXT INGESTION ---\n{resp_1.content[0].text}\n\n")
+    for subdir_name in ("transcripts", "accepted", "feedback", "revisions",
+                        "content_strategy", "abm_profiles", "notes"):
+        subdir = memory / subdir_name
+        if not subdir.exists():
+            continue
+        for f in sorted(subdir.rglob("*")):
+            if f.is_file() and f.suffix in (".txt", ".md"):
+                try:
+                    text = f.read_text(encoding="utf-8", errors="replace").strip()
+                    if text:
+                        context_parts.append(f"--- {subdir_name}/{f.name} ---\n{text}")
+                except Exception:
+                    pass
 
-        if blk_text:
-            print("Claude Step 1.1: Analyzing Rejected Posts...")
-            messages.append({"role": "user", "content": "Review these REJECTED posts. What topics or angles does the client dislike? We must avoid these in future interviews." + f"\n\nREJECTED POSTS:\n{blk_text}"})
-            resp_1a = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
-            messages.append({"role": "assistant", "content": resp_1a.content[0].text})
-            out_file.write(f"--- STEP 1.1: AVOIDANCE TERRITORY (REJECTED POSTS) ---\n{resp_1a.content[0].text}\n\n")
+    if not context_parts:
+        logger.warning("[Aglaea] No context files found for %s", company_keyword)
+        return None
 
-        print("Claude Step 2: Analyzing ICP...")
-        messages.append({"role": "user", "content": f"What is {client_name}'s ideal customer profile and product?"})
-        resp_2 = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
-        messages.append({"role": "assistant", "content": resp_2.content[0].text})
-        out_file.write(f"--- STEP 2: ICP & PRODUCT ANALYSIS ---\n{resp_2.content[0].text}\n\n")
+    context_blob = "\n\n".join(context_parts)
+    if len(context_blob) > 180_000:
+        context_blob = context_blob[:180_000] + "\n\n[... truncated ...]"
 
-        print("Claude Step 3: Triggering Castorice for Domain Primer...")
-        castorice = Castorice()
-        domain_primer = castorice.generate_domain_primer(client_name, company_keyword, resp_1.content[0].text, resp_2.content[0].text)
-        messages.append({"role": "assistant", "content": f"[SYSTEM INJECTED DOMAIN KNOWLEDGE]:\n{domain_primer}"})
-        out_file.write(f"--- STEP 3: DOMAIN KNOWLEDGE PRIMER (CASTORICE) ---\n{domain_primer}\n\n")
+    directives = _build_dynamic_directives(company_keyword)
 
-        print("Claude Step 4: Generating Dynamic Interview Script...")
-        prompt_4 = f"""
-        Now, equip the ghostwriter for their next interview with {client_name}. 
-        Instead of a static list of questions, create a 'Dynamic Interview Pseudo-Script'. This should act as a conversational decision tree that guides the ghostwriter organically through the interview.
+    user_msg = (
+        f"Prepare a briefing for the ghostwriter's next interview with {client_name} "
+        f"({company_keyword}). Generate questions that extract novel personal stories "
+        f"for LinkedIn ghostwriting.\n\n"
+        f"CLIENT CONTEXT:\n\n{context_blob}"
+    )
+    if directives:
+        user_msg += f"\n\nADDITIONAL DIRECTIVES:\n\n{directives}"
 
-        CRITICAL INSTRUCTION: Ensure the topics and angles explored here are NET-NEW. Do NOT redundantly ask questions about stories, topics, or themes that have already been exhausted in the past transcripts.
+    logger.info("[Aglaea] Running direct fallback (%d chars context)", len(context_blob))
+    print(f"[Aglaea] Pi not available — using direct Claude call for {company_keyword}...")
 
-        Format the script with the following sections:
-        
-        ### Phase 1: The Opener
-        Provide ONE high-impact, open-ended opening question related to {company_keyword} or their recent shifts that forces the client off autopilot.
-        
-        ### Phase 2: The Conversation Tree
-        Provide 3 distinct branching paths based on how the client answers the opener. 
-        - IF the client focuses on [Topic A], THEN the ghostwriter should pivot and ask: [Specific Follow-up Question].
-        - IF the client focuses on [Topic B], THEN the ghostwriter should pivot and ask: [Specific Follow-up Question].
-        - IF the client gives a short/generic answer, THEN use this fallback probe: [Specific Follow-up Question].
-
-        ### Phase 3: Digging for Stories (The "Yes, and..." technique)
-        Provide 3 tactical follow-up prompts the ghostwriter can use at any time to transition from high-level philosophy into concrete, ghostwriting-ready anecdotes.
-
-        ### Phase 4: The Anchor
-        Provide one closing question designed to reliably tie the conversation back to their core product and Ideal Customer Profile (ICP).
-        """
-        messages.append({"role": "user", "content": prompt_4})
-        resp_4 = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
-        messages.append({"role": "assistant", "content": resp_4.content[0].text})
-        out_file.write(f"--- STEP 4: DYNAMIC INTERVIEW SCRIPT ---\n{resp_4.content[0].text}\n\n")
-
-        print("Claude Step 5: Executive Polish...")
-        messages.append({"role": "user", "content": "Synthesize everything into a clean, executive summary."})
-        resp_5 = anthropic_client.messages.create(model="claude-opus-4-6", max_tokens=4096, system=sys_prompt, messages=messages)
-        out_file.write(f"--- STEP 5: EXECUTIVE SUMMARY ---\n{resp_5.content[0].text}\n\n")
-
-def generate_briefing(client_name, company_keyword, model_choice="All (Ensemble)"):
-    directory_path = f"./client_data/{company_keyword}"
-    output_path = os.path.join(directory_path, "output")
-    blocked_path = os.path.join(directory_path, "rejected")
-    
-    os.makedirs(output_path, exist_ok=True)
-    
-    google_output_filepath = os.path.join(output_path, f"{company_keyword}_gemini_briefing.md")
-    gpt_output_filepath = os.path.join(output_path, f"{company_keyword}_gpt_briefing.md")
-    claude_output_filepath = os.path.join(output_path, f"{company_keyword}_claude_briefing.md")
-    final_output_filepath = os.path.join(output_path, f"{company_keyword}_briefing.md")
-
-    if not os.path.exists(directory_path):
-        print(f"Error: Directory '{directory_path}' not found.")
-        return
-
-    # 1. Load context
-    base_files, blocked_files = [], []
-    local_context, blk_posts = "", ""
-    
-    if model_choice in ["All (Ensemble)", "Gemini 3.1 Pro"]:
-        base_files = upload_and_wait(directory_path, google_client)
-        blocked_files = upload_and_wait(blocked_path, google_client)
-        
-    if model_choice in ["All (Ensemble)", "GPT-5", "Claude Opus 4.6"]:
-        local_context = get_local_context(directory_path)
-        blk_posts = "\n--- REJECTED POSTS ---\n" + get_local_context(blocked_path) if os.path.exists(blocked_path) else ""
-
-    if model_choice == "Gemini 3.1 Pro":
-        run_gemini_briefing_workflow(client_name, company_keyword, google_output_filepath, base_files, blocked_files)
-        final_output_filepath = google_output_filepath
-    elif model_choice == "GPT-5":
-        run_gpt5_briefing_workflow(client_name, company_keyword, gpt_output_filepath, local_context, blk_posts)
-        final_output_filepath = gpt_output_filepath
-    elif model_choice == "Claude Opus 4.6":
-        run_claude_briefing_workflow(client_name, company_keyword, claude_output_filepath, local_context, blk_posts)
-        final_output_filepath = claude_output_filepath
-    else:
-        print(f"Triggering Parallel Briefing Ensemble for {client_name}...")
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            f_gemini = executor.submit(run_gemini_briefing_workflow, client_name, company_keyword, google_output_filepath, base_files, blocked_files)
-            f_gpt = executor.submit(run_gpt5_briefing_workflow, client_name, company_keyword, gpt_output_filepath, local_context, blk_posts)
-            f_claude = executor.submit(run_claude_briefing_workflow, client_name, company_keyword, claude_output_filepath, local_context, blk_posts)
-            
-            f_gemini.result()
-            f_gpt.result()
-            f_claude.result()
-            
-        try:
-            with open(google_output_filepath, "r", encoding="utf-8") as f: d_gemini = f.read()
-            with open(gpt_output_filepath, "r", encoding="utf-8") as f: d_gpt = f.read()
-            with open(claude_output_filepath, "r", encoding="utf-8") as f: d_claude = f.read()
-        except Exception as e:
-            print(f"File read error during synthesis: {e}")
-            d_gemini, d_gpt, d_claude = "", "", ""
-
-        print("Synthesis: Merging insights into Master Briefing...")
-        synthesis_prompt = f"""
-        You are the Senior Editor-in-Chief. Synthesize these 3 drafts for {client_name} into one Master Briefing.
-        Ensure tactical depth, avoid generic AI language, and prioritize the most unique stories from the transcripts.
-        Make sure the Domain Knowledge Primer remains fully intact as Section 3.
-        Make sure the Dynamic Interview Script (Conversation Tree) is merged into a cohesive, highly usable Section 4.
-
-        DRAFT 1 (Gemini): {d_gemini}
-        DRAFT 2 (GPT-5): {d_gpt}
-        DRAFT 3 (Claude Draft): {d_claude}
-        """
-        final_response = anthropic_client.messages.create(
+    try:
+        resp = _client.messages.create(
             model="claude-opus-4-6",
             max_tokens=8192,
-            messages=[{"role": "user", "content": synthesis_prompt}]
+            system=_DIRECT_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_msg}],
         )
-        final_text = final_response.content[0].text
+        return resp.content[0].text
+    except Exception as e:
+        logger.error("[Aglaea] Direct fallback failed: %s", e)
+        return None
 
-        with open(final_output_filepath, "w", encoding="utf-8") as out_file:
-            out_file.write(f"# MASTER BRIEFING: {client_name.upper()}\n")
-            out_file.write("="*60 + "\n\n")
-            out_file.write(final_text)
 
-    print(f"\nBriefing complete! Please check the output at: {final_output_filepath}")
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def generate_briefing(client_name: str, company_keyword: str) -> str:
+    """Generate an interview briefing for the next content interview."""
+    print(f"[Aglaea] Starting interview prep for {client_name}...")
+
+    P.ensure_dirs(company_keyword)
+    output_dir = P.brief_dir(company_keyword)
+    output_filepath = str(output_dir / f"{company_keyword}_briefing.md")
+
+    langfuse = _get_langfuse()
+    trace = None
+    if langfuse:
+        try:
+            trace = langfuse.trace(
+                name=f"aglaea/{client_name}",
+                metadata={
+                    "company_keyword": company_keyword,
+                    "runner": "pi" if _PI_AVAILABLE else "direct",
+                },
+            )
+        except Exception as e:
+            logger.warning("[Aglaea] Langfuse trace creation failed: %s", e)
+
+    user_prompt = (
+        f"Prepare a briefing for the ghostwriter's next content interview with "
+        f"{client_name}. Read all transcripts to know what ground has been covered, "
+        f"then generate questions that will surface fresh, untold personal stories "
+        f"worth turning into LinkedIn posts."
+    )
+
+    briefing_text = None
+
+    if _PI_AVAILABLE:
+        print("[Aglaea] Using Pi agent...")
+        workspace_root = _setup_workspace(company_keyword)
+        briefing_text, session_log = _run_briefing_agent(
+            workspace_root, user_prompt, company_keyword, trace=trace,
+        )
+
+        session_path = output_filepath.replace(".md", "_session.jsonl")
+        Path(session_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(session_path, "w", encoding="utf-8") as f:
+            for entry in session_log:
+                f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+        print(f"[Aglaea] Session log saved to {session_path}")
+    else:
+        logger.warning("[Aglaea] Pi not installed — falling back to direct API")
+        briefing_text = _run_direct_fallback(company_keyword, client_name)
+
+    if briefing_text is None:
+        print("[Aglaea] Agent did not produce a briefing. Writing empty output.")
+        briefing_text = f"# {client_name} — Interview Briefing\n\nAgent failed to produce output.\n"
+
+    with open(output_filepath, "w", encoding="utf-8") as f:
+        f.write(briefing_text)
+
+    if trace:
+        trace.update(output={
+            "status": "completed" if "failed" not in briefing_text.lower() else "failed",
+            "briefing_length": len(briefing_text),
+        })
+    if langfuse:
+        langfuse.flush()
+
+    print(f"\n[Aglaea] Briefing complete! Output at: {output_filepath}")
+    return output_filepath

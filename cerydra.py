@@ -2,10 +2,11 @@ import os
 import tkinter as tk
 from google import genai
 from google.genai import types
+import vortex as P
 
 class Cerydra:
-    def __init__(self, base_dir="./client_data"):
-        self.base_dir = base_dir
+    def __init__(self, base_dir=None):
+        self.base_dir = base_dir or str(P.MEMORY_ROOT)
         os.makedirs(self.base_dir, exist_ok=True)
         
         # Initialize the modern Gemini client for the query feature
