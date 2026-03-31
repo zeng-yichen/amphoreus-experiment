@@ -14,15 +14,15 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 from PIL import Image, ImageTk
 
-import vortex as P
-from phainon import get_local_context, generate_posts
-from aglaea import generate_briefing
-from anaxa import Anaxa
-from cerydra import Cerydra
-from cyrene import Cyrene, MAX_BATCH_POSTS
-from hysilens import Hysilens
-from evernight import Evernight
-import screwllum
+from backend.src.db import vortex as P
+from backend.src.agents.stelle import generate_one_shot
+from backend.src.agents.aglaea import generate_briefing
+from backend.src.agents.anaxa import Anaxa
+from backend.src.agents.cerydra import Cerydra
+from backend.src.agents.cyrene import Cyrene, MAX_BATCH_POSTS
+from backend.src.agents.hysilens import Hysilens
+from backend.src.agents.hyacinthia import Hyacinthia
+from backend.src.agents import screwllum
 
 class PrintLogger:
     def __init__(self, text_widget):
@@ -32,6 +32,19 @@ class PrintLogger:
         self.text_widget.see(tk.END)
     def flush(self):
         pass
+
+def _read_local_context(directory: str, skip_files: list) -> str:
+    text = ""
+    if not os.path.exists(directory):
+        return text
+    for fn in os.listdir(directory):
+        if fn in skip_files:
+            continue
+        if fn.lower().endswith((".txt", ".md")):
+            with open(os.path.join(directory, fn), "r", encoding="utf-8") as f:
+                text += f"\n--- DOCUMENT: {fn} ---\n{f.read()}\n"
+    return text
+
 
 class AmphoreusExperiment:
     def __init__(self, root):
@@ -57,7 +70,7 @@ class AmphoreusExperiment:
 
         self.chibi_images = []
         self.image_refs = []
-        static_dir = "./static/images"
+        static_dir = os.path.join(os.path.dirname(__file__), "backend", "static", "images")
         
         if os.path.exists(static_dir):
             for file in os.listdir(static_dir):
@@ -1190,13 +1203,16 @@ class AmphoreusExperiment:
         if not company:
             return ""
         parts = []
-        transcripts = get_local_context(str(P.transcripts_dir(company)), skip_files=[])
+        transcripts = _read_local_context(str(P.transcripts_dir(company)), skip_files=[])
         if transcripts:
             parts.append(f"=== INTERVIEW TRANSCRIPTS ===\n{transcripts}")
-        accepted = get_local_context(str(P.accepted_dir(company)), skip_files=[])
+        references = _read_local_context(str(P.references_dir(company)), skip_files=[])
+        if references:
+            parts.append(f"=== CLIENT REFERENCES ===\n{references}")
+        accepted = _read_local_context(str(P.accepted_dir(company)), skip_files=[])
         if accepted:
             parts.append(f"=== APPROVED POSTS ===\n{accepted}")
-        feedback = get_local_context(str(P.feedback_dir(company)), skip_files=[])
+        feedback = _read_local_context(str(P.feedback_dir(company)), skip_files=[])
         if feedback:
             parts.append(f"=== CLIENT FEEDBACK ===\n{feedback}")
         return "\n\n".join(parts)
@@ -1318,7 +1334,9 @@ class AmphoreusExperiment:
         try:
             if action == "post":
                 print(f"[Amphoreus] Starting post generation for {client_name}...\n")
-                generate_posts(client_name, company)
+                P.ensure_dirs(company)
+                output_filepath = str(P.post_dir(company) / f"{company}_posts.md")
+                generate_one_shot(client_name, company, output_filepath)
             else:
                 print(f"[Amphoreus] Starting briefing for {client_name}...\n")
                 generate_briefing(client_name, company)
@@ -1621,9 +1639,9 @@ class AmphoreusExperiment:
             co = company_var.get().strip()
             if not co:
                 return
-            ev = Evernight()
-            labels = ev.get_labels(co)
-            users = ev.get_users(co)
+            hyacinthia = Hyacinthia()
+            labels = hyacinthia.get_labels(co)
+            users = hyacinthia.get_users(co)
             labels_cache["data"] = labels
             labels_cache["ids"] = {lbl.get("name"): lbl.get("id") for lbl in labels}
             users_cache["data"] = users
@@ -1681,8 +1699,8 @@ class AmphoreusExperiment:
                     approvals.append({"userId": user.get("id")})
 
             def do_push():
-                ev = Evernight()
-                res = ev.push_single_post(
+                hyacinthia = Hyacinthia()
+                res = hyacinthia.push_single_post(
                     company_keyword=co,
                     content=final_post,
                     publish_date=pub_dt,
@@ -1704,7 +1722,7 @@ class AmphoreusExperiment:
                     if image_suggestion:
                         comment_parts.append(f"**Image Suggestion:**\n{image_suggestion}")
                     comment_msg = "\n\n".join(comment_parts)
-                    cmt_res = ev.create_comment(co, post_id, comment_msg)
+                    cmt_res = hyacinthia.create_comment(co, post_id, comment_msg)
                     if not cmt_res["success"]:
                         print(f"[ORDINAL] Comment creation failed: {cmt_res['error']}")
 
@@ -2283,9 +2301,9 @@ class AmphoreusExperiment:
             co = company_var.get().strip()
             if not co:
                 return
-            ev = Evernight()
-            labels_data = ev.get_labels(co)
-            users = ev.get_users(co)
+            hyacinthia = Hyacinthia()
+            labels_data = hyacinthia.get_labels(co)
+            users = hyacinthia.get_users(co)
             labels_cache["data"] = labels_data
             labels_cache["ids"] = {lbl.get("name"): lbl.get("id") for lbl in labels_data}
             users_cache["data"] = users
@@ -2403,8 +2421,8 @@ class AmphoreusExperiment:
                     approvals.append({"userId": users_cache["data"][aidx].get("id")})
 
             def do_push():
-                ev = Evernight()
-                res = ev.push_single_post(
+                hyacinthia = Hyacinthia()
+                res = hyacinthia.push_single_post(
                     company_keyword=co,
                     content=final_post,
                     publish_date=pub_dt,
@@ -2427,7 +2445,7 @@ class AmphoreusExperiment:
                 if image_suggestion:
                     comment_parts.append(f"**Image Suggestion:**\n{image_suggestion}")
                 if comment_parts:
-                    cmt_res = ev.create_comment(co, post_id, "\n\n".join(comment_parts))
+                    cmt_res = hyacinthia.create_comment(co, post_id, "\n\n".join(comment_parts))
                     if not cmt_res["success"]:
                         print(f"[ORDINAL] Comment creation failed: {cmt_res['error']}")
 
@@ -2662,9 +2680,9 @@ class AmphoreusExperiment:
             co = co_var.get().strip()
             if not co:
                 return
-            ev = Evernight()
-            labels_data = ev.get_labels(co)
-            users = ev.get_users(co)
+            hyacinthia = Hyacinthia()
+            labels_data = hyacinthia.get_labels(co)
+            users = hyacinthia.get_users(co)
             labels_cache["data"] = labels_data
             labels_cache["ids"] = {lbl.get("name"): lbl.get("id") for lbl in labels_data}
             users_cache["data"] = users
@@ -2795,8 +2813,8 @@ class AmphoreusExperiment:
                 per_post_ordinal[cur_nav]["approver_idxs"] = set(approver_listbox.curselection())
 
             posts_per_month = freq_var.get()
-            ev = Evernight()
-            dates = ev._compute_publish_dates(start_dt, len(selected), posts_per_month)
+            hyacinthia = Hyacinthia()
+            dates = hyacinthia._compute_publish_dates(start_dt, len(selected), posts_per_month)
 
             def thread_push():
                 ok_count = 0
@@ -2820,7 +2838,7 @@ class AmphoreusExperiment:
                         if aidx < len(users_cache["data"]):
                             approvals.append({"userId": users_cache["data"][aidx].get("id")})
 
-                    res = ev.push_single_post(
+                    res = hyacinthia.push_single_post(
                         company_keyword=co,
                         content=post_content,
                         publish_date=pub_dt,
@@ -2843,7 +2861,7 @@ class AmphoreusExperiment:
                     if img_sug:
                         comment_parts.append(f"**Image Suggestion:**\n{img_sug}")
                     if comment_parts:
-                        ev.create_comment(co, post_id, "\n\n".join(comment_parts))
+                        hyacinthia.create_comment(co, post_id, "\n\n".join(comment_parts))
 
                 schedule_desc = "Mon/Wed/Thu" if posts_per_month == 12 else "Tue/Thu"
                 dlg.after(0, lambda: status_lbl.config(text=f"Done — {ok_count}/{len(selected)} pushed."))
@@ -2881,8 +2899,8 @@ class AmphoreusExperiment:
         publish_date_min = f"{date_str}T00:00:00.000Z"
         
         try:
-            evernight = Evernight()
-            comments_data = evernight.get_recent_comments(company_keyword=company, publish_date_min=publish_date_min)
+            hyacinthia = Hyacinthia()
+            comments_data = hyacinthia.get_recent_comments(company_keyword=company, publish_date_min=publish_date_min)
             
             standard_comments = comments_data.get("standard_comments", [])
             inline_comments = comments_data.get("inline_comments", [])
@@ -2939,7 +2957,7 @@ if __name__ == "__main__":
     import traceback
     P.MEMORY_ROOT.mkdir(parents=True, exist_ok=True)
     P.PRODUCTS_ROOT.mkdir(parents=True, exist_ok=True)
-    os.makedirs("./static/images", exist_ok=True)
+    os.makedirs(os.path.join(os.path.dirname(__file__), "backend", "static", "images"), exist_ok=True)
     try:
         root = tk.Tk()
         print("[Amphoreus] Tk root created")
