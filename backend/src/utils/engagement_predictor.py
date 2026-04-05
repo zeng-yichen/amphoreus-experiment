@@ -283,16 +283,111 @@ def _normalize_features(
 # Model building
 # ------------------------------------------------------------------
 
+def _load_causal_feature_classifications(company: str) -> Optional[dict]:
+    """Return {feature_name: classification} from the causal filter output.
+
+    Returns None if the causal_dimensions.json file doesn't exist. The caller
+    should interpret missing features as "not evaluated" — those should be
+    retained in the model, not dropped.
+    """
+    causal_path = vortex.memory_dir(company) / "causal_dimensions.json"
+    if not causal_path.exists():
+        return None
+    try:
+        data = json.loads(causal_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    classifications = {}
+    for d in data.get("dimensions", []):
+        name = d.get("dimension", "")
+        cls = d.get("classification", "")
+        if name:
+            classifications[name] = cls
+    return classifications or None
+
+
+def _apply_causal_filter(all_features: list[str], classifications: dict) -> list[str]:
+    """Drop features the causal filter classified as inert or confounded.
+
+    Features the filter didn't evaluate (not in ``classifications``) are
+    RETAINED — the filter has no opinion on them, so defer to the full model.
+    """
+    drop_classes = {"inert", "confounded"}
+    filtered = []
+    for f in all_features:
+        cls = classifications.get(f)
+        if cls in drop_classes:
+            continue  # explicitly classified as not useful
+        filtered.append(f)
+    return filtered
+
+
+def _fit_and_evaluate(
+    scored: list[dict],
+    feature_names: list[str],
+) -> Optional[dict]:
+    """Fit ridge regression on the given feature set and return model + LOO R²."""
+    X_raw: list[list[float]] = []
+    y: list[float] = []
+    for obs in scored:
+        vec = _extract_features(obs, feature_names)
+        if vec is None:
+            continue
+        reward = obs.get("reward", {}).get("immediate")
+        if reward is None:
+            continue
+        X_raw.append(vec)
+        y.append(reward)
+
+    if len(y) < MIN_OBSERVATIONS:
+        return None
+
+    X_norm, means, stds = _normalize_features(X_raw)
+    X = [row + [1.0] for row in X_norm]
+
+    coefficients = _ridge_fit(X, y, lam=DEFAULT_RIDGE_LAMBDA)
+    intercept = coefficients[-1]
+    feature_coefficients = coefficients[:-1]
+
+    loo_residuals = _leave_one_out_residuals(X_norm, y, lam=DEFAULT_RIDGE_LAMBDA)
+
+    y_mean = sum(y) / len(y)
+    ss_tot = sum((yi - y_mean) ** 2 for yi in y)
+    ss_res = sum(r ** 2 for r in loo_residuals)
+    r_squared = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+    residual_mean = sum(loo_residuals) / len(loo_residuals)
+    residual_std = math.sqrt(
+        sum((r - residual_mean) ** 2 for r in loo_residuals) / max(len(loo_residuals) - 1, 1)
+    )
+
+    return {
+        "feature_names": feature_names,
+        "coefficients": [round(c, 6) for c in feature_coefficients],
+        "intercept": round(intercept, 6),
+        "means": [round(m, 6) for m in means],
+        "stds": [round(s, 6) for s in stds],
+        "r_squared": round(r_squared, 4),
+        "residual_mean": round(residual_mean, 6),
+        "residual_std": round(residual_std, 6),
+        "observation_count": len(y),
+    }
+
+
 def build_engagement_model(company: str) -> Optional[dict]:
     """Build and cache an engagement prediction model for a client.
+
+    When ``causal_dimensions.json`` exists (populated by the causal filter,
+    B1), attempts to fit a reduced-feature model using only causal + uncertain
+    dimensions. Compares LOO R² against the full-feature model and keeps
+    whichever is better. Logs the comparison for auditability.
 
     Returns the model dict or None if insufficient data.
     """
     # Load RuanMei state
     state_path = vortex.memory_dir(company) / "ruan_mei_state.json"
     state = None
-
-    # Try SQLite first, fall back to JSON
     try:
         from backend.src.db.local import initialize_db, ruan_mei_load
         initialize_db()
@@ -317,80 +412,74 @@ def build_engagement_model(company: str) -> Optional[dict]:
         )
         return None
 
-    # Discover features
-    feature_names = _discover_feature_names(scored)
-    if not feature_names:
+    # Discover all candidate features
+    all_features = _discover_feature_names(scored)
+    if not all_features:
         logger.debug("[engagement_predictor] No features discovered for %s", company)
         return None
 
-    # Build X, y matrices
-    X_raw = []
-    y = []
-    for obs in scored:
-        vec = _extract_features(obs, feature_names)
-        if vec is None:
-            continue
-        reward = obs.get("reward", {}).get("immediate")
-        if reward is None:
-            continue
-        X_raw.append(vec)
-        y.append(reward)
-
-    if len(y) < MIN_OBSERVATIONS:
+    # Fit the full model
+    full_model = _fit_and_evaluate(scored, all_features)
+    if full_model is None:
         return None
 
-    # Normalize features
-    X_norm, means, stds = _normalize_features(X_raw)
+    # If causal filter output exists, try a filtered model and compare
+    causal_classifications = _load_causal_feature_classifications(company)
+    filtered_model = None
+    filter_note = None
 
-    # Add intercept column
-    X = [row + [1.0] for row in X_norm]
+    if causal_classifications is not None:
+        filtered_features = _apply_causal_filter(all_features, causal_classifications)
+        # Only attempt the filtered fit if it actually drops some features
+        if filtered_features and len(filtered_features) < len(all_features):
+            filtered_model = _fit_and_evaluate(scored, filtered_features)
+            if filtered_model is not None:
+                dropped = sorted(set(all_features) - set(filtered_features))
+                filter_note = {
+                    "full_r_squared": full_model["r_squared"],
+                    "filtered_r_squared": filtered_model["r_squared"],
+                    "dropped_features": dropped,
+                    "dropped_classifications": {
+                        f: causal_classifications.get(f, "unevaluated") for f in dropped
+                    },
+                    "kept_features": filtered_features,
+                }
+                logger.info(
+                    "[engagement_predictor] %s causal filter: full R²=%.4f, "
+                    "filtered R²=%.4f (dropped %s)",
+                    company, full_model["r_squared"], filtered_model["r_squared"],
+                    dropped,
+                )
 
-    # Fit ridge regression
-    coefficients = _ridge_fit(X, y, lam=DEFAULT_RIDGE_LAMBDA)
+    # Pick the better model. Keep the full model when the filtered one isn't
+    # strictly better — don't force feature selection if it hurts accuracy.
+    if filtered_model and filtered_model["r_squared"] > full_model["r_squared"]:
+        chosen_model = filtered_model
+        chosen_model["feature_selection"] = "causal_filter"
+        chosen_model["feature_selection_note"] = filter_note
+    else:
+        chosen_model = full_model
+        chosen_model["feature_selection"] = "full"
+        if filter_note:
+            # Still record the comparison even when we kept the full model
+            chosen_model["feature_selection_note"] = filter_note
 
-    # Intercept is the last coefficient
-    intercept = coefficients[-1]
-    feature_coefficients = coefficients[:-1]
-
-    # Compute R² and residual stats via leave-one-out
-    loo_residuals = _leave_one_out_residuals(X_norm, y, lam=DEFAULT_RIDGE_LAMBDA)
-
-    y_mean = sum(y) / len(y)
-    ss_tot = sum((yi - y_mean) ** 2 for yi in y)
-    ss_res = sum(r ** 2 for r in loo_residuals)
-    r_squared = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-
-    residual_mean = sum(loo_residuals) / len(loo_residuals)
-    residual_std = math.sqrt(
-        sum((r - residual_mean) ** 2 for r in loo_residuals) / max(len(loo_residuals) - 1, 1)
-    )
-
-    model = {
-        "feature_names": feature_names,
-        "coefficients": [round(c, 6) for c in feature_coefficients],
-        "intercept": round(intercept, 6),
-        "means": [round(m, 6) for m in means],
-        "stds": [round(s, 6) for s in stds],
-        "r_squared": round(r_squared, 4),
-        "residual_mean": round(residual_mean, 6),
-        "residual_std": round(residual_std, 6),
-        "observation_count": len(y),
-        "computed_at": datetime.now(timezone.utc).isoformat(),
-    }
+    chosen_model["computed_at"] = datetime.now(timezone.utc).isoformat()
 
     # Save
     model_path = vortex.memory_dir(company) / "engagement_model.json"
     model_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = model_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(model, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(chosen_model, indent=2), encoding="utf-8")
     tmp.rename(model_path)
 
     logger.info(
-        "[engagement_predictor] Built model for %s: R²=%.4f, %d features, %d obs",
-        company, r_squared, len(feature_names), len(y),
+        "[engagement_predictor] Built model for %s: R²=%.4f, %d features, %d obs (%s)",
+        company, chosen_model["r_squared"], len(chosen_model["feature_names"]),
+        chosen_model["observation_count"], chosen_model["feature_selection"],
     )
 
-    return model
+    return chosen_model
 
 
 def _leave_one_out_residuals(

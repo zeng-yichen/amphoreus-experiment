@@ -120,6 +120,16 @@ class Observation:
     icp_reward: Optional[float] = None  # ICP quality signal in [-1, 1]; None until engagers fetched
     linkedin_post_url: str = ""  # Live LinkedIn URL (populated from ordinal analytics payload)
     edit_similarity: float = -1.0  # SequenceMatcher ratio of draft vs published (-1 = not yet computed)
+    # Post-hoc tags from observation_tagger (None until tagged).
+    # Free-text, no predefined taxonomy — tagger produces whatever clusters naturally.
+    topic_tag: Optional[str] = None           # subject matter (e.g., "regulatory compliance")
+    source_segment_type: Optional[str] = None  # type of source moment (e.g., "specific compliance gap")
+    format_tag: Optional[str] = None          # structural format (e.g., "case study")
+    # Source tracking — populated at generation time when the strategy brief
+    # pipeline creates posts with explicit source attribution. Null for posts
+    # ingested from Ordinal analytics without draft provenance.
+    source_transcript: Optional[str] = None   # filename of source transcript
+    abm_target: Optional[str] = None          # company name if ABM-targeted
 
 
 # ------------------------------------------------------------------

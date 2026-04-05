@@ -208,22 +208,76 @@ def sync_all_companies() -> None:
                                 except Exception:
                                     logger.debug("CV threshold recompute skipped for %s", company, exc_info=True)
 
-                                # 2j. Engagement predictor: recompute the pre-publish
-                                #     engagement prediction model from scored observations.
+                                # 2j. Observation tagger (A1): extract topic_tag, source_segment_type,
+                                #     format_tag from post bodies via Haiku. Foundational for
+                                #     topic transitions, strategy brief, and causal filter.
+                                try:
+                                    from backend.src.utils.observation_tagger import backfill_client_tags
+                                    _tagged = backfill_client_tags(company)
+                                    if _tagged:
+                                        logger.info(
+                                            "[ordinal_sync] Tagged %d observations for %s",
+                                            _tagged, company,
+                                        )
+                                except Exception:
+                                    logger.debug("Observation tagging skipped for %s", company, exc_info=True)
+
+                                # 2k. Topic transition model (A2): learn P(topic_next | topic_prev)
+                                #     and P(format_next | format_prev) from chronologically ordered
+                                #     tagged observations.
+                                try:
+                                    from backend.src.utils.topic_transitions import build_transition_model
+                                    _trans = build_transition_model(company)
+                                    if _trans:
+                                        logger.info(
+                                            "[ordinal_sync] Transition model built for %s: "
+                                            "%d topics, %d formats",
+                                            company,
+                                            _trans["topic"]["unique_count"],
+                                            _trans["format"]["unique_count"],
+                                        )
+                                except Exception:
+                                    logger.debug("Topic transitions skipped for %s", company, exc_info=True)
+
+                                # 2l. Causal dimension filter (B1): partial-correlation analysis
+                                #     to classify content state dimensions as causal / confounded /
+                                #     inert. Read by B3 (engagement predictor feature selection)
+                                #     and B2 (strategy brief causal section) — must run before both.
+                                try:
+                                    from backend.src.utils.causal_filter import compute_causal_dimensions
+                                    _causal = compute_causal_dimensions(company)
+                                    if _causal:
+                                        logger.info(
+                                            "[ordinal_sync] Causal filter for %s: %d causal, "
+                                            "%d confounded (n=%d)",
+                                            company,
+                                            sum(1 for d in _causal["dimensions"] if d["classification"] == "causal"),
+                                            sum(1 for d in _causal["dimensions"] if d["classification"] == "confounded"),
+                                            _causal["observation_count"],
+                                        )
+                                except Exception:
+                                    logger.debug("Causal filter skipped for %s", company, exc_info=True)
+
+                                # 2m. Engagement predictor: recompute the pre-publish engagement
+                                #     prediction model. Reads causal_dimensions.json from step 2l
+                                #     and applies B3 feature selection when it improves R².
                                 try:
                                     from backend.src.utils.engagement_predictor import build_engagement_model
                                     _eng_model = build_engagement_model(company)
                                     if _eng_model:
                                         logger.info(
-                                            "[ordinal_sync] Engagement model built for %s: R²=%.4f, %d obs",
+                                            "[ordinal_sync] Engagement model built for %s: "
+                                            "R²=%.4f, %d features, %d obs (%s)",
                                             company,
                                             _eng_model.get("r_squared", 0),
+                                            len(_eng_model.get("feature_names", [])),
                                             _eng_model.get("observation_count", 0),
+                                            _eng_model.get("feature_selection", "full"),
                                         )
                                 except Exception:
                                     logger.debug("Engagement model build skipped for %s", company, exc_info=True)
 
-                                # 2k. Client profile: extract cross-client learning profile
+                                # 2n. Client profile: extract cross-client learning profile
                                 #     vector for similarity-based cold-start seeding.
                                 try:
                                     from backend.src.utils.cross_client import build_client_profile
@@ -237,7 +291,7 @@ def sync_all_companies() -> None:
                                 except Exception:
                                     logger.debug("Client profile build skipped for %s", company, exc_info=True)
 
-                                # 2l. Feedback distiller: extract writing directives from
+                                # 2o. Feedback distiller: extract writing directives from
                                 #     editorial feedback, accepted posts, and engagement
                                 #     patterns. Injected into Stelle's system prompt.
                                 try:
@@ -250,6 +304,22 @@ def sync_all_companies() -> None:
                                         )
                                 except Exception:
                                     logger.debug("Feedback distillation skipped for %s", company, exc_info=True)
+
+                                # 2p. Strategy brief (A4): final, data-driven weekly brief for
+                                #     the human operator. Pulls everything together — performance
+                                #     summary, topic recommendations, format sequence, transcript
+                                #     segments, ABM targets, causal drivers, cross-client insights.
+                                #     Not used by Stelle; consumed by the human.
+                                try:
+                                    from backend.src.utils.strategy_brief import generate_strategy_brief
+                                    _brief = generate_strategy_brief(company)
+                                    if _brief:
+                                        logger.info(
+                                            "[ordinal_sync] Strategy brief generated for %s (%d chars)",
+                                            company, len(_brief),
+                                        )
+                                except Exception:
+                                    logger.debug("Strategy brief skipped for %s", company, exc_info=True)
 
                                 # 3. ICP auto-generation — create definition if missing.
                                 try:
