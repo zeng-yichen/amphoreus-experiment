@@ -305,6 +305,30 @@ def sync_all_companies() -> None:
                                 except Exception:
                                     logger.debug("Feedback distillation skipped for %s", company, exc_info=True)
 
+                                # 2o2. Directive efficacy attribution: retrospectively classify
+                                #      each learned directive as validated / neutral /
+                                #      counterproductive / untested based on engagement outcomes
+                                #      of posts generated while the directive was active.
+                                #      Counterproductive directives get stripped from Stelle's
+                                #      system prompt on the next generation.
+                                try:
+                                    from backend.src.utils.feedback_distiller import compute_directive_efficacy
+                                    _eff = compute_directive_efficacy(company)
+                                    if _eff and _eff.get("attributable_observations", 0) > 0:
+                                        cc = _eff.get("classifications", {})
+                                        logger.info(
+                                            "[ordinal_sync] Directive efficacy for %s: "
+                                            "%d validated, %d counterproductive, %d neutral "
+                                            "(n=%d attributable)",
+                                            company,
+                                            cc.get("validated", 0),
+                                            cc.get("counterproductive", 0),
+                                            cc.get("neutral", 0),
+                                            _eff.get("attributable_observations", 0),
+                                        )
+                                except Exception:
+                                    logger.debug("Directive efficacy skipped for %s", company, exc_info=True)
+
                                 # 2p. Strategy brief (A4): final, data-driven weekly brief for
                                 #     the human operator. Pulls everything together — performance
                                 #     summary, topic recommendations, format sequence, transcript

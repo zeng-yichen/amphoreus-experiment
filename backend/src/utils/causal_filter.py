@@ -331,12 +331,16 @@ def _permutation_pvalue(X: list[list[float]], y: list[float], feature_idx: int,
 # Main entry point
 # ------------------------------------------------------------------
 
-def compute_causal_dimensions(company: str) -> Optional[dict]:
+def compute_causal_dimensions(company: str, force: bool = False) -> Optional[dict]:
     """Compute marginal + partial correlations for all content state dimensions.
 
     Returns a dict with the classification per dimension and summary stats,
     or None if insufficient data. Persists to
     ``memory/{company}/causal_dimensions.json``.
+
+    Args:
+        company: Client slug.
+        force: If True, bypass the observation-count cache check and recompute.
     """
     state = _load_state(company)
     if state is None:
@@ -356,6 +360,24 @@ def compute_causal_dimensions(company: str) -> Optional[dict]:
             company, len(scored), _MIN_OBS_FOR_CAUSAL,
         )
         return None
+
+    # Cache short-circuit: if the file exists and the observation count hasn't
+    # changed since the last run, return the cached result. The causal filter
+    # is deterministic on input data (fixed permutation seed), so recomputing
+    # on the same inputs is pure waste — 500 permutations × 6 features adds up
+    # across 22+ clients at hourly sync intervals.
+    cached_path = vortex.memory_dir(company) / "causal_dimensions.json"
+    if not force and cached_path.exists():
+        try:
+            cached = json.loads(cached_path.read_text(encoding="utf-8"))
+            if cached.get("observation_count") == len(scored):
+                logger.debug(
+                    "[causal_filter] %s cache hit (n=%d unchanged)",
+                    company, len(scored),
+                )
+                return cached
+        except Exception:
+            pass
 
     feature_names, X, y = _build_feature_matrix(scored)
     if not feature_names:
@@ -426,11 +448,10 @@ def compute_causal_dimensions(company: str) -> Optional[dict]:
         "computed_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    path = vortex.memory_dir(company) / "causal_dimensions.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    cached_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cached_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.rename(path)
+    tmp.rename(cached_path)
 
     causal_count = sum(1 for d in results if d["classification"] == "causal")
     confounded_count = sum(1 for d in results if d["classification"] == "confounded")

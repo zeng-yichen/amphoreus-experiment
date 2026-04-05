@@ -41,6 +41,11 @@ _BASELINE_WINDOW_DAYS = 90
 _TOP_SEGMENTS_PER_TRANSCRIPT = 3
 _MAX_TRANSCRIPTS_SCORED = 2  # cap LLM cost per brief
 
+# Max chars for the compact Stelle-injection version of the brief.
+# Full brief is 5-9k chars; compact is ~1000-1500 to fit user_prompt budget
+# without crowding out transcripts and other context.
+_STELLE_COMPACT_MAX_CHARS = 1800
+
 
 def generate_strategy_brief(company: str, force: bool = False) -> Optional[str]:
     """Generate a markdown strategy brief for a client.
@@ -671,3 +676,119 @@ def _load_ruan_mei_state(company: str) -> Optional[dict]:
         except Exception:
             pass
     return None
+
+
+# ------------------------------------------------------------------
+# Compact Stelle-injection version
+# ------------------------------------------------------------------
+
+def build_stelle_strategy_context(company: str) -> str:
+    """Build a compact strategy recommendation block for Stelle's user prompt.
+
+    This is the *only* component in the pipeline that accounts for sequence
+    (topic transitions, format repetition decay). Injecting a condensed version
+    of the brief into Stelle's user_prompt closes the loop between strategy
+    analysis and generation — otherwise the brief only reaches the human
+    operator and Stelle keeps picking topics/formats blindly.
+
+    Distinct from ``generate_strategy_brief``: the full brief is 5-9k chars
+    of markdown for human consumption; this returns a ~1000-1500 char block
+    optimized for a generation prompt.
+
+    Returns empty string when there's insufficient data to make a recommendation.
+    """
+    try:
+        from backend.src.utils.topic_transitions import (
+            recommend_next_topic, recommend_next_format,
+        )
+    except Exception:
+        return ""
+
+    topic_recs = recommend_next_topic(company, top_k=3) or []
+    format_recs = recommend_next_format(company, top_k=3) or []
+
+    if not topic_recs and not format_recs:
+        return ""
+
+    causal_map = _load_causal_classifications(company)
+
+    lines = [
+        "",
+        "",
+        "STRATEGY RECOMMENDATION (derived from this client's engagement history):",
+        "These are data-driven directions based on what has historically worked. "
+        "They are context, not directives. Override when the source material "
+        "strongly points elsewhere.",
+    ]
+
+    # Topic sequence context
+    try:
+        model_path = vortex.memory_dir(company) / "topic_transitions.json"
+        model = json.loads(model_path.read_text(encoding="utf-8"))
+        recent_topics = model["topic"]["recent"]
+        recent_formats = model["format"]["recent"]
+    except Exception:
+        recent_topics = []
+        recent_formats = []
+
+    if recent_topics:
+        lines.append(f"\nRecent topic sequence: {' → '.join(recent_topics)}")
+    if recent_formats:
+        lines.append(f"Recent format sequence: {' → '.join(recent_formats)}")
+
+    # Topic recommendations
+    if topic_recs:
+        lines.append("\nSuggested next topics (ranked by expected engagement):")
+        topic_causal = causal_map.get("topic_tag", {}).get("classification")
+        for rec in topic_recs:
+            confidence_note = ""
+            if rec["confidence"] >= 2:
+                confidence_note = f"reliable direct transition (n={rec['confidence']})"
+            elif rec["source"] == "unexplored_transition":
+                confidence_note = "exploration opportunity (untested after current topic)"
+            else:
+                confidence_note = f"weak direct transition (n={rec['confidence']})"
+            lines.append(
+                f"  • {rec['topic']} — expected reward {rec['expected_reward']:+.2f}, "
+                f"{confidence_note}"
+            )
+
+        if topic_causal == "causal":
+            lines.append(
+                "  (topic is a validated causal driver for this client — "
+                "prioritize these recommendations)"
+            )
+        elif topic_causal == "confounded":
+            lines.append(
+                "  (topic appears confounded by other factors — treat as loose context)"
+            )
+
+    # Format recommendations
+    if format_recs:
+        lines.append("\nSuggested next formats:")
+        format_causal = causal_map.get("format_tag", {}).get("classification")
+        for rec in format_recs:
+            confidence_note = (
+                f"n={rec['confidence']} history"
+                if rec["confidence"] > 0
+                else "untested after current format"
+            )
+            lines.append(
+                f"  • {rec['format']} — expected reward {rec['expected_reward']:+.2f}, "
+                f"{confidence_note}"
+            )
+
+        if format_causal == "confounded":
+            lines.append(
+                "  (format is confounded by topic for this client — "
+                "don't optimize format as an independent lever)"
+            )
+        elif format_causal == "causal":
+            lines.append("  (format is a validated causal driver — meaningful signal)")
+
+    result = "\n".join(lines)
+    # Hard cap to prevent runaway context
+    if len(result) > _STELLE_COMPACT_MAX_CHARS:
+        result = result[:_STELLE_COMPACT_MAX_CHARS] + "\n  [truncated]"
+
+    return result

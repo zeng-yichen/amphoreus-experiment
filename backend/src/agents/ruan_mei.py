@@ -130,6 +130,11 @@ class Observation:
     # ingested from Ordinal analytics without draft provenance.
     source_transcript: Optional[str] = None   # filename of source transcript
     abm_target: Optional[str] = None          # company name if ABM-targeted
+    # Directive efficacy tracking — stamped at generation time with the IDs
+    # of learned directives that were active in Stelle's system prompt. Used
+    # by compute_directive_efficacy() to retrospectively classify directives
+    # as validated / neutral / counterproductive based on engagement outcomes.
+    active_directives: list = field(default_factory=list)
 
 
 # ------------------------------------------------------------------

@@ -34,6 +34,7 @@ Usage:
     diagnostic = build_engagement_diagnostic("innovocommerce", draft_text)
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -55,6 +56,32 @@ _DIRECTIVE_CACHE_TTL_DAYS = 7
 # authority level are a bigger risk than missed signal. Editorial and accepted-
 # source directives bypass this floor — they're direct signal from the client.
 _PRIORITY_FLOOR_OBS = 50
+
+# Directive efficacy attribution thresholds.
+# A directive needs at least this many posts in each arm (active / not-active)
+# before we're willing to classify it. Below this n, classification stays
+# "untested" and the directive is kept as-is.
+_MIN_OBS_PER_ARM_FOR_EFFICACY = 5
+# Effect size thresholds (Cohen's d on z-scored reward).
+_VALIDATED_EFFECT_SIZE = 0.2       # d >= +0.2 → validated
+_COUNTERPRODUCTIVE_EFFECT_SIZE = -0.2  # d <= -0.2 → counterproductive
+
+
+# ------------------------------------------------------------------
+# Directive identity
+# ------------------------------------------------------------------
+
+def _directive_id(directive_text: str) -> str:
+    """Stable hash-based ID for a directive.
+
+    Uses SHA1 of the directive text; first 12 hex chars. Stable across
+    distiller re-runs as long as the LLM produces the exact same string.
+    When the LLM rewords a directive on re-run, it gets a new ID and
+    efficacy tracking resets — this is the right behavior: a reworded
+    directive is effectively a different directive.
+    """
+    normalized = directive_text.strip().lower()
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
 
 
 # ------------------------------------------------------------------
@@ -331,19 +358,48 @@ def distill_directives(company: str, force: bool = False) -> Optional[list[dict]
         logger.warning("[feedback_distiller] Distillation failed for %s: %s", company, e)
         return None
 
-    # Validate
+    # Validate and assign stable IDs
     valid = []
     for d in directives[:_MAX_DIRECTIVES]:
         if d.get("directive") and len(d["directive"]) > 10:
             valid.append({
+                "id": _directive_id(d["directive"]),
                 "directive": d["directive"],
                 "evidence": d.get("evidence", ""),
                 "source": d.get("source", "engagement"),
                 "priority": d.get("priority", "medium"),
+                # Efficacy fields — populated by compute_directive_efficacy
+                # after enough observations accumulate. "untested" is the
+                # default state; the directive is still injected into Stelle
+                # at its assigned priority.
+                "efficacy_classification": "untested",
+                "efficacy_effect_size": None,
+                "efficacy_n_active": 0,
+                "efficacy_n_inactive": 0,
             })
 
     if not valid:
         return None
+
+    # Preserve efficacy data from the previous cache when the directive ID
+    # matches (i.e., the distiller produced the exact same directive text).
+    # This prevents efficacy tracking from resetting on every re-run.
+    if cache_path.exists():
+        try:
+            old = json.loads(cache_path.read_text(encoding="utf-8"))
+            old_by_id = {
+                od.get("id"): od for od in old.get("directives", [])
+                if od.get("id")
+            }
+            for d in valid:
+                prior = old_by_id.get(d["id"])
+                if prior:
+                    for k in ("efficacy_classification", "efficacy_effect_size",
+                              "efficacy_n_active", "efficacy_n_inactive"):
+                        if k in prior:
+                            d[k] = prior[k]
+        except Exception:
+            pass
 
     # Priority floor: enforce mechanically regardless of what the LLM assigned.
     # Engagement-source "high" priority requires >= _PRIORITY_FLOOR_OBS observations.
@@ -397,11 +453,43 @@ def distill_directives(company: str, force: bool = False) -> Optional[list[dict]
 # Stelle integration: build the directives section
 # ------------------------------------------------------------------
 
+def get_active_directive_ids(company: str) -> list[str]:
+    """Return the IDs of directives currently active for a client.
+
+    "Active" means present in the distilled cache AND not classified as
+    counterproductive by the efficacy attribution. Used by Stelle's
+    observation recording code to stamp which directives were in effect
+    at generation time, enabling retrospective efficacy analysis.
+    """
+    cache_path = vortex.memory_dir(company) / "learned_directives.json"
+    if not cache_path.exists():
+        return []
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    ids = []
+    for d in data.get("directives", []):
+        if d.get("efficacy_classification") == "counterproductive":
+            continue  # not actually active; filtered out before injection
+        did = d.get("id")
+        if did:
+            ids.append(did)
+    return ids
+
+
 def build_stelle_directives_section(company: str) -> str:
     """Build a Stelle-ready directives section from learned rules.
 
     Returns a formatted string for injection into _build_dynamic_directives,
     or empty string if no directives exist.
+
+    Directives classified as "counterproductive" by the efficacy attribution
+    (compute_directive_efficacy) are filtered out — they historically produced
+    posts that scored worse than posts without them.
+    Directives classified as "validated" get a ✓ marker so the model sees
+    which rules have proven efficacy.
     """
     cache_path = vortex.memory_dir(company) / "learned_directives.json"
     if not cache_path.exists():
@@ -413,13 +501,28 @@ def build_stelle_directives_section(company: str) -> str:
     except Exception:
         return ""
 
+    # Strip counterproductive directives entirely
+    directives = [
+        d for d in directives
+        if d.get("efficacy_classification") != "counterproductive"
+    ]
+
     if not directives:
+        return ""
+
+    def _marker(d: dict) -> str:
+        cls = d.get("efficacy_classification", "untested")
+        if cls == "validated":
+            return "✓ "  # empirically validated against engagement
         return ""
 
     lines = [
         "## Learned Writing Rules\n",
         "These rules were extracted from editorial feedback, approved posts, and "
-        "engagement data for this specific client. Follow them.\n",
+        "engagement data for this specific client. Follow them. "
+        "Rules marked with ✓ have been empirically validated by post-publication "
+        "engagement attribution — posts generated with those rules active scored "
+        "higher than posts without them.\n",
     ]
 
     high = [d for d in directives if d.get("priority") == "high"]
@@ -428,7 +531,7 @@ def build_stelle_directives_section(company: str) -> str:
     if high:
         lines.append("**Must follow:**")
         for d in high:
-            lines.append(f"- {d['directive']}")
+            lines.append(f"- {_marker(d)}{d['directive']}")
             if d.get("evidence"):
                 lines.append(f"  (Evidence: {d['evidence'][:150]})")
         lines.append("")
@@ -436,10 +539,169 @@ def build_stelle_directives_section(company: str) -> str:
     if medium:
         lines.append("**Strong preference:**")
         for d in medium:
-            lines.append(f"- {d['directive']}")
+            lines.append(f"- {_marker(d)}{d['directive']}")
         lines.append("")
 
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
+# Efficacy attribution
+# ------------------------------------------------------------------
+
+def compute_directive_efficacy(company: str) -> Optional[dict]:
+    """Classify each directive as validated / neutral / counterproductive / untested.
+
+    For each directive in the current cache:
+    1. Partition scored observations into (directive was active, directive was not)
+       using the ``active_directives`` field populated at generation time.
+    2. Compute Cohen's d on reward.immediate between the two arms.
+    3. Classify:
+       - n_active < _MIN_OBS_PER_ARM_FOR_EFFICACY OR n_inactive < same → untested
+       - d >= _VALIDATED_EFFECT_SIZE → validated
+       - d <= _COUNTERPRODUCTIVE_EFFECT_SIZE → counterproductive
+       - otherwise → neutral
+    4. Write the updated classifications back into learned_directives.json.
+
+    Returns a summary dict, or None if no directives exist.
+
+    This is the 'feedback loop on the feedback loop' — it prevents wrong
+    directives at system-prompt authority from degrading generation quality
+    indefinitely.
+    """
+    cache_path = vortex.memory_dir(company) / "learned_directives.json"
+    if not cache_path.exists():
+        return None
+
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    directives = data.get("directives", [])
+    if not directives:
+        return None
+
+    # Load scored observations with both a reward and an active_directives field.
+    try:
+        from backend.src.db.local import initialize_db, ruan_mei_load
+        initialize_db()
+        state = ruan_mei_load(company)
+    except Exception:
+        state = None
+    if state is None:
+        return None
+
+    scored = [
+        o for o in state.get("observations", [])
+        if o.get("status") == "scored"
+        and o.get("reward", {}).get("immediate") is not None
+    ]
+
+    # An observation contributes to attribution only if active_directives was
+    # recorded (a list, even if empty). Observations from before this feature
+    # shipped don't have the field and are excluded.
+    attributable = [
+        o for o in scored
+        if isinstance(o.get("active_directives"), list)
+    ]
+
+    if not attributable:
+        # No data yet — leave all directives as "untested". This is the
+        # expected state immediately after shipping directive tracking; the
+        # attribution activates as new observations accumulate.
+        return {
+            "company": company,
+            "directives_total": len(directives),
+            "attributable_observations": 0,
+            "classifications": {"untested": len(directives)},
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    classifications_count = {
+        "validated": 0, "neutral": 0, "counterproductive": 0, "untested": 0,
+    }
+
+    for d in directives:
+        did = d.get("id")
+        if not did:
+            classifications_count["untested"] += 1
+            continue
+
+        active_rewards = []
+        inactive_rewards = []
+        for obs in attributable:
+            reward = obs.get("reward", {}).get("immediate", 0)
+            if did in obs.get("active_directives", []):
+                active_rewards.append(reward)
+            else:
+                inactive_rewards.append(reward)
+
+        n_active = len(active_rewards)
+        n_inactive = len(inactive_rewards)
+
+        if n_active < _MIN_OBS_PER_ARM_FOR_EFFICACY or n_inactive < _MIN_OBS_PER_ARM_FOR_EFFICACY:
+            d["efficacy_classification"] = "untested"
+            d["efficacy_effect_size"] = None
+            d["efficacy_n_active"] = n_active
+            d["efficacy_n_inactive"] = n_inactive
+            classifications_count["untested"] += 1
+            continue
+
+        # Cohen's d with pooled standard deviation
+        mean_active = sum(active_rewards) / n_active
+        mean_inactive = sum(inactive_rewards) / n_inactive
+        var_active = sum((r - mean_active) ** 2 for r in active_rewards) / max(n_active - 1, 1)
+        var_inactive = sum((r - mean_inactive) ** 2 for r in inactive_rewards) / max(n_inactive - 1, 1)
+        pooled_sd = math.sqrt(
+            ((n_active - 1) * var_active + (n_inactive - 1) * var_inactive)
+            / max(n_active + n_inactive - 2, 1)
+        )
+        effect_size = (mean_active - mean_inactive) / pooled_sd if pooled_sd > 0 else 0.0
+
+        if effect_size >= _VALIDATED_EFFECT_SIZE:
+            cls = "validated"
+        elif effect_size <= _COUNTERPRODUCTIVE_EFFECT_SIZE:
+            cls = "counterproductive"
+        else:
+            cls = "neutral"
+
+        d["efficacy_classification"] = cls
+        d["efficacy_effect_size"] = round(effect_size, 4)
+        d["efficacy_n_active"] = n_active
+        d["efficacy_n_inactive"] = n_inactive
+        classifications_count[cls] += 1
+
+    # Persist updated cache with new classifications
+    data["directives"] = directives
+    data["efficacy"] = {
+        "attributable_observations": len(attributable),
+        "classifications": classifications_count,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    tmp = cache_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.rename(cache_path)
+
+    logger.info(
+        "[feedback_distiller] Directive efficacy for %s: "
+        "%d validated, %d counterproductive, %d neutral, %d untested "
+        "(attributable n=%d)",
+        company,
+        classifications_count["validated"],
+        classifications_count["counterproductive"],
+        classifications_count["neutral"],
+        classifications_count["untested"],
+        len(attributable),
+    )
+
+    return {
+        "company": company,
+        "directives_total": len(directives),
+        "attributable_observations": len(attributable),
+        "classifications": classifications_count,
+        "computed_at": data["efficacy"]["computed_at"],
+    }
 
 
 # ------------------------------------------------------------------

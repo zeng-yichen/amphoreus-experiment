@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 _EXTRACTOR_MODEL = "claude-haiku-4-5"
 _MIN_OBS_FOR_LEARNED_WEIGHTS = 10
-_WEIGHT_CACHE_TTL_DAYS = 7
+_WEIGHT_CACHE_TTL_DAYS = 14
 # Minimum absolute Spearman correlation for the learned signal to be trusted.
 # Below this threshold, all 5 features are effectively noise and we fall back
 # to uniform weights rather than amplifying a ~0 correlation into a hard 1.0

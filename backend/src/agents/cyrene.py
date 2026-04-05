@@ -91,7 +91,11 @@ class CyreneAdaptiveConfig:
 
     def compute_from_client(self, company: str) -> dict:
         obs = self._get_observations_with_dims(company)
-        return self._compute(obs)
+        self._current_company = company
+        try:
+            return self._compute(obs)
+        finally:
+            self._current_company = None
 
     def compute_from_aggregate(self) -> dict:
         from backend.src.db import vortex as P
@@ -140,6 +144,53 @@ class CyreneAdaptiveConfig:
         except Exception:
             return []
 
+    # ---- company_context carried via call sites; we stash it per-resolve ----
+    _current_company: Optional[str] = None
+
+    def _load_cyrene_causal_confidences(self) -> dict:
+        """Return {dimension_name: confidence_factor} from causal_filter output.
+
+        The causal filter stores classifications for cyrene dimensions under the
+        key ``cyrene_{dimension_name}``. This method maps them back to Cyrene's
+        native dimension names and converts classifications to multiplicative
+        confidence factors:
+          - causal       → 1.0 (full weight)
+          - uncertain    → 0.7 (some downweight — partial signal but not validated)
+          - confounded   → 0.3 (heavy downweight — apparent signal is misleading)
+          - inert        → 0.1 (near-zero — the dimension doesn't carry reward signal)
+
+        Returns an empty dict when no causal filter output exists for the client
+        (behavior is then identical to before Task 3).
+        """
+        company = self._current_company
+        if not company:
+            return {}
+        try:
+            from backend.src.db import vortex as _P
+            path = _P.memory_dir(company) / "causal_dimensions.json"
+            if not path.exists():
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+        confidence_by_class = {
+            "causal": 1.0,
+            "uncertain": 0.7,
+            "confounded": 0.3,
+            "inert": 0.1,
+        }
+
+        confidences: dict = {}
+        for d in data.get("dimensions", []):
+            name = d.get("dimension", "")
+            cls = d.get("classification", "")
+            if name.startswith("cyrene_") and cls in confidence_by_class:
+                # Strip the "cyrene_" prefix to match CyreneAdaptiveConfig keys
+                native_name = name[len("cyrene_"):]
+                confidences[native_name] = confidence_by_class[cls]
+        return confidences
+
     def _compute(self, observations: list[dict]) -> dict:
         """Compute adaptive weights and threshold from observations."""
         from backend.src.utils.correlation_analyzer import correlate_with_engagement
@@ -156,6 +207,25 @@ class CyreneAdaptiveConfig:
 
         if not correlations:
             return self.get_defaults()
+
+        # Causal confidence weighting: when causal_dimensions.json has classifications
+        # for any cyrene dimension, multiply the raw correlation by a confidence
+        # factor. This downweights dimensions the causal filter identified as
+        # confounded (their marginal correlation is misleading) and preserves full
+        # weight for causal / uncertain / untested dimensions.
+        #
+        # Without this, Cyrene's critic would over-index on dimensions whose
+        # correlation with reward is explained by other factors — exactly the
+        # problem B3 solved for the engagement predictor.
+        #
+        # The causal filter keys cyrene dimensions as "cyrene_{dim_name}" in its
+        # feature matrix. We look up each correlation key under that prefix.
+        causal_confidences = self._load_cyrene_causal_confidences()
+        if causal_confidences:
+            correlations = {
+                k: v * causal_confidences.get(k, 1.0)
+                for k, v in correlations.items()
+            }
 
         # Normalize correlations to weights (clamp negatives to 0, then normalize)
         raw_weights = {k: max(0.0, v) for k, v in correlations.items()}

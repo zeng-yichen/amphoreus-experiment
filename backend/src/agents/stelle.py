@@ -3916,6 +3916,20 @@ def _process_result(
             except Exception:
                 pass
 
+            # Active learned directives — stamp which directives were in the
+            # system prompt at generation time so compute_directive_efficacy()
+            # can retrospectively classify them as validated / neutral /
+            # counterproductive based on the resulting engagement.
+            try:
+                from backend.src.utils.feedback_distiller import get_active_directive_ids
+                _active_ids = get_active_directive_ids(company_keyword)
+                # Always set the field (even to empty list) so attribution can
+                # distinguish "directive was not active" from "observation
+                # created before tracking shipped".
+                _extra_fields["active_directives"] = _active_ids
+            except Exception:
+                pass
+
             if _extra_fields:
                 for _obs in reversed(_rm_inst._state.get("observations", [])):
                     if _obs.get("post_hash") == _post_hash:
@@ -4097,6 +4111,18 @@ def generate_one_shot(
     except Exception as _e:
         logger.debug("[Stelle] Scheduling context skipped: %s", _e)
 
+    # Strategy brief: compact topic/format recommendations + causal caveats.
+    # This is the only pipeline component that accounts for sequence (topic
+    # transitions, format repetition decay). The full brief is for the human;
+    # this injects a condensed version into Stelle's user message so the
+    # learned strategy signal actually reaches generation.
+    strategy_brief_context = ""
+    try:
+        from backend.src.utils.strategy_brief import build_stelle_strategy_context
+        strategy_brief_context = build_stelle_strategy_context(company_keyword)
+    except Exception as _e:
+        logger.debug("[Stelle] Strategy brief context skipped: %s", _e)
+
     # 360Brew alignment scorer: pre-generation semantic consistency check.
     alignment_context = ""
     try:
@@ -4141,6 +4167,8 @@ def generate_one_shot(
         user_prompt += market_context
     if hook_library_context:
         user_prompt += hook_library_context
+    if strategy_brief_context:
+        user_prompt += strategy_brief_context
 
     if _PI_AVAILABLE:
         print(f"[Stelle] Using Pi agent (context compaction enabled)...")
