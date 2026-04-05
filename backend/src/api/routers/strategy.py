@@ -1,6 +1,8 @@
-"""Strategy API — Herta content strategy generation."""
+"""Strategy API — Herta content strategy generation + learned strategy briefs."""
 
+import json
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -12,10 +14,156 @@ from backend.src.services import job_manager
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/strategy", tags=["strategy"])
 
+# Strategy brief staleness threshold — after this many days, the /brief
+# endpoint returns 404 with a hint to refresh.
+_BRIEF_STALENESS_DAYS = 7
+
 
 class StrategyRequest(BaseModel):
     company: str
     prompt: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Learned strategy brief endpoints (A4 pipeline output)
+# ---------------------------------------------------------------------------
+# These are declared BEFORE the /{company} catchall routes below so FastAPI
+# matches them by literal path prefix ("brief", "topics", "causal") rather
+# than treating those words as company slugs.
+
+
+@router.get("/brief/{company}")
+async def get_strategy_brief(company: str):
+    """Return the auto-generated strategy brief markdown for a client.
+
+    404 if the brief doesn't exist or is stale (> 7 days old). The staleness
+    check keeps the frontend from displaying data that no longer reflects
+    current engagement patterns. Clients should call /refresh to regenerate.
+    """
+    from backend.src.db import vortex
+    brief_path = vortex.memory_dir(company) / "strategy_brief.md"
+    if not brief_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No strategy brief exists for {company}. Trigger an ordinal "
+                "sync or call /api/strategy/brief/{company}/refresh to generate one."
+            ),
+        )
+
+    mtime = datetime.fromtimestamp(brief_path.stat().st_mtime, tz=timezone.utc)
+    age_days = (datetime.now(timezone.utc) - mtime).total_seconds() / 86400
+    if age_days > _BRIEF_STALENESS_DAYS:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Strategy brief for {company} is {age_days:.1f} days old "
+                f"(threshold: {_BRIEF_STALENESS_DAYS} days). Call "
+                "/api/strategy/brief/{company}/refresh to regenerate."
+            ),
+        )
+
+    try:
+        brief_md = brief_path.read_text(encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read brief: {e}")
+
+    return {
+        "company": company,
+        "brief": brief_md,
+        "generated_at": mtime.isoformat(),
+        "age_days": round(age_days, 2),
+    }
+
+
+@router.get("/brief/{company}/refresh")
+async def refresh_strategy_brief(company: str):
+    """Force a fresh strategy brief generation and return the result.
+
+    Calls ``generate_strategy_brief(company, force=True)`` synchronously.
+    For clients with sparse data this may return 404 if the brief generator
+    has insufficient signal to produce anything useful.
+    """
+    try:
+        from backend.src.utils.strategy_brief import generate_strategy_brief
+        brief_md = generate_strategy_brief(company, force=True)
+    except Exception as e:
+        logger.exception("[strategy] Refresh failed for %s", company)
+        raise HTTPException(status_code=500, detail=f"Brief generation failed: {e}")
+
+    if not brief_md:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"{company} has insufficient data to generate a meaningful "
+                "strategy brief (needs scored observations with tags and a "
+                "transition model). Run ordinal sync first."
+            ),
+        )
+
+    from backend.src.db import vortex
+    brief_path = vortex.memory_dir(company) / "strategy_brief.md"
+    mtime = datetime.fromtimestamp(brief_path.stat().st_mtime, tz=timezone.utc) \
+        if brief_path.exists() else datetime.now(timezone.utc)
+
+    return {
+        "company": company,
+        "brief": brief_md,
+        "generated_at": mtime.isoformat(),
+        "age_days": 0.0,
+    }
+
+
+@router.get("/topics/{company}")
+async def get_topic_transitions(company: str):
+    """Return the raw topic_transitions.json for a client.
+
+    Used by the frontend to render topic transition visualizations
+    (Markov graphs, sequence timelines, etc.).
+    """
+    from backend.src.db import vortex
+    path = vortex.memory_dir(company) / "topic_transitions.json"
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No topic transition model for {company}. Needs at least 15 "
+                "tagged scored observations. Run ordinal sync first."
+            ),
+        )
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read transitions: {e}")
+
+
+@router.get("/causal/{company}")
+async def get_causal_dimensions(company: str):
+    """Return the raw causal_dimensions.json for a client.
+
+    The partial-correlation analysis that classifies content state dimensions
+    as causal / confounded / uncertain / inert. Used by the frontend to show
+    which features genuinely predict engagement for a client.
+    """
+    from backend.src.db import vortex
+    path = vortex.memory_dir(company) / "causal_dimensions.json"
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No causal filter output for {company}. Needs at least 30 "
+                "tagged scored observations. Run ordinal sync first."
+            ),
+        )
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read causal data: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Herta content strategy generation endpoints
+# ---------------------------------------------------------------------------
 
 
 @router.post("/generate")

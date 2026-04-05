@@ -135,6 +135,16 @@ class Observation:
     # by compute_directive_efficacy() to retrospectively classify directives
     # as validated / neutral / counterproductive based on engagement outcomes.
     active_directives: list = field(default_factory=list)
+    # Strategy brief tracking — stamped at generation time if a brief existed
+    # for the client. Used by strategy_tracker.compute_strategy_brief_impact()
+    # to measure whether data-informed generation produces better posts.
+    # Null for posts generated before any brief existed or for ingested posts.
+    strategy_brief_version: Optional[str] = None
+    # True when the truncated brief was actually injected into the system
+    # prompt via _build_dynamic_directives(). In practice equivalent to
+    # ``strategy_brief_version is not None`` but kept as a separate flag so
+    # we can distinguish "brief existed" from "brief was in the prompt".
+    strategy_context_injected: bool = False
 
 
 # ------------------------------------------------------------------

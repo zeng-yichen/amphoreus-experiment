@@ -1976,6 +1976,19 @@ def _build_dynamic_directives(company_keyword: str) -> str:
     except Exception:
         pass
 
+    # Engagement-informed strategy context: truncated Performance Summary +
+    # Recommended Topics from the auto-generated strategy brief. Soft advisory
+    # context — the LLM decides how to use it. Raw data with caveats, no
+    # prescriptive rules. See strategy_brief.build_stelle_truncated_brief_context
+    # for the framing rationale.
+    try:
+        from backend.src.utils.strategy_brief import build_stelle_truncated_brief_context
+        _truncated_brief = build_stelle_truncated_brief_context(company_keyword)
+        if _truncated_brief:
+            sections.append(_truncated_brief)
+    except Exception:
+        pass
+
     return "\n\n".join(sections) if sections else ""
 
 
@@ -3927,6 +3940,26 @@ def _process_result(
                 # distinguish "directive was not active" from "observation
                 # created before tracking shipped".
                 _extra_fields["active_directives"] = _active_ids
+            except Exception:
+                pass
+
+            # Strategy brief tracking — record the brief version active at
+            # generation time and whether the truncated context was injected
+            # into the system prompt. Enables strategy_tracker to compare
+            # data-informed vs uninformed post performance retrospectively.
+            try:
+                from backend.src.utils.strategy_brief import (
+                    get_brief_version, build_stelle_truncated_brief_context,
+                )
+                _brief_version = get_brief_version(company_keyword)
+                if _brief_version:
+                    _extra_fields["strategy_brief_version"] = _brief_version
+                    # True if build_stelle_truncated_brief_context would have
+                    # returned non-empty output (i.e., the section extraction
+                    # succeeded and was appended to _build_dynamic_directives).
+                    _extra_fields["strategy_context_injected"] = bool(
+                        build_stelle_truncated_brief_context(company_keyword)
+                    )
             except Exception:
                 pass
 

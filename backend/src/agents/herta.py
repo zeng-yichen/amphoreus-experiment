@@ -586,11 +586,25 @@ def _build_user_message(
             "the full strategy document."
         )
 
-    return (
+    # Strategy brief context — injected as a dedicated section so Herta can
+    # reason over the learned engagement data alongside its own live research.
+    # Includes the full brief plus raw topic_transitions.json and
+    # causal_dimensions.json appendices when they exist.
+    strategy_ctx = ""
+    try:
+        from backend.src.utils.strategy_brief import build_herta_strategy_context
+        strategy_ctx = build_herta_strategy_context(client_name)
+    except Exception:
+        pass
+
+    base = (
         f"{header}\n\n---\n\n"
         f"## Client Source Files (transcripts + memory)\n\n{files_str}\n\n---\n\n"
-        f"{research_hint}"
     )
+    if strategy_ctx:
+        base += strategy_ctx + "\n---\n\n"
+    base += research_hint
+    return base
 
 
 # ══════════════════════════════════════════════════════════════════════════════

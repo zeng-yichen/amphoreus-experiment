@@ -682,6 +682,179 @@ def _load_ruan_mei_state(company: str) -> Optional[dict]:
 # Compact Stelle-injection version
 # ------------------------------------------------------------------
 
+def get_brief_version(company: str) -> Optional[str]:
+    """Return a stable version string for the current strategy brief, or None.
+
+    Uses the file's mtime as the version. This changes whenever the brief is
+    regenerated, so observations tagged with a version can be correlated with
+    the specific brief that was active at generation time.
+    """
+    path = vortex.memory_dir(company) / "strategy_brief.md"
+    if not path.exists():
+        return None
+    try:
+        mtime = path.stat().st_mtime
+        return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def build_aglaea_strategy_context(company: str) -> str:
+    """Build a strategy brief context block for Aglaea's interview prep agent.
+
+    Returns the FULL strategy brief (markdown) wrapped with an Aglaea-specific
+    framing note. Aglaea's workspace context is already large (transcripts,
+    references, published posts) — adding the full brief is a small token
+    addition relative to the existing context budget, and Aglaea benefits
+    from seeing the complete causal caveats and transcript segment scores.
+
+    Returns empty string if no brief exists.
+    """
+    path = vortex.memory_dir(company) / "strategy_brief.md"
+    if not path.exists():
+        return ""
+    try:
+        brief = path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if not brief:
+        return ""
+
+    framing = (
+        "## Data-Driven Strategy Context (auto-generated from engagement data)\n\n"
+        "The following strategy brief was generated from this client's engagement "
+        "history. It contains topic recommendations, format analysis, causal drivers, "
+        "and transcript segment scores. Use this data to inform (not dictate) which "
+        "interview questions you prioritize. The data is directional, not definitive — "
+        "respect the caveats about confidence levels and confounded dimensions.\n\n"
+    )
+    return framing + brief + "\n"
+
+
+def build_herta_strategy_context(company: str) -> str:
+    """Build a strategy brief context block for Herta's content strategy agent.
+
+    Returns the full strategy brief PLUS the raw ``topic_transitions.json`` and
+    ``causal_dimensions.json`` as structured appendices, wrapped with a
+    Herta-specific framing note. Herta reasons over content strategy decisions
+    and benefits from access to the raw machine-readable data, not just the
+    human-formatted markdown.
+
+    Returns empty string if no brief exists.
+    """
+    brief_path = vortex.memory_dir(company) / "strategy_brief.md"
+    if not brief_path.exists():
+        return ""
+    try:
+        brief = brief_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if not brief:
+        return ""
+
+    parts = [
+        "## Learned Strategy Data (auto-generated from engagement history)\n",
+        "This client has enough engagement history to produce data-driven strategy "
+        "signals. The strategy brief below is the human-facing summary; the raw JSON "
+        "appendices contain machine-readable topic transitions and causal dimension "
+        "analyses. Use all three to inform (not dictate) your strategy recommendations. "
+        "The data is directional, not definitive — respect confidence levels, causal "
+        "caveats, and observation counts.\n",
+        "### Strategy Brief",
+        brief,
+    ]
+
+    # Raw topic transitions appendix
+    trans_path = vortex.memory_dir(company) / "topic_transitions.json"
+    if trans_path.exists():
+        try:
+            trans = json.loads(trans_path.read_text(encoding="utf-8"))
+            parts.append("\n### Topic Transitions (raw JSON)")
+            parts.append("```json")
+            parts.append(json.dumps(trans, indent=2, ensure_ascii=False))
+            parts.append("```")
+        except Exception:
+            pass
+
+    # Raw causal dimensions appendix
+    causal_path = vortex.memory_dir(company) / "causal_dimensions.json"
+    if causal_path.exists():
+        try:
+            causal = json.loads(causal_path.read_text(encoding="utf-8"))
+            parts.append("\n### Causal Dimensions (raw JSON)")
+            parts.append("```json")
+            parts.append(json.dumps(causal, indent=2, ensure_ascii=False))
+            parts.append("```")
+        except Exception:
+            pass
+
+    return "\n\n".join(parts) + "\n"
+
+
+def build_stelle_truncated_brief_context(company: str) -> str:
+    """Extract Performance Summary + Recommended Topics from the brief markdown.
+
+    This is a soft, token-bounded injection for Stelle's system prompt (via
+    _build_dynamic_directives). Unlike ``build_stelle_strategy_context`` which
+    produces a compact synthesis for the user message, this returns the actual
+    markdown sections from the generated brief file. Both injection paths can
+    coexist — they serve different roles:
+      - user_prompt path: ephemeral "for THIS generation" recommendation
+      - system_prompt path: persistent "this is what we know about the client"
+
+    Returns empty string if no brief exists.
+    """
+    path = vortex.memory_dir(company) / "strategy_brief.md"
+    if not path.exists():
+        return ""
+    try:
+        brief = path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    if not brief.strip():
+        return ""
+
+    # Extract the two target sections from the markdown
+    sections_to_keep = ("## Performance Summary", "## Recommended Topics")
+    extracted: list[str] = []
+    lines = brief.split("\n")
+    current_section: Optional[str] = None
+    current_buffer: list[str] = []
+
+    for line in lines:
+        if line.startswith("## "):
+            # Flush previous section if it was one we wanted
+            if current_section in sections_to_keep and current_buffer:
+                extracted.append("\n".join(current_buffer).rstrip())
+            # Start new section
+            current_section = line.strip()
+            if current_section in sections_to_keep:
+                current_buffer = [line]
+            else:
+                current_buffer = []
+        else:
+            if current_section in sections_to_keep:
+                current_buffer.append(line)
+
+    # Flush final section
+    if current_section in sections_to_keep and current_buffer:
+        extracted.append("\n".join(current_buffer).rstrip())
+
+    if not extracted:
+        return ""
+
+    framing = (
+        "## Engagement-Informed Strategy Context (auto-generated, treat as advisory)\n\n"
+        "The following topic and performance data is auto-generated from engagement "
+        "history. It is advisory context, not a directive. Use it to inform topic "
+        "selection when multiple valid angles exist, but do not force content to match "
+        "these recommendations if the transcript material points in a different "
+        "direction. Low observation counts and confounded dimensions limit the "
+        "confidence of these signals — respect the caveats.\n\n"
+    )
+    return framing + "\n\n".join(extracted) + "\n"
+
+
 def build_stelle_strategy_context(company: str) -> str:
     """Build a compact strategy recommendation block for Stelle's user prompt.
 

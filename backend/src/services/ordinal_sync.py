@@ -440,6 +440,35 @@ def sync_all_companies() -> None:
     except Exception:
         logger.debug("Cross-client structural patterns skipped", exc_info=True)
 
+    # 9a2. Strategy brief impact tracker: measure whether posts generated
+    #      with strategy brief context outperform posts generated without.
+    #      Observation-only — does not change agent behavior. Activates once
+    #      both arms reach 20+ observations.
+    try:
+        from backend.src.utils.strategy_tracker import compute_strategy_brief_impact
+        _impact = compute_strategy_brief_impact()
+        if _impact:
+            if _impact.get("sufficient_data"):
+                logger.info(
+                    "[ordinal_sync] Strategy brief impact: "
+                    "informed n=%d mean=%.3f vs uninformed n=%d mean=%.3f "
+                    "(d=%s)",
+                    _impact["informed"]["count"],
+                    _impact["informed"]["mean_reward"],
+                    _impact["uninformed"]["count"],
+                    _impact["uninformed"]["mean_reward"],
+                    _impact.get("cohens_d"),
+                )
+            else:
+                logger.debug(
+                    "[ordinal_sync] Strategy brief impact: insufficient data "
+                    "(informed=%d, uninformed=%d)",
+                    _impact["informed"]["count"],
+                    _impact["uninformed"]["count"],
+                )
+    except Exception:
+        logger.debug("Strategy brief impact skipped", exc_info=True)
+
     # 9b. Feedback learning happens through RuanMei observations
     # (draft → final → engagement). No separate feedback file processing needed.
 

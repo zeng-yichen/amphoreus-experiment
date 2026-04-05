@@ -521,12 +521,24 @@ def _run_direct_fallback(company_keyword: str, client_name: str) -> str | None:
 
     directives = _build_dynamic_directives(company_keyword)
 
+    # Strategy brief context — same injection as the Pi path, appended after
+    # the raw client context so the LLM has complete engagement-grounded
+    # signal alongside the transcripts.
+    strategy_ctx = ""
+    try:
+        from backend.src.utils.strategy_brief import build_aglaea_strategy_context
+        strategy_ctx = build_aglaea_strategy_context(company_keyword)
+    except Exception:
+        pass
+
     user_msg = (
         f"Prepare a briefing for the ghostwriter's next interview with {client_name} "
         f"({company_keyword}). Generate questions that extract novel personal stories "
         f"for LinkedIn ghostwriting.\n\n"
         f"CLIENT CONTEXT:\n\n{context_blob}"
     )
+    if strategy_ctx:
+        user_msg += "\n\n---\n\n" + strategy_ctx
     if directives:
         user_msg += f"\n\nADDITIONAL DIRECTIVES:\n\n{directives}"
 
@@ -565,6 +577,21 @@ def generate_briefing(client_name: str, company_keyword: str, event_callback=Non
         f"personal stories worth turning into LinkedIn posts. Each story should be "
         f"capable of standing alone as its own post."
     )
+
+    # Inject strategy brief as context. The LLM reads the raw data — topic
+    # recommendations, format analysis, causal drivers, transcript segment
+    # scores — and reasons over it. No conversion to directives. The framing
+    # note in build_aglaea_strategy_context makes clear the data is
+    # directional, not definitive.
+    try:
+        from backend.src.utils.strategy_brief import build_aglaea_strategy_context
+        _strategy_ctx = build_aglaea_strategy_context(company_keyword)
+        if _strategy_ctx:
+            user_prompt += "\n\n---\n\n" + _strategy_ctx
+            logger.info("[Aglaea] Injected strategy brief context (%d chars)",
+                        len(_strategy_ctx))
+    except Exception as _e:
+        logger.debug("[Aglaea] Strategy brief context skipped: %s", _e)
 
     briefing_text = None
 
