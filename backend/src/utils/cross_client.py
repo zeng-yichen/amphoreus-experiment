@@ -338,6 +338,85 @@ def get_similar_client(company: str) -> Optional[str]:
     return best_company
 
 
+def get_segment_model_seed(company: str) -> Optional[dict]:
+    """Find the best cross-client segment model to transfer to ``company``.
+
+    Unlike ``get_cold_start_seeds``, this function does NOT require the target
+    client to be "new" (< 5 observations). A client with 10-14 scored
+    observations might still not have its own segment model (n < 15 threshold)
+    but should still benefit from transfer learning. Similarly, a client
+    whose own segment model failed to train (embedding outage, etc.) should
+    be able to fall back to a similar client's model.
+
+    Returns the most similar client's ``segment_model.json`` augmented with
+    a ``source_client`` field, or None if no suitable donor exists.
+    """
+    profiles = _load_all_profiles()
+    profiles.pop(company, None)
+    if not profiles:
+        return None
+
+    # Build or load the target client's profile vector for similarity lookup.
+    target_profile_path = vortex.memory_dir(company) / "client_profile.json"
+    target_vec: Optional[list[float]] = None
+    if target_profile_path.exists():
+        try:
+            target_profile = json.loads(target_profile_path.read_text(encoding="utf-8"))
+            target_vec = target_profile.get("_numeric_vector")
+        except Exception:
+            pass
+    if target_vec is None:
+        # Client has no profile yet — use a zero vector (picks the "most
+        # average" donor client). Same fallback as get_similar_client.
+        target_vec = _build_numeric_vector({})
+
+    # Find the most similar client that actually has a segment model.
+    best_company: Optional[str] = None
+    best_sim = -1.0
+    for other, profile in profiles.items():
+        other_vec = profile.get("_numeric_vector", [])
+        if not other_vec or len(other_vec) != len(target_vec):
+            continue
+        seg_path = vortex.memory_dir(other) / "segment_model.json"
+        if not seg_path.exists():
+            continue
+        sim = _cosine_similarity(target_vec, other_vec)
+        if sim > best_sim:
+            best_sim = sim
+            best_company = other
+
+    if best_company is None:
+        return None
+
+    try:
+        donor_model = json.loads(
+            (vortex.memory_dir(best_company) / "segment_model.json").read_text(encoding="utf-8")
+        )
+    except Exception:
+        return None
+
+    logger.info(
+        "[cross_client] Segment model seed for %s: donor=%s (similarity=%.4f, "
+        "donor n=%d, donor LOO R²=%s)",
+        company, best_company, best_sim,
+        donor_model.get("observation_count", 0),
+        donor_model.get("loo_r_squared", "n/a"),
+    )
+
+    return {
+        "weights": donor_model.get("weights", []),
+        "bias": donor_model.get("bias", 0.0),
+        "embedding_dim": donor_model.get("embedding_dim", 0),
+        "embedding_model": donor_model.get("embedding_model", ""),
+        "ridge_alpha": donor_model.get("ridge_alpha", 0),
+        "source_client": best_company,
+        "source_similarity": round(best_sim, 4),
+        "source_observation_count": donor_model.get("observation_count", 0),
+        "source_loo_r_squared": donor_model.get("loo_r_squared", 0),
+        "source": "cross_client_seed",
+    }
+
+
 def get_cold_start_seeds(company: str) -> Optional[dict]:
     """Get cold-start seed data from the most similar existing client.
 
@@ -438,11 +517,38 @@ def get_cold_start_seeds(company: str) -> Optional[dict]:
     else:
         seeds["depth_weights"] = {}
 
+    # 5. Segment model (embedding → predicted reward projection) from similar
+    # client. Unlike the other seeds we don't inflate uncertainty here — the
+    # weight vector is what it is; the consumer (transcript_scorer) is already
+    # calibrated to expect lower accuracy from a transferred projection because
+    # LOO R² is stamped on the model itself.
+    seg_path = sim_memory / "segment_model.json"
+    if seg_path.exists():
+        try:
+            seg_model = json.loads(seg_path.read_text(encoding="utf-8"))
+            seeds["segment_model"] = {
+                "weights": seg_model.get("weights", []),
+                "bias": seg_model.get("bias", 0.0),
+                "embedding_dim": seg_model.get("embedding_dim", 0),
+                "embedding_model": seg_model.get("embedding_model", ""),
+                "ridge_alpha": seg_model.get("ridge_alpha", 0),
+                "source_client": similar,
+                "source_observation_count": seg_model.get("observation_count", 0),
+                "source_loo_r_squared": seg_model.get("loo_r_squared", 0),
+                "source": "cross_client_seed",
+            }
+        except Exception:
+            seeds["segment_model"] = None
+    else:
+        seeds["segment_model"] = None
+
     logger.info(
-        "[cross_client] Cold-start seeds for %s from %s: %d LOLA arms, %d cyrene dims",
+        "[cross_client] Cold-start seeds for %s from %s: %d LOLA arms, %d cyrene dims, "
+        "segment_model=%s",
         company, similar,
         len(seeds.get("lola_arms", [])),
         len(seeds.get("cyrene_weights", {})),
+        "yes" if seeds.get("segment_model") else "no",
     )
 
     return seeds

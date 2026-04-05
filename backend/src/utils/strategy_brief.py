@@ -451,8 +451,8 @@ def _build_transcript_segment_recommendations(company: str) -> str:
             cached_segments = [
                 {
                     "rank": s.rank,
-                    "score": s.score,
-                    "features": s.features,
+                    "predicted_reward": s.predicted_reward,
+                    "description": s.description,
                     "text": s.text[:800],
                 }
                 for s in segments
@@ -465,16 +465,29 @@ def _build_transcript_segment_recommendations(company: str) -> str:
 
         lines.append(f"### From `{transcript.name}`")
         lines.append("")
-        for s in cached_segments:
-            f = s["features"]
-            feat_str = (
-                f"specificity={f['specificity_score']:.2f}, "
-                f"narrative={f['narrative_structure']:.2f}, "
-                f"domain={f['domain_depth']:.2f}, "
-                f"emotion={f['emotional_charge']:.2f}, "
-                f"unique={f['uniqueness']:.2f}"
+        # Detect whether scores are available. Either all segments have a
+        # predicted_reward (scored via learned or cross-client model) or none
+        # do (insufficient data to score — honest fallback).
+        has_scores = any(s.get("predicted_reward") is not None for s in cached_segments)
+        if not has_scores:
+            lines.append(
+                "_Insufficient data to score segments for this client. "
+                "Needs ≥15 scored observations with source tags to train the "
+                "segment model, or a similar client with one for cross-client transfer. "
+                "Descriptions shown in document order._"
             )
-            lines.append(f"**Rank {s['rank']}** | score `{s['score']:.3f}` · {feat_str}")
+            lines.append("")
+
+        for s in cached_segments:
+            pred = s.get("predicted_reward")
+            if pred is not None:
+                header = f"**Rank {s['rank']}** | predicted reward `{pred:+.3f}`"
+            else:
+                header = f"**Segment {s['rank']}** (unscored)"
+            lines.append(header)
+            desc = s.get("description", "").strip()
+            if desc:
+                lines.append(f"*{desc}*")
             preview = s["text"].strip()[:500]
             if len(s["text"]) > 500:
                 preview += "…"

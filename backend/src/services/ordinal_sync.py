@@ -222,6 +222,23 @@ def sync_all_companies() -> None:
                                 except Exception:
                                     logger.debug("Observation tagging skipped for %s", company, exc_info=True)
 
+                                # 2j2. Segment model: train embedding→predicted-reward projection
+                                #      from tagged observations. Replaces the old 5-feature scorer
+                                #      with a per-client learned model. Internally cache-gated on
+                                #      observation count, so this is a no-op when no new data.
+                                try:
+                                    from backend.src.utils.transcript_scorer import build_segment_model
+                                    _seg_model = build_segment_model(company)
+                                    if _seg_model:
+                                        logger.info(
+                                            "[ordinal_sync] Segment model for %s: n=%d, LOO R²=%.4f",
+                                            company,
+                                            _seg_model.get("observation_count", 0),
+                                            _seg_model.get("loo_r_squared", 0),
+                                        )
+                                except Exception:
+                                    logger.debug("Segment model build skipped for %s", company, exc_info=True)
+
                                 # 2k. Topic transition model (A2): learn P(topic_next | topic_prev)
                                 #     and P(format_next | format_prev) from chronologically ordered
                                 #     tagged observations.
