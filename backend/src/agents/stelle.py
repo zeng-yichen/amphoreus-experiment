@@ -1918,14 +1918,40 @@ def _apply_overrides_to_prompt(prompt: str, overrides: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def _build_dynamic_directives(company_keyword: str) -> str:
+    """Assemble per-client context appended to Stelle's system prompt template.
+
+    Section order is intentional. Learned writing rules are front-loaded so
+    the LLM sees the empirically-distilled directives before the much longer
+    content strategy document (~16k chars for innovocommerce). At 21k+ chars
+    of combined context, attention dilutes toward the end — the small,
+    evidence-backed rules deserve the top slot.
+
+    Strategy brief context is NOT injected here. It's injected into the user
+    prompt via ``build_stelle_strategy_context`` in ``generate_one_shot``. The
+    split is deliberate: per-generation recommendations belong in the user
+    message (ephemeral, specific to this invocation); persistent client
+    identity belongs in the system prompt.
+    """
     sections = []
 
+    # 1. Learned writing rules (front-loaded) — small, distilled, high-signal.
+    try:
+        from backend.src.utils.feedback_distiller import build_stelle_directives_section
+        _learned = build_stelle_directives_section(company_keyword)
+        if _learned:
+            sections.append(_learned)
+    except Exception:
+        pass
+
+    # 2. Content strategy — the human strategist's intent layer. Large but
+    #    authoritative; can override what the engagement data suggests.
     cs_dir = P.content_strategy_dir(company_keyword)
     if cs_dir.exists():
         for f in sorted(cs_dir.iterdir()):
             if f.is_file() and f.suffix in (".txt", ".md"):
                 sections.append(f"## Content Strategy\n\n{f.read_text(encoding='utf-8', errors='replace')}")
 
+    # 3. ABM targets.
     abm = P.abm_dir(company_keyword)
     if abm.exists():
         for f in sorted(abm.iterdir()):
@@ -1938,6 +1964,7 @@ def _build_dynamic_directives(company_keyword: str) -> str:
                         f"Weave mentions in naturally — never force them.\n\n{text}"
                     )
 
+    # 4. Client feedback on previous drafts.
     fb_dir = P.feedback_dir(company_keyword)
     if fb_dir.exists():
         fb_texts = []
@@ -1951,6 +1978,7 @@ def _build_dynamic_directives(company_keyword: str) -> str:
                 + "\n---\n".join(fb_texts)
             )
 
+    # 5. Before/after revision pairs.
     rev_dir = P.revisions_dir(company_keyword)
     if rev_dir.exists():
         rev_texts = []
@@ -1964,30 +1992,6 @@ def _build_dynamic_directives(company_keyword: str) -> str:
                 f"Internalize the patterns.\n\n"
                 + "\n---\n".join(rev_texts)
             )
-
-    # Learned directives: data-driven writing rules extracted from editorial
-    # feedback, approved posts, and engagement patterns. These have been
-    # distilled into specific, actionable rules by the feedback distiller.
-    try:
-        from backend.src.utils.feedback_distiller import build_stelle_directives_section
-        _learned = build_stelle_directives_section(company_keyword)
-        if _learned:
-            sections.append(_learned)
-    except Exception:
-        pass
-
-    # Engagement-informed strategy context: truncated Performance Summary +
-    # Recommended Topics from the auto-generated strategy brief. Soft advisory
-    # context — the LLM decides how to use it. Raw data with caveats, no
-    # prescriptive rules. See strategy_brief.build_stelle_truncated_brief_context
-    # for the framing rationale.
-    try:
-        from backend.src.utils.strategy_brief import build_stelle_truncated_brief_context
-        _truncated_brief = build_stelle_truncated_brief_context(company_keyword)
-        if _truncated_brief:
-            sections.append(_truncated_brief)
-    except Exception:
-        pass
 
     return "\n\n".join(sections) if sections else ""
 
@@ -3943,23 +3947,16 @@ def _process_result(
             except Exception:
                 pass
 
-            # Strategy brief tracking — record the brief version active at
-            # generation time and whether the truncated context was injected
-            # into the system prompt. Enables strategy_tracker to compare
-            # data-informed vs uninformed post performance retrospectively.
+            # Strategy brief tracking — stamp the brief version active at
+            # generation time. The strategy brief is injected into the user
+            # prompt via build_stelle_strategy_context (the compact builder);
+            # if a brief exists, it was seen by the LLM. strategy_tracker uses
+            # this field to compare data-informed vs uninformed post performance.
             try:
-                from backend.src.utils.strategy_brief import (
-                    get_brief_version, build_stelle_truncated_brief_context,
-                )
+                from backend.src.utils.strategy_brief import get_brief_version
                 _brief_version = get_brief_version(company_keyword)
                 if _brief_version:
                     _extra_fields["strategy_brief_version"] = _brief_version
-                    # True if build_stelle_truncated_brief_context would have
-                    # returned non-empty output (i.e., the section extraction
-                    # succeeded and was appended to _build_dynamic_directives).
-                    _extra_fields["strategy_context_injected"] = bool(
-                        build_stelle_truncated_brief_context(company_keyword)
-                    )
             except Exception:
                 pass
 

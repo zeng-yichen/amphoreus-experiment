@@ -136,15 +136,13 @@ class Observation:
     # as validated / neutral / counterproductive based on engagement outcomes.
     active_directives: list = field(default_factory=list)
     # Strategy brief tracking — stamped at generation time if a brief existed
-    # for the client. Used by strategy_tracker.compute_strategy_brief_impact()
-    # to measure whether data-informed generation produces better posts.
-    # Null for posts generated before any brief existed or for ingested posts.
+    # for the client. The brief is injected into Stelle's user prompt via
+    # build_stelle_strategy_context; if the field is set, the compact strategy
+    # context was seen by the LLM at generation time. Used by
+    # strategy_tracker.compute_strategy_brief_impact() to compare data-informed
+    # vs uninformed post performance. Null for posts generated before any
+    # brief existed or for posts ingested from Ordinal analytics.
     strategy_brief_version: Optional[str] = None
-    # True when the truncated brief was actually injected into the system
-    # prompt via _build_dynamic_directives(). In practice equivalent to
-    # ``strategy_brief_version is not None`` but kept as a separate flag so
-    # we can distinguish "brief existed" from "brief was in the prompt".
-    strategy_context_injected: bool = False
 
 
 # ------------------------------------------------------------------
