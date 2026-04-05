@@ -2,7 +2,7 @@
  * API client for the Amphoreus backend.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   // TODO: Get Supabase session token
@@ -69,6 +69,12 @@ export const ghostwriterApi = {
   getRuns: (company: string, limit = 20) =>
     apiFetch<{ runs: any[] }>(`/api/ghostwriter/${company}/runs?limit=${limit}`),
 
+  submitFeedback: (company: string, text: string, source = "operator", postId?: string) =>
+    apiFetch<{ status: string }>("/api/ghostwriter/feedback", {
+      method: "POST",
+      body: JSON.stringify({ company, text, source, associated_post_id: postId }),
+    }),
+
   getRunEvents: (runId: string) =>
     apiFetch<{ run: any; events: any[] }>(`/api/ghostwriter/runs/${runId}/events`),
 
@@ -89,6 +95,18 @@ export const ghostwriterApi = {
       method: "POST",
       body: JSON.stringify({ company, post_text: postText, instruction }),
     }),
+
+  getLinkedInUsername: (company: string) =>
+    apiFetch<{ username: string | null }>(`/api/ghostwriter/${company}/linkedin-username`),
+
+  saveLinkedInUsername: (company: string, username: string) =>
+    apiFetch<{ status: string; username: string }>(`/api/ghostwriter/${company}/linkedin-username`, {
+      method: "POST",
+      body: JSON.stringify({ username }),
+    }),
+
+  getOrdinalUsers: (company: string) =>
+    apiFetch<{ users: any[] }>(`/api/ghostwriter/${company}/ordinal-users`),
 };
 
 // --- Briefings ---
@@ -122,6 +140,9 @@ export const strategyApi = {
 
   getCurrent: (company: string) =>
     apiFetch<{ strategy: string | null; path?: string }>(`/api/strategy/${company}`),
+
+  getHtml: (company: string) =>
+    apiFetch<{ html: string | null }>(`/api/strategy/${company}/html`),
 };
 
 // --- Posts ---
@@ -136,10 +157,19 @@ export const postsApi = {
       body: JSON.stringify({ company, content, title }),
     }),
 
-  update: (postId: string, company: string, content: string, status?: string) =>
+  update: (
+    postId: string,
+    company: string,
+    fields: {
+      content?: string;
+      status?: string;
+      title?: string;
+      linked_image_id?: string | null;
+    }
+  ) =>
     apiFetch(`/api/posts/${postId}`, {
       method: "PATCH",
-      body: JSON.stringify({ company, content, status }),
+      body: JSON.stringify({ company, ...fields }),
     }),
 
   delete: (postId: string) =>
@@ -152,25 +182,92 @@ export const postsApi = {
     }),
 
   factCheck: (postId: string, company: string, postText: string) =>
-    apiFetch<{ report: string }>(`/api/posts/${postId}/fact-check`, {
+    apiFetch<{
+      report: string;
+      corrected_post?: string;
+      annotated_post?: string;
+      citation_comments?: string[];
+    }>(`/api/posts/${postId}/fact-check`, {
       method: "POST",
       body: JSON.stringify({ company, post_text: postText }),
     }),
 
-  push: (company: string, content: string) =>
-    apiFetch<{ success: boolean; result: string }>("/api/posts/push", {
+  push: (
+    company: string,
+    content: string,
+    citationComments: string[] = [],
+    options?: {
+      postId?: string;
+      publishAt?: string;
+      approvals?: { userId: string; message?: string; dueDate?: string; isBlocking?: boolean }[];
+    }
+  ) => {
+    const base = {
+      company,
+      ...(options?.publishAt ? { publish_at: options.publishAt } : {}),
+      approvals: options?.approvals ?? [],
+    };
+    const body =
+      options?.postId != null && options.postId !== ""
+        ? { ...base, post_id: options.postId, content: "" }
+        : { ...base, content, citation_comments: citationComments };
+    return apiFetch<{ success: boolean; result: string; ordinal_post_ids?: string[] }>(
+      "/api/posts/push",
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      }
+    );
+  },
+
+  pushAll: (
+    company: string,
+    postsPerMonth: 8 | 12,
+    options?: {
+      approvals?: { userId: string; message?: string; dueDate?: string; isBlocking?: boolean }[];
+    }
+  ) =>
+    apiFetch<{
+      success: boolean;
+      pushed: number;
+      total: number;
+      failed: number;
+      cadence: string;
+      first_url: string | null;
+      errors: string[];
+    }>("/api/posts/push-all", {
       method: "POST",
-      body: JSON.stringify({ company, content }),
+      body: JSON.stringify({
+        company,
+        posts_per_month: postsPerMonth,
+        approvals: options?.approvals ?? [],
+      }),
     }),
 };
 
 // --- Images ---
 
 export const imagesApi = {
-  generate: (company: string, postText: string, model?: string) =>
+  generate: (
+    company: string,
+    postText: string,
+    model?: string,
+    options?: {
+      feedback?: string;
+      referenceImageId?: string;
+      localPostId?: string;
+    }
+  ) =>
     apiFetch<{ job_id: string; status: string }>("/api/images/generate", {
       method: "POST",
-      body: JSON.stringify({ company, post_text: postText, model }),
+      body: JSON.stringify({
+        company,
+        post_text: postText,
+        model: model ?? "claude-opus-4-6",
+        feedback: options?.feedback ?? "",
+        reference_image_id: options?.referenceImageId ?? "",
+        local_post_id: options?.localPostId ?? "",
+      }),
     }),
 
   streamJob: (jobId: string) => streamSSE(`/api/images/stream/${jobId}`),
@@ -220,6 +317,12 @@ export const desktopApi = {
     apiFetch<{ running: boolean; pid: number | null }>("/api/desktop/status"),
 };
 
+// --- Clients ---
+
+export const clientsApi = {
+  list: () => apiFetch<{ clients: { slug: string }[] }>("/api/clients"),
+};
+
 // --- Auth ---
 
 export const authApi = {
@@ -232,6 +335,12 @@ export const authApi = {
 export const csApi = {
   listClients: () => apiFetch<{ clients: any[] }>("/api/cs/clients"),
   getClient: (clientId: string) => apiFetch<{ user: any; posts: any[] }>(`/api/cs/clients/${clientId}`),
+};
+
+export const learningApi = {
+  listClients: () => apiFetch<{ clients: any[] }>("/api/learning/clients"),
+  getClient: (company: string) => apiFetch<any>(`/api/learning/clients/${company}`),
+  getCrossClient: () => apiFetch<any>("/api/learning/cross-client"),
 };
 
 // --- Interview Companion (Tribbie) ---

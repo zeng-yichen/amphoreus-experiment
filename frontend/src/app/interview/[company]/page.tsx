@@ -4,9 +4,8 @@ import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { interviewApi, briefingsApi } from "@/lib/api";
+import { interviewApi, briefingsApi, strategyApi, API_BASE } from "@/lib/api";
 
-type RightTab = "briefing" | "suggestions";
 
 interface TranscriptSegment {
   text: string;
@@ -41,7 +40,10 @@ export default function InterviewPage() {
   const [hasBlackhole, setHasBlackhole] = useState<boolean | null>(null);
   const [hasBriefing, setHasBriefing] = useState<boolean | null>(null);
   const [briefingContent, setBriefingContent] = useState<string | null>(null);
-  const [rightTab, setRightTab] = useState<RightTab>("briefing");
+  const [hasStrategyHtml, setHasStrategyHtml] = useState(false);
+  const [strategyMarkdown, setStrategyMarkdown] = useState<string | null>(null);
+  const [strategyGenerating, setStrategyGenerating] = useState(false);
+  const [strategyLog, setStrategyLog] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
 
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -65,6 +67,16 @@ export default function InterviewPage() {
         }
       })
       .catch(() => setHasBriefing(false));
+
+    strategyApi
+      .getCurrent(company)
+      .then((res) => setStrategyMarkdown(res.strategy))
+      .catch(() => setStrategyMarkdown(null));
+
+    strategyApi
+      .getHtml(company)
+      .then((res) => setHasStrategyHtml(!!res.html))
+      .catch(() => setHasStrategyHtml(false));
   }, [company]);
 
   // Auto-scroll transcript
@@ -73,6 +85,34 @@ export default function InterviewPage() {
       transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
     }
   }, [transcript]);
+
+  async function handleGenerateStrategy() {
+    setStrategyGenerating(true);
+    setStrategyLog("");
+    try {
+      const { job_id } = await strategyApi.generate(company);
+      for await (const data of strategyApi.streamJob(job_id)) {
+        if (data.type === "text_delta") {
+          setStrategyLog((prev) => prev + ((data.data as any)?.text || ""));
+        } else if (data.type === "done") {
+          const [mdRes, htmlRes] = await Promise.all([
+            strategyApi.getCurrent(company),
+            strategyApi.getHtml(company),
+          ]);
+          setStrategyMarkdown(mdRes.strategy);
+          setHasStrategyHtml(!!htmlRes.html);
+          break;
+        } else if (data.type === "error") {
+          setStrategyLog((prev) => prev + `\n\nError: ${(data.data as any)?.message}`);
+          break;
+        }
+      }
+    } catch (e) {
+      setStrategyLog((prev) => prev + `\n\nFailed: ${String(e)}`);
+    } finally {
+      setStrategyGenerating(false);
+    }
+  }
 
   async function handleStart() {
     if (isRecording) return;
@@ -100,10 +140,7 @@ export default function InterviewPage() {
         } else if (data.type === "tool_result") {
           const suggestion = (data.data as any)?.result || "";
           if (suggestion) {
-            setSuggestions((prev) => {
-              if (prev.length === 0) setRightTab("suggestions");
-              return [{ text: suggestion, timestamp: ts }, ...prev];
-            });
+            setSuggestions((prev) => [{ text: suggestion, timestamp: ts }, ...prev]);
           }
         } else if (data.type === "error") {
           setError((data.data as any)?.message || "Unknown error");
@@ -306,39 +343,38 @@ export default function InterviewPage() {
           </div>
         </div>
 
-        {/* Right panel: tabbed Briefing / Suggestions */}
-        <div className="flex w-80 flex-col xl:w-96">
-          {/* Tab bar */}
-          <div className="flex border-b border-stone-100 bg-stone-50">
-            <button
-              onClick={() => setRightTab("briefing")}
-              className={`flex-1 px-4 py-2 text-xs font-semibold uppercase tracking-wide transition-colors ${
-                rightTab === "briefing"
-                  ? "border-b-2 border-indigo-500 text-indigo-600"
-                  : "text-stone-400 hover:text-stone-600"
-              }`}
-            >
-              Briefing
-            </button>
-            <button
-              onClick={() => setRightTab("suggestions")}
-              className={`flex-1 px-4 py-2 text-xs font-semibold uppercase tracking-wide transition-colors ${
-                rightTab === "suggestions"
-                  ? "border-b-2 border-indigo-500 text-indigo-600"
-                  : "text-stone-400 hover:text-stone-600"
-              }`}
-            >
-              Suggestions
-              {suggestions.length > 0 && (
-                <span className="ml-1.5 rounded-full bg-indigo-100 px-1.5 py-0.5 text-indigo-600">
-                  {suggestions.length}
-                </span>
-              )}
-            </button>
-          </div>
+        {/* Right column: Briefing (top) + Suggestions (bottom) — always both visible */}
+        <div className="flex w-96 flex-col xl:w-[420px]">
 
-          {/* Briefing tab */}
-          {rightTab === "briefing" && (
+          {/* ── Briefing panel ─────────────────────────────────────── */}
+          <div className="flex h-1/2 flex-col border-b border-stone-200">
+            <div className="flex shrink-0 items-center justify-between border-b border-stone-100 bg-stone-50 px-4 py-2">
+              <span className="text-xs font-semibold uppercase tracking-wide text-stone-500">
+                Briefing
+              </span>
+              <div className="flex items-center gap-3">
+                {hasStrategyHtml && (
+                  <a
+                    href={`${API_BASE}/api/strategy/${company}/view`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-indigo-500 transition-colors hover:text-indigo-700"
+                  >
+                    Strategy ↗
+                  </a>
+                )}
+                {!hasStrategyHtml && (
+                  <button
+                    onClick={handleGenerateStrategy}
+                    disabled={strategyGenerating}
+                    title={strategyGenerating ? "Generating…" : "Generate content strategy"}
+                    className="text-xs text-stone-400 transition-colors hover:text-stone-600 disabled:opacity-40"
+                  >
+                    {strategyGenerating ? "Strategy…" : "Strategy ↗"}
+                  </button>
+                )}
+              </div>
+            </div>
             <div className="flex-1 overflow-y-auto p-4">
               {briefingContent ? (
                 <div className="prose prose-sm prose-stone max-w-none text-xs [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs [&_li]:my-0.5 [&_p]:my-1">
@@ -355,10 +391,20 @@ export default function InterviewPage() {
                 <p className="text-sm text-stone-400">Loading briefing…</p>
               )}
             </div>
-          )}
+          </div>
 
-          {/* Suggestions tab */}
-          {rightTab === "suggestions" && (
+          {/* ── Suggestions panel ──────────────────────────────────── */}
+          <div className="flex flex-1 flex-col overflow-hidden">
+            <div className="flex shrink-0 items-center justify-between border-b border-stone-100 bg-stone-50 px-4 py-2">
+              <span className="text-xs font-semibold uppercase tracking-wide text-stone-500">
+                Suggestions
+              </span>
+              {suggestions.length > 0 && (
+                <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-semibold text-indigo-600">
+                  {suggestions.length}
+                </span>
+              )}
+            </div>
             <div className="flex-1 space-y-2 overflow-y-auto p-3">
               {suggestions.length === 0 ? (
                 <p className="p-1 text-sm text-stone-400">
@@ -378,9 +424,9 @@ export default function InterviewPage() {
                   >
                     <div className="flex items-start gap-2">
                       <span className="mt-0.5 shrink-0 font-bold text-stone-400">
-                        {i === 0 ? ">" : "·"}
+                        {i === 0 ? "›" : "·"}
                       </span>
-                      <span>{s.text}</span>
+                      <span className="whitespace-pre-line">{s.text}</span>
                     </div>
                     <p className="mt-1.5 text-xs text-stone-400">
                       {new Date(s.timestamp).toLocaleTimeString([], {
@@ -393,7 +439,8 @@ export default function InterviewPage() {
                 ))
               )}
             </div>
-          )}
+          </div>
+
         </div>
       </div>
     </div>

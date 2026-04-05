@@ -1,28 +1,21 @@
 import os
-import platform
-from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
 import shutil
 import threading
-import json
 import sys
-from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 from PIL import Image, ImageTk
 
-from backend.src.db import vortex as P
-from backend.src.agents.stelle import generate_one_shot
-from backend.src.agents.aglaea import generate_briefing
-from backend.src.agents.anaxa import Anaxa
-from backend.src.agents.cerydra import Cerydra
-from backend.src.agents.cyrene import Cyrene, MAX_BATCH_POSTS
-from backend.src.agents.hysilens import Hysilens
-from backend.src.agents.hyacinthia import Hyacinthia
-from backend.src.agents import screwllum
+from phainon import generate_iterative_linkedin_posts
+from aglaea import generate_briefing
+from anaxa import Anaxa
+from cerydra import Cerydra
+from cyrene import Cyrene
+from hysilens import Hysilens
 
 class PrintLogger:
     def __init__(self, text_widget):
@@ -33,19 +26,6 @@ class PrintLogger:
     def flush(self):
         pass
 
-def _read_local_context(directory: str, skip_files: list) -> str:
-    text = ""
-    if not os.path.exists(directory):
-        return text
-    for fn in os.listdir(directory):
-        if fn in skip_files:
-            continue
-        if fn.lower().endswith((".txt", ".md")):
-            with open(os.path.join(directory, fn), "r", encoding="utf-8") as f:
-                text += f"\n--- DOCUMENT: {fn} ---\n{f.read()}\n"
-    return text
-
-
 class AmphoreusExperiment:
     def __init__(self, root):
         self.root = root
@@ -54,6 +34,7 @@ class AmphoreusExperiment:
         self.root.configure(padx=10, pady=10, bg="white")
 
         # --- STATE ---
+        self.current_generation_data = None
         self.anaxa = Anaxa()
         self.cerydra = Cerydra()
         self.hysilens = Hysilens()
@@ -70,7 +51,7 @@ class AmphoreusExperiment:
 
         self.chibi_images = []
         self.image_refs = []
-        static_dir = os.path.join(os.path.dirname(__file__), "backend", "static", "images")
+        static_dir = "./static/images"
         
         if os.path.exists(static_dir):
             for file in os.listdir(static_dir):
@@ -116,14 +97,13 @@ class AmphoreusExperiment:
         
         self._create_clickable_label(frame_files, "Add Base Files (Transcripts/Profile)", lambda: self.show_upload_dialog("base")).pack(fill="x", pady=8)
         self._create_clickable_label(frame_files, "Add Accepted Posts (Optional)", lambda: self.show_upload_dialog("accepted")).pack(fill="x", pady=8)
-        self._create_clickable_label(frame_files, "Add Feedback / Revisions (Optional)", self.show_revision_dialog).pack(fill="x", pady=8)
-        self._create_clickable_label(frame_files, "Manage Past Posts (Dedup)", self.open_past_posts_dialog).pack(fill="x", pady=8)
+        self._create_clickable_label(frame_files, "Add Client Feedback (Optional)", lambda: self.show_upload_dialog("feedback")).pack(fill="x", pady=8)
 
         frame_gen = tk.LabelFrame(self.left_panel, text="3. Generation", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
         frame_gen.pack(fill="x", pady=2)
 
         self.action_var = tk.StringVar(value="brief")
-
+        
         rb_frame1 = tk.Frame(frame_gen, bg="white")
         rb_frame1.pack(fill="x", anchor="w")
         tk.Radiobutton(rb_frame1, text="Generate Briefing?", variable=self.action_var, value="brief", bg="white", activebackground="white", highlightbackground="white", font=self.UI_FONT).pack(side="left")
@@ -136,49 +116,68 @@ class AmphoreusExperiment:
         if self.phainon_img:
             tk.Label(rb_frame2, image=self.phainon_img, bg="white").pack(side="left", padx=(5, 0))
 
+        tk.Label(frame_gen, text="Model Choice:", bg="white", font=self.UI_FONT).pack(anchor="w", pady=(6, 2))
+        self.model_var = tk.StringVar(value="All (Ensemble)")
+        model_options = ["All (Ensemble)", "Gemini 3.1 Pro", "GPT-5", "Claude Opus 4.6"]
+        
+        model_menu = tk.OptionMenu(frame_gen, self.model_var, *model_options)
+        model_menu.config(bg="white", activebackground="#f0f0f0", relief="solid", borderwidth=1, highlightbackground="white", highlightthickness=0, font=self.UI_FONT)
+        model_menu["menu"].config(bg="white", font=self.UI_FONT)
+        model_menu.pack(anchor="w", pady=(0, 6), fill="x")
+
         self.run_btn = self._create_clickable_label(frame_gen, "🚀 RUN TASK", self.run_generation)
         self.run_btn.pack(fill="x", pady=8)
         
         frame_rewrite = tk.LabelFrame(self.left_panel, text="4. Stylistic Rewrite with Cyrene", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
         frame_rewrite.pack(fill="x", pady=2)
         
-        self._create_clickable_label(
-            frame_rewrite,
-            "Rewrite single post…",
-            self.open_single_post_rewrite_dialog,
-        ).pack(fill="x", pady=(2, 6))
+        tk.Label(frame_rewrite, text="Style Instruction (Optional):", bg="white", font=self.UI_FONT).pack(anchor="w", pady=(2, 2))
+        
+        self.style_prompt_text = tk.Text(frame_rewrite, height=5, relief="solid", borderwidth=1, font=self.UI_FONT, bg="white", fg="black", highlightthickness=2, highlightbackground="white", highlightcolor="black", insertbackground="black")
+        self.style_prompt_text.insert("1.0", "Leave blank for random stylistic noise, or type a specific instruction.")
+        self.style_prompt_text.pack(anchor="w", fill="x", pady=(0, 6))
+        
+        mode_frame = tk.Frame(frame_rewrite, bg="white")
+        mode_frame.pack(fill="x", pady=(0, 6))
+        
+        self.rewrite_mode_var = tk.StringVar(value="all")
+        
+        tk.Radiobutton(mode_frame, text="Rewrite All Posts", variable=self.rewrite_mode_var, value="all", bg="white", font=self.UI_FONT, command=self._toggle_post_num).pack(side="left")
+        tk.Radiobutton(mode_frame, text="Rewrite Single Post", variable=self.rewrite_mode_var, value="single", bg="white", font=self.UI_FONT, command=self._toggle_post_num).pack(side="left", padx=(10, 0))
+        
+        self.post_num_label = tk.Label(mode_frame, text="Post #:", bg="white", font=self.UI_FONT, state="disabled")
+        self.post_num_label.pack(side="left", padx=(10, 2))
+        
+        self.post_num_entry = tk.Entry(mode_frame, state="disabled",bg="white", width=8, relief="solid", borderwidth=1, highlightthickness=2, highlightbackground="white", highlightcolor="black", font=self.UI_FONT)
+        self.post_num_entry.pack(side="left", padx=(0, 10))
+        
+        self.rewrite_btn = self._create_clickable_label(frame_rewrite, "✨ Rewrite Posts", self.run_rewrite)
+        self.rewrite_btn.pack(fill="x", pady=8)
 
-        self._create_clickable_label(
-            frame_rewrite,
-            f"Rewrite multiple posts (paste, up to {MAX_BATCH_POSTS})…",
-            self.open_batch_post_rewrite_dialog,
-        ).pack(fill="x", pady=(0, 6))
-        frame_screwllum = tk.LabelFrame(self.left_panel, text="5. Content Strategy Generation", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
-        frame_screwllum.pack(fill="x", pady=2)
-
-        self._create_clickable_label(
-            frame_screwllum,
-            "🧠 Generate Content Strategy",
-            self.open_screwllum_dialog,
-        ).pack(fill="x", pady=(4, 2))
-
-        tk.Label(
-            frame_screwllum,
-            text="Uses Company Keyword + memory/ transcripts",
-            fg="gray", bg="white", font=("Arial", 9, "bold"),
-        ).pack(anchor="w", pady=(0, 4))
-
-        frame_style = tk.LabelFrame(self.left_panel, text="6. Client Tone Instructions", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
+        frame_style = tk.LabelFrame(self.left_panel, text="Client Tone Instructions", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
         frame_style.pack(fill="x", pady=2)
 
         self._create_clickable_label(
             frame_style,
-            "✏️ Edit Content Strategy",
-            self.open_content_strategy_dialog
+            "✏️ Add/Update Tone Instructions",
+            self.open_tone_instruction_dialog
         ).pack(fill="x", pady=4)
 
-        # DEPRECATED: Prompt Graph Tuning UI removed
-        # frame_gradient and related buttons have been removed
+        frame_gradient = tk.LabelFrame(self.left_panel, text="Prompt Graph Tuning", padx=5, pady=5, bg="white", relief="flat", bd=0, font=self.HEADER_FONT)
+        frame_gradient.pack(fill="x", pady=2)
+
+        self.gradient_btn = self._create_clickable_label(
+            frame_gradient,
+            "🧬 Tune Graph from Feedback",
+            self.run_text_gradient
+        )
+        self.gradient_btn.pack(fill="x", pady=4)
+
+        self._create_clickable_label(
+            frame_gradient,
+            "↩️ Rollback Last Gradient Step",
+            self.rollback_gradient_step
+        ).pack(fill="x", pady=4)
 
         tk.Label(self.left_panel, text="Console Output:", bg="white", font=self.UI_FONT).pack(anchor="w", pady=(6, 2))
         self.console = scrolledtext.ScrolledText(self.left_panel, width=40, height=5, bg="#1e1e1e", fg="#00ff00", font=("Courier", 10, "bold"), borderwidth=1, relief="solid", highlightthickness=0)
@@ -227,7 +226,7 @@ class AmphoreusExperiment:
         
         self._create_clickable_label(
             ordinal_frame, 
-            "📤 Push Posts to Ordinal", 
+            "📤 Push Selected Model's Posts to Ordinal", 
             self.push_to_ordinal
         ).pack(side="right", padx=10)
 
@@ -296,513 +295,68 @@ class AmphoreusExperiment:
         self.root.bind("<Command-f>", self._handle_find_shortcut)
         self.root.bind("<Control-f>", self._handle_find_shortcut)
 
-    def open_content_strategy_dialog(self):
-        """Dialog to edit the content_strategy.txt file for a client."""
+    import json
+
+    def open_tone_instruction_dialog(self):
         company = self.company_var.get().strip()
         if not company:
             messagebox.showerror("Error", "Please enter a Company Keyword first!")
             return
 
         dialog = tk.Toplevel(self.root)
-        dialog.title(f"Content Strategy for {company}")
-        dialog.geometry("700x500")
+        dialog.title(f"Tone Instructions for {company}")
+        dialog.geometry("600x400")
         dialog.configure(padx=15, pady=15, bg="white")
         dialog.transient(self.root)
         dialog.grab_set()
 
-        tk.Label(
-            dialog,
-            text="Edit content strategy, tone instructions, and style guidelines below.\n"
-                 "This will be injected into the generation prompt as a critical directive.",
-            bg="white", font=self.UI_FONT, wraplength=660, justify="left"
-        ).pack(anchor="w", pady=(0, 8))
+        tk.Label(dialog, text="Paste client tone/style instructions or criticisms below:",
+                bg="white", font=self.UI_FONT, wraplength=560, justify="left").pack(anchor="w", pady=(0, 8))
 
-        text_area = scrolledtext.ScrolledText(
-            dialog, height=18, font=("Courier", 10),
-            relief="solid", borderwidth=1, highlightthickness=1, wrap="word"
-        )
+        text_area = scrolledtext.ScrolledText(dialog, height=12, font=self.UI_FONT,
+                                            relief="solid", borderwidth=1, highlightthickness=1)
         text_area.pack(fill="both", expand=True, pady=(0, 10))
 
-        # Load existing content_strategy.txt if it exists
-        strategy_dir = str(P.content_strategy_dir(company))
-        os.makedirs(strategy_dir, exist_ok=True)
-        strategy_path = os.path.join(strategy_dir, "content_strategy.txt")
-        
+        # Optionally pre-load existing tone_overrides for this client
+        style_dir = os.path.join("client_style")
+        os.makedirs(style_dir, exist_ok=True)
+        style_path = os.path.join(style_dir, f"{company}.json")
         existing_text = ""
-        if os.path.exists(strategy_path):
+        if os.path.exists(style_path):
             try:
-                with open(strategy_path, "r", encoding="utf-8") as f:
-                    existing_text = f.read()
+                with open(style_path, "r", encoding="utf-8") as f:
+                    style_data = json.load(f)
+                existing_overrides = style_data.get("tone_overrides", [])
+                if existing_overrides:
+                    existing_text = "\n".join(existing_overrides)
             except Exception:
                 existing_text = ""
-        
         if existing_text:
             text_area.insert("1.0", existing_text)
-        else:
-            placeholder = (
-                "# Content Strategy for " + company + "\n\n"
-                "## Tone & Voice\n"
-                "- [e.g., Conversational but authoritative]\n"
-                "- [e.g., Avoid jargon unless explaining it]\n\n"
-                "## Topics to Emphasize\n"
-                "- [Key themes to focus on]\n\n"
-                "## Topics to Avoid\n"
-                "- [Things not to mention]\n\n"
-                "## Style Notes\n"
-                "- [Specific formatting preferences]\n"
-                "- [Hook style preferences]\n"
-            )
-            text_area.insert("1.0", placeholder)
 
-        def save_strategy():
-            content = text_area.get("1.0", tk.END).strip()
-            if not content:
-                messagebox.showerror("Missing Content", "Please enter a content strategy.", parent=dialog)
-                return
-
-            try:
-                with open(strategy_path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                print(f"[Amphoreus] Saved content strategy to {strategy_path}")
-                messagebox.showinfo("Saved", f"Content strategy saved to:\n{strategy_path}", parent=dialog)
-                dialog.destroy()
-                self.refresh_file_tree()
-            except Exception as e:
-                messagebox.showerror("Save Error", f"Failed to save:\n{e}", parent=dialog)
-
-        self._create_clickable_label(dialog, "💾 Save Content Strategy", save_strategy).pack(fill="x", pady=(4, 0))
-
-    def open_screwllum_dialog(self):
-        """
-        Open the Screwllum content strategy generation popup.
-        The agent researches all context autonomously via Ordinal analytics and
-        Google Search — no manual input required beyond the company keyword.
-        Output streams token-by-token into the popup window.
-        """
-        company = self.company_var.get().strip()
-        if not company:
-            messagebox.showerror("Error", "Please enter a Company Keyword first!")
-            return
-
-        # ── Build popup ───────────────────────────────────────────────────────
-        popup = tk.Toplevel(self.root)
-        popup.title(f"🧠 Content Strategy — {company}")
-        popup.geometry("900x700")
-        popup.configure(padx=15, pady=15, bg="white")
-        popup.transient(self.root)
-
-        # Header
-        header_frame = tk.Frame(popup, bg="white")
-        header_frame.pack(fill="x", pady=(0, 6))
-
-        tk.Label(
-            header_frame,
-            text=f"Content Strategy: {company}",
-            font=("Arial", 14, "bold"), bg="white",
-        ).pack(side="left")
-
-        tk.Label(
-            header_frame,
-            text="Agent researches follower data, post analytics & ICP automatically",
-            font=("Arial", 9), fg="gray", bg="white",
-        ).pack(side="left", padx=(10, 0))
-
-        # Input rows
-        field_font = ("Arial", 10, "bold")
-
-        # Row 1 — goal + follower count + ICP %
-        row1 = tk.Frame(popup, bg="white")
-        row1.pack(fill="x", pady=(0, 4))
-
-        tk.Label(row1, text="Primary Goal:", bg="white",
-                 font=field_font).pack(side="left", padx=(0, 4))
-        goal_var = tk.StringVar(value="pipeline")
-        goal_menu = tk.OptionMenu(row1, goal_var, "pipeline", "brand", "mixed")
-        goal_menu.config(bg="white", relief="solid", borderwidth=1, font=field_font,
-                         highlightthickness=0, activebackground="#f0f0f0")
-        goal_menu["menu"].config(bg="white", font=field_font)
-        goal_menu.pack(side="left", padx=(0, 20))
-
-        tk.Label(row1, text="LinkedIn Followers:", bg="white",
-                 font=field_font).pack(side="left", padx=(0, 4))
-        followers_var = tk.StringVar()
-        tk.Entry(row1, textvariable=followers_var, font=field_font,
-                 relief="solid", borderwidth=1, width=10).pack(side="left", padx=(0, 20))
-
-        tk.Label(row1, text="% ICP among followers:", bg="white",
-                 font=field_font).pack(side="left", padx=(0, 4))
-        icp_var = tk.StringVar()
-        tk.Entry(row1, textvariable=icp_var, font=field_font,
-                 relief="solid", borderwidth=1, width=6).pack(side="left", padx=(0, 4))
-        tk.Label(row1, text="%", bg="white", font=field_font).pack(side="left")
-
-        # Row 2 — extra context
-        row2 = tk.Frame(popup, bg="white")
-        row2.pack(fill="x", pady=(0, 8))
-
-        tk.Label(row2, text="Extra context (optional):",
-                 bg="white", font=field_font).pack(side="left", padx=(0, 6))
-        extra_var = tk.StringVar()
-        tk.Entry(
-            row2,
-            textvariable=extra_var,
-            font=field_font,
-            relief="solid", borderwidth=1,
-        ).pack(side="left", fill="x", expand=True)
-
-        # Output text area
-        output_frame = tk.Frame(popup, bg="white", relief="solid", bd=1)
-        output_frame.pack(fill="both", expand=True, pady=(0, 8))
-
-        output_text = scrolledtext.ScrolledText(
-            output_frame,
-            bg="#1a1a2e", fg="#e0e0e0",
-            font=("Courier", 10),
-            wrap="word",
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
-        )
-        output_text.pack(fill="both", expand=True, padx=2, pady=2)
-        output_text.vbar.configure(
-            troughcolor="#1a1a2e", bg="#444",
-            activebackground="#666", borderwidth=0,
-        )
-
-        # Button row
-        btn_frame = tk.Frame(popup, bg="white")
-        btn_frame.pack(fill="x")
-
-        run_lbl  = self._create_clickable_label(btn_frame, "▶ Start Generation", None)
-        run_lbl.pack(side="left", padx=(0, 20))
-
-        copy_lbl = self._create_clickable_label(btn_frame, "📋 Copy Output", None)
-        copy_lbl.pack(side="left", padx=(0, 12))
-
-        # "Open HTML Report" — starts disabled, enabled once the report is ready
-        html_lbl = self._create_clickable_label(
-            btn_frame, "🌐 Open HTML Report", None, fg="#555555"
-        )
-        html_lbl.config(state="disabled")
-        html_lbl.pack(side="left", padx=(0, 12))
-
-        # "Save Short-Term Strategy" — starts disabled, enabled after generation
-        save_st_lbl = self._create_clickable_label(
-            btn_frame, "💾 Save Short-Term Strategy", None, fg="#555555"
-        )
-        save_st_lbl.config(state="disabled")
-        save_st_lbl.pack(side="left")
-
-        close_lbl = self._create_clickable_label(
-            btn_frame, "✖ Close", popup.destroy, fg="#cc0000"
-        )
-        close_lbl.pack(side="right")
-
-        status_var = tk.StringVar(value="Ready — click ▶ to begin.")
-        tk.Label(
-            btn_frame, textvariable=status_var,
-            bg="white", font=("Arial", 9, "bold"), fg="gray",
-        ).pack(side="left", padx=20)
-
-        # ── Save short-term strategy dialog ───────────────────────────────────
-        def _open_save_short_term_dialog(short_term_text: str):
-            """Open an editable dialog for the short-term section, then save."""
-            edit_win = tk.Toplevel(popup)
-            edit_win.title(f"💾 Short-Term Strategy — {company}")
-            edit_win.geometry("800x560")
-            edit_win.configure(padx=15, pady=15, bg="white")
-            edit_win.transient(popup)
-            edit_win.grab_set()
-
-            tk.Label(
-                edit_win,
-                text="Edit the short-term strategy before saving:",
-                font=("Arial", 11, "bold"), bg="white",
-            ).pack(anchor="w", pady=(0, 6))
-
-            tk.Label(
-                edit_win,
-                text=f"Will be saved to: memory/{company}/content_strategy/content_strategy.txt",
-                font=("Arial", 9), fg="gray", bg="white",
-            ).pack(anchor="w", pady=(0, 8))
-
-            edit_area = scrolledtext.ScrolledText(
-                edit_win,
-                font=("Courier", 10),
-                wrap="word",
-                relief="solid",
-                borderwidth=1,
-                bg="#fafafa",
-            )
-            edit_area.pack(fill="both", expand=True, pady=(0, 10))
-            edit_area.insert("1.0", short_term_text)
-
-            save_status = tk.StringVar(value="")
-
-            def _do_save():
-                text_to_save = edit_area.get("1.0", tk.END).strip()
-                try:
-                    out_dir = P.content_strategy_dir(company)
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    out_file = out_dir / "content_strategy.txt"
-                    out_file.write_text(text_to_save, encoding="utf-8")
-                    save_status.set(f"✅ Saved to {out_file}")
-                    save_btn.config(state="disabled")
-                except Exception as exc:
-                    save_status.set(f"❌ Save failed: {exc}")
-
-            action_frame = tk.Frame(edit_win, bg="white")
-            action_frame.pack(fill="x")
-
-            save_btn = self._create_clickable_label(
-                action_frame, "💾 Save to content_strategy.txt", _do_save
-            )
-            save_btn.pack(side="left", padx=(0, 20))
-
-            self._create_clickable_label(
-                action_frame, "✖ Close", edit_win.destroy, fg="#cc0000"
-            ).pack(side="left")
-
-            tk.Label(
-                action_frame,
-                textvariable=save_status,
-                bg="white", font=("Arial", 9, "bold"), fg="#336633",
-            ).pack(side="left", padx=16)
-
-        # ── Thread-safe output callback ───────────────────────────────────────
-        def _append(chunk: str):
-            output_text.after(0, lambda c=chunk: (
-                output_text.insert(tk.END, c),
-                output_text.see(tk.END),
-            ))
-
-        # ── Copy handler ──────────────────────────────────────────────────────
-        def _copy_output():
-            content = output_text.get("1.0", tk.END).strip()
-            popup.clipboard_clear()
-            popup.clipboard_append(content)
-            status_var.set("Copied to clipboard.")
-
-        copy_lbl.bind("<Button-1>", lambda e: _copy_output())
-
-        # ── Generation thread ─────────────────────────────────────────────────
-        def _run():
-            import webbrowser
-            run_lbl.config(state="disabled")
-            status_var.set("Running — agent is researching…")
-            output_text.delete("1.0", tk.END)
-
-            try:
-                result = screwllum.run_programmatic(
-                    client_name=company,
-                    output_callback=_append,
-                    primary_goal=goal_var.get(),
-                    follower_count=followers_var.get().strip(),
-                    icp_pct=icp_var.get().strip(),
-                    extra_context=extra_var.get().strip(),
-                )
-                html_path    = result.get("html_path", "") if isinstance(result, dict) else ""
-                strategy_txt = result.get("strategy", "")  if isinstance(result, dict) else ""
-                status_var.set("Done." + (" HTML report ready." if html_path else ""))
-
-                # Enable the Open HTML Report button if a file was produced
-                if html_path:
-                    def _open_html(path=html_path):
-                        abs_path = Path(path).resolve()
-                        webbrowser.open(abs_path.as_uri())
-                    html_lbl.after(0, lambda: (
-                        html_lbl.config(state="normal", fg="black"),
-                        html_lbl.bind("<Button-1>", lambda e: _open_html()),
-                    ))
-
-                # Enable the Save Short-Term Strategy button
-                if strategy_txt.strip():
-                    short_term = screwllum.extract_short_term_section(strategy_txt)
-                    def _open_save(st=short_term):
-                        _open_save_short_term_dialog(st)
-                    save_st_lbl.after(0, lambda: (
-                        save_st_lbl.config(state="normal", fg="black"),
-                        save_st_lbl.bind("<Button-1>", lambda e: _open_save()),
-                    ))
-
-            except Exception as exc:
-                _append(f"\n\n❌ Error: {exc}\n")
-                status_var.set(f"Error: {exc}")
-            finally:
-                run_lbl.after(0, lambda: run_lbl.config(state="normal"))
-
-        def _start():
-            import threading
-            threading.Thread(target=_run, daemon=True).start()
-
-        run_lbl.bind(
-            "<Button-1>",
-            lambda e: _start() if str(run_lbl["state"]) != "disabled" else None,
-        )
-
-    def open_past_posts_dialog(self):
-        """Dialog to view and delete past posts used for redundancy checking."""
-        company = self.company_var.get().strip()
-        if not company:
-            messagebox.showerror("Error", "Please enter a Company Keyword first!")
-            return
-
-        posts_dir = str(P.past_posts_dir(company))
-        os.makedirs(posts_dir, exist_ok=True)
-        index_path = os.path.join(posts_dir, "index.json")
-
-        # Load existing posts
-        existing_posts = []
-        if os.path.exists(index_path):
-            try:
-                with open(index_path, "r", encoding="utf-8") as f:
-                    existing_posts = json.load(f)
-            except Exception:
-                existing_posts = []
-
-        dialog = tk.Toplevel(self.root)
-        dialog.title(f"Past Posts — {company}")
-        dialog.geometry("800x650")
-        dialog.configure(padx=15, pady=15, bg="white")
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        # --- Header with count ---
-        header_frame = tk.Frame(dialog, bg="white")
-        header_frame.pack(fill="x", pady=(0, 8))
-        count_var = tk.StringVar(value=f"{len(existing_posts)} past post(s) stored for redundancy checking")
-        tk.Label(header_frame, textvariable=count_var, bg="white", font=self.HEADER_FONT).pack(side="left")
-
-        tk.Label(
-            dialog, 
-            text="Posts are automatically saved after generation. They're used to detect redundant content.",
-            bg="white", fg="gray", font=("Arial", 9)
-        ).pack(anchor="w", pady=(0, 8))
-
-        # --- Scrollable list of existing posts ---
-        list_frame = tk.Frame(dialog, bg="white")
-        list_frame.pack(fill="both", expand=True, pady=(0, 10))
-
-        canvas = tk.Canvas(list_frame, bg="white", highlightthickness=0)
-        scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
-        inner_frame = tk.Frame(canvas, bg="white")
-
-        inner_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        self._bind_mousewheel(canvas)
-
-        check_vars = []  # list of (BooleanVar, index) for deletion
-
-        def refresh_list():
-            for widget in inner_frame.winfo_children():
-                widget.destroy()
-            check_vars.clear()
-
-            if not existing_posts:
-                tk.Label(inner_frame, text="No past posts yet. Posts are saved automatically after generation.",
-                        bg="white", fg="gray", font=self.UI_FONT).pack(anchor="w", pady=5)
-                return
-
-            # Sort by date (most recent first)
-            sorted_posts = sorted(existing_posts, key=lambda x: x.get("date", ""), reverse=True)
-
-            for i, entry in enumerate(sorted_posts):
-                row = tk.Frame(inner_frame, bg="white", relief="groove", bd=1)
-                row.pack(fill="x", pady=2, padx=2)
-
-                header_row = tk.Frame(row, bg="white")
-                header_row.pack(fill="x")
-
-                # Find original index
-                original_idx = existing_posts.index(entry)
-                var = tk.BooleanVar(value=False)
-                check_vars.append((var, original_idx))
-                tk.Checkbutton(header_row, variable=var, bg="white", activebackground="white").pack(side="left")
-
-                date_str = entry.get("date", "unknown")
-                theme_str = entry.get("theme", "")[:80] + "..." if len(entry.get("theme", "")) > 80 else entry.get("theme", "")
-                tk.Label(header_row, text=f"[{date_str}] {theme_str}", bg="white", font=("Arial", 10, "bold"),
-                        anchor="w").pack(side="left", fill="x", expand=True)
-
-                # Post preview (first 200 chars)
-                post_preview = entry.get("post", "")[:200].replace("\n", " ")
-                if len(entry.get("post", "")) > 200:
-                    post_preview += "..."
-                tk.Label(row, text=post_preview, bg="#f8f8f8", font=("Arial", 9), fg="#555",
-                        wraplength=700, justify="left", anchor="w", padx=5, pady=3).pack(fill="x")
-
-            count_var.set(f"{len(existing_posts)} past post(s) stored for redundancy checking")
-
-        refresh_list()
-
-        # --- Delete selected ---
-        def delete_selected():
-            indices_to_remove = sorted([idx for var, idx in check_vars if var.get()], reverse=True)
-            if not indices_to_remove:
-                messagebox.showinfo("No Selection", "Select posts to delete first.", parent=dialog)
-                return
-            for idx in indices_to_remove:
-                existing_posts.pop(idx)
-            try:
-                with open(index_path, "w", encoding="utf-8") as f:
-                    json.dump(existing_posts, f, indent=2, ensure_ascii=False)
-            except Exception as e:
-                messagebox.showerror("Save Error", f"Failed to save: {e}", parent=dialog)
-                return
-            refresh_list()
-
-        btn_frame = tk.Frame(dialog, bg="white")
-        btn_frame.pack(fill="x", pady=(0, 10))
-        self._create_clickable_label(btn_frame, "Delete Selected", delete_selected, fg="#cc0000").pack(side="left")
-        self._create_clickable_label(btn_frame, "Clear All", lambda: clear_all(), fg="#cc0000").pack(side="left", padx=(8, 0))
-
-        def clear_all():
-            if not messagebox.askyesno("Confirm", f"Delete all {len(existing_posts)} past posts?", parent=dialog):
-                return
-            existing_posts.clear()
-            try:
-                with open(index_path, "w", encoding="utf-8") as f:
-                    json.dump(existing_posts, f, indent=2, ensure_ascii=False)
-            except Exception as e:
-                messagebox.showerror("Save Error", f"Failed to save: {e}", parent=dialog)
-                return
-            refresh_list()
-
-        # --- Add post manually ---
-        tk.Frame(dialog, height=2, bd=1, relief="sunken", bg="#cccccc").pack(fill="x", pady=8)
-        tk.Label(dialog, text="Manually add a past post (e.g., from LinkedIn):",
-                bg="white", font=self.UI_FONT).pack(anchor="w", pady=(0, 4))
-
-        add_text = scrolledtext.ScrolledText(dialog, height=6, font=("Courier", 10),
-                                            relief="solid", borderwidth=1, highlightthickness=1)
-        add_text.pack(fill="x", pady=(0, 8))
-
-        def add_post():
-            raw = add_text.get("1.0", tk.END).strip()
+        def save_instructions():
+            raw = text_area.get("1.0", tk.END).strip()
             if not raw:
-                messagebox.showinfo("Empty", "Paste a post to add.", parent=dialog)
+                messagebox.showerror("Missing Information", "Please paste at least one instruction.", parent=dialog)
                 return
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y-%m-%d")
-            existing_posts.append({
-                "post": raw,
-                "theme": "(manually added)",
-                "date": timestamp
-            })
-            try:
-                with open(index_path, "w", encoding="utf-8") as f:
-                    json.dump(existing_posts, f, indent=2, ensure_ascii=False)
-            except Exception as e:
-                messagebox.showerror("Save Error", f"Failed to save: {e}", parent=dialog)
-                return
-            add_text.delete("1.0", tk.END)
-            refresh_list()
 
-        self._create_clickable_label(dialog, "Add Post", add_post).pack(fill="x")
+            lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
+            style_data = {
+                "tone_overrides": lines,
+                # You can add more structured fields later
+                "discouraged_modes": [],
+                "preferred_modes": []
+            }
+            try:
+                with open(style_path, "w", encoding="utf-8") as f:
+                    json.dump(style_data, f, indent=2)
+                print(f"Saved tone instructions for {company} to {style_path}")
+                dialog.destroy()
+            except Exception as e:
+                messagebox.showerror("Save Error", f"Failed to save instructions:\n{e}", parent=dialog)
+
+        tk.Button(dialog, text="💾 Save Tone Instructions", command=save_instructions,
+                font=self.UI_FONT, bg="#e0e0e0", cursor="hand2").pack(fill="x", pady=(4, 0))
 
     def _handle_find_shortcut(self, event):
         """Routes Cmd/Ctrl + F to the correct search bar based on where focus currently is."""
@@ -844,46 +398,18 @@ class AmphoreusExperiment:
                 os.rename(latest_path, os.path.join(target_dir, f"Transcript {i}{ext}"))
 
     # --- UI HELPERS ---
-    def _create_clickable_label(self, parent_frame, text, command, font=None, fg="black"):
-        f = font or self.UI_FONT
-        hf = (f[0], f[1] + 1, "bold") if isinstance(f, tuple) and len(f) >= 2 else self.HOVER_FONT
-        lbl = tk.Label(parent_frame, text=text, font=f, fg=fg, bg="white", cursor="hand2")
+    def _create_clickable_label(self, parent_frame, text, command):
+        lbl = tk.Label(parent_frame, text=text, font=self.UI_FONT, fg="black", bg="white", cursor="hand2")
         def on_enter(e):
-            if str(lbl["state"]) != "disabled": lbl.config(font=hf, fg="#666666")
+            if str(lbl["state"]) != "disabled": lbl.config(font=self.HOVER_FONT, fg="#666666") 
         def on_leave(e):
-            if str(lbl["state"]) != "disabled": lbl.config(font=f, fg=fg)
+            if str(lbl["state"]) != "disabled": lbl.config(font=self.UI_FONT, fg="black") 
         def on_click(e):
             if str(lbl["state"]) != "disabled": command()
         lbl.bind("<Enter>", on_enter)
         lbl.bind("<Leave>", on_leave)
         lbl.bind("<Button-1>", on_click)
         return lbl
-
-    @staticmethod
-    def _bind_mousewheel(canvas):
-        """Bind trackpad / mousewheel scrolling to a canvas (works on macOS and Windows)."""
-        _is_mac = platform.system() == "Darwin"
-
-        def _scroll(event):
-            if _is_mac:
-                canvas.yview_scroll(int(-1 * event.delta), "units")
-            else:
-                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        def _on_enter(_e):
-            canvas.bind_all("<MouseWheel>", _scroll)
-            if not _is_mac:
-                canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
-                canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
-
-        def _on_leave(_e):
-            canvas.unbind_all("<MouseWheel>")
-            if not _is_mac:
-                canvas.unbind_all("<Button-4>")
-                canvas.unbind_all("<Button-5>")
-
-        canvas.bind("<Enter>", _on_enter)
-        canvas.bind("<Leave>", _on_leave)
 
     def _load_specific_image(self, path, size=(30, 30)):
         if os.path.exists(path):
@@ -985,20 +511,18 @@ class AmphoreusExperiment:
         result_viewer.insert("1.0", result_text)
         result_viewer.config(state="disabled") 
         
-        self._create_clickable_label(popup, "Close", popup.destroy).pack(pady=(10, 0))
+        tk.Button(popup, text="Close", command=popup.destroy, font=self.UI_FONT, bg="#e0e0e0", cursor="hand2").pack(pady=(10, 0))
 
     # --- LEFT PANEL: LOGIC FUNCTIONS ---
-
     def _get_target_dir(self, folder_type):
         company = self.company_var.get().strip()
         if not company:
             messagebox.showerror("Error", "Please enter a Company Keyword first!")
             return None
-        P.ensure_dirs(company)
-        if folder_type == "accepted": return str(P.accepted_dir(company))
-        elif folder_type == "feedback": return str(P.feedback_dir(company))
-        elif folder_type == "revisions": return str(P.revisions_dir(company))
-        return str(P.transcripts_dir(company))
+        base_dir = os.path.join("./client_data", company)
+        if folder_type == "accepted": return os.path.join(base_dir, "accepted")
+        elif folder_type == "feedback": return os.path.join(base_dir, "feedback")
+        return base_dir
     
     def show_upload_dialog(self, folder_type):
         target_dir = self._get_target_dir(folder_type)
@@ -1012,7 +536,7 @@ class AmphoreusExperiment:
         dialog.grab_set()           
 
         tk.Label(dialog, text="Option 1: Upload Existing Files", font=self.HEADER_FONT, bg="white").pack(anchor="w", pady=(0, 5))
-        btn_browse = self._create_clickable_label(dialog, "Browse Files...", lambda: self._browse_files(folder_type, dialog))
+        btn_browse = tk.Button(dialog, text="Browse Files...", command=lambda: self._browse_files(folder_type, dialog), font=self.UI_FONT, cursor="hand2")
         btn_browse.pack(anchor="w", pady=(0, 15))
 
         tk.Frame(dialog, height=2, bd=1, relief="sunken", bg="#cccccc").pack(fill="x", pady=10)
@@ -1067,7 +591,7 @@ class AmphoreusExperiment:
             except Exception as e:
                 messagebox.showerror("Save Error", f"Failed to save text:\n{e}", parent=dialog)
 
-        btn_save = self._create_clickable_label(dialog, "💾 Save Pasted Text", save_pasted_text)
+        btn_save = tk.Button(dialog, text="💾 Save Pasted Text", command=save_pasted_text, font=self.UI_FONT, bg="#e0e0e0", cursor="hand2")
         btn_save.pack(fill="x", pady=5)
 
     def _browse_files(self, folder_type, dialog_to_close=None):
@@ -1093,130 +617,6 @@ class AmphoreusExperiment:
             if dialog_to_close:
                 dialog_to_close.destroy()
     
-    def show_revision_dialog(self):
-        company = self.company_var.get().strip()
-        if not company:
-            messagebox.showerror("Error", "Please enter a Company Keyword first!")
-            return
-        P.ensure_dirs(company)
-
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Add Revision or Feedback")
-        dlg.geometry("920x560")
-        dlg.configure(bg="white")
-        dlg.minsize(700, 420)
-        dlg.transient(self.root)
-        dlg.grab_set()
-
-        outer = tk.Frame(dlg, bg="white")
-        outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
-        outer.columnconfigure(0, weight=1)
-        outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(1, weight=1)
-
-        tk.Label(
-            outer, text="Pipeline Draft (Before) / Feedback",
-            bg="white", font=self.HEADER_FONT,
-        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
-
-        tk.Label(
-            outer, text="Revised Version (After) — leave blank for feedback only",
-            bg="white", font=self.HEADER_FONT,
-        ).grid(row=0, column=1, sticky="w", pady=(0, 4))
-
-        left_t = scrolledtext.ScrolledText(
-            outer, height=16, font=self.UI_FONT, wrap=tk.WORD,
-            relief="solid", borderwidth=1,
-        )
-        left_t.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
-
-        right_t = scrolledtext.ScrolledText(
-            outer, height=16, font=self.UI_FONT, wrap=tk.WORD,
-            relief="solid", borderwidth=1,
-        )
-        right_t.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
-
-        tk.Label(
-            outer, text="Notes (optional):", bg="white", font=self.UI_FONT,
-        ).grid(row=2, column=0, sticky="w", pady=(8, 2), columnspan=2)
-
-        notes_var = tk.StringVar()
-        tk.Entry(
-            outer, textvariable=notes_var, font=self.UI_FONT,
-            relief="solid", borderwidth=1,
-        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-
-        def _next_filename(directory, prefix):
-            os.makedirs(directory, exist_ok=True)
-            existing = [f for f in os.listdir(directory) if f.startswith(prefix) and f.endswith(".txt")]
-            nums = []
-            for f in existing:
-                try:
-                    nums.append(int(f.replace(prefix, "").replace(".txt", "")))
-                except ValueError:
-                    pass
-            return f"{prefix}{max(nums, default=0) + 1}.txt"
-
-        def save():
-            left = left_t.get("1.0", tk.END).strip()
-            right = right_t.get("1.0", tk.END).strip()
-            notes = notes_var.get().strip() or "No notes provided."
-
-            if not left and not right:
-                messagebox.showerror("Missing Content", "Please paste text in at least the left panel.", parent=dlg)
-                return
-            if not left and right:
-                messagebox.showerror("Missing Content", "The left panel (before/feedback) cannot be empty if the right panel has text.", parent=dlg)
-                return
-
-            try:
-                if left and right:
-                    rev_dir = str(P.revisions_dir(company))
-                    fname = _next_filename(rev_dir, "revision-")
-                    fpath = os.path.join(rev_dir, fname)
-                    with open(fpath, "w", encoding="utf-8") as f:
-                        f.write(f"=== PIPELINE DRAFT ===\n{left}\n\n")
-                        f.write(f"=== REVISION NOTES ===\n{notes}\n\n")
-                        f.write(f"=== REVISED VERSION ===\n{right}\n")
-                    print(f"[Amphoreus] Saved revision to {fpath}")
-                else:
-                    fb_dir = str(P.feedback_dir(company))
-                    fname = _next_filename(fb_dir, "feedback-")
-                    fpath = os.path.join(fb_dir, fname)
-                    with open(fpath, "w", encoding="utf-8") as f:
-                        f.write(left)
-                    print(f"[Amphoreus] Saved feedback to {fpath}")
-
-                self.refresh_file_tree()
-                dlg.destroy()
-            except Exception as e:
-                messagebox.showerror("Save Error", f"Failed to save:\n{e}", parent=dlg)
-
-        btn_row = tk.Frame(dlg, bg="white")
-        btn_row.pack(fill=tk.X, padx=12, pady=(0, 12))
-        self._create_clickable_label(btn_row, "Save", save).pack(side=tk.LEFT, padx=(0, 10))
-        self._create_clickable_label(btn_row, "Close", dlg.destroy).pack(side=tk.LEFT)
-
-    def _load_client_context(self) -> str:
-        """Load transcripts + feedback + accepted posts for the current company."""
-        company = self.company_var.get().strip()
-        if not company:
-            return ""
-        parts = []
-        transcripts = _read_local_context(str(P.transcripts_dir(company)), skip_files=[])
-        if transcripts:
-            parts.append(f"=== INTERVIEW TRANSCRIPTS ===\n{transcripts}")
-        references = _read_local_context(str(P.references_dir(company)), skip_files=[])
-        if references:
-            parts.append(f"=== CLIENT REFERENCES ===\n{references}")
-        accepted = _read_local_context(str(P.accepted_dir(company)), skip_files=[])
-        if accepted:
-            parts.append(f"=== APPROVED POSTS ===\n{accepted}")
-        feedback = _read_local_context(str(P.feedback_dir(company)), skip_files=[])
-        if feedback:
-            parts.append(f"=== CLIENT FEEDBACK ===\n{feedback}")
-        return "\n\n".join(parts)
-
     def show_context_menu(self, event):
         try:
             if self.output_viewer.tag_ranges(tk.SEL):
@@ -1231,14 +631,15 @@ class AmphoreusExperiment:
             return 
 
         company = self.company_var.get().strip()
+        model = self.model_var.get()
 
         if not company:
             messagebox.showwarning("Missing Data", "Company Keyword is required to search source files.")
             return
 
-        self.console.insert(tk.END, "\n[HYSILENS] Analyzing source for selected snippet...\n")
+        self.console.insert(tk.END, f"\n[HYSILENS] Analyzing source for selected snippet using {model}...\n")
         self.console.see(tk.END)
-        threading.Thread(target=self._hysilens_thread, args=(selected_text, company, "Gemini"), daemon=True).start()
+        threading.Thread(target=self._hysilens_thread, args=(selected_text, company, model), daemon=True).start()
 
     def _hysilens_thread(self, snippet, company, model):
         result = self.hysilens.find_source(snippet, company, model)
@@ -1259,7 +660,7 @@ class AmphoreusExperiment:
         result_viewer.insert("1.0", result_text)
         result_viewer.config(state="disabled") 
         
-        self._create_clickable_label(popup, "Close", popup.destroy).pack(pady=(10, 0))
+        tk.Button(popup, text="Close", command=popup.destroy, font=self.UI_FONT, bg="#e0e0e0", cursor="hand2").pack(pady=(10, 0))
     
     def run_anaxa(self):
         """Captures highlighted text and prompts the user for a web-search query."""
@@ -1309,1156 +710,206 @@ class AmphoreusExperiment:
         result_viewer.insert("1.0", result_text)
         result_viewer.config(state="disabled") 
         
-        self._create_clickable_label(popup, "Close", popup.destroy).pack(pady=(10, 0))
+        tk.Button(popup, text="Close", command=popup.destroy, font=self.UI_FONT, bg="#e0e0e0", cursor="hand2").pack(pady=(10, 0))
 
     def run_generation(self):
         client_name = self.client_name_var.get().strip()
         company = self.company_var.get().strip()
         action = self.action_var.get()
-
+        model_choice = self.model_var.get() 
+        
         if not client_name or not company:
             messagebox.showerror("Error", "Client Name and Company Keyword are required.")
             return
-
+            
         self.run_btn.config(state="disabled", text="Running...")
-        self.console.delete(1.0, tk.END)
+        self.console.delete(1.0, tk.END) 
         self.output_viewer.delete(1.0, tk.END)
+        
+        threading.Thread(target=self._process_thread, args=(client_name, company, action, model_choice), daemon=True).start()
 
-        threading.Thread(
-            target=self._process_thread,
-            args=(client_name, company, action),
-            daemon=True,
-        ).start()
-
-    def _process_thread(self, client_name, company, action):
+    def _process_thread(self, client_name, company, action, model_choice):
         try:
             if action == "post":
-                print(f"[Amphoreus] Starting post generation for {client_name}...\n")
-                P.ensure_dirs(company)
-                output_filepath = str(P.post_dir(company) / f"{company}_posts.md")
-                generate_one_shot(client_name, company, output_filepath)
+                print(f"Ruan Mei: I'm Starting Post Generation for {client_name}...\n")
+                self.current_generation_data = generate_iterative_linkedin_posts(client_name, company, model_choice) 
             else:
-                print(f"[Amphoreus] Starting briefing for {client_name}...\n")
-                generate_briefing(client_name, company)
-        except Exception as e:
+                print(f"Ruan Mei: I'm Starting Briefing for {client_name} using [{model_choice}]...\n")
+                generate_briefing(client_name, company, model_choice)
+        except Exception as e: 
             print(f"\nAN ERROR OCCURRED: {e}")
         finally:
-            self.run_btn.config(state="normal", text="🚀 RUN TASK")
+            self.run_btn.config(state="normal", text="🚀 RUN AMPHOREUS EXPERIMENT")
             print("\n--- TASK FINISHED ---")
-            self.root.after(0, self.load_output_to_viewer)
+            self.root.after(0, lambda: self.load_output_to_viewer(model_choice))
             self.root.after(0, self.refresh_file_tree)
 
-    # ------------------------------------------------------------------
-    # Cyrene rewrite dialogs
-    # ------------------------------------------------------------------
+    def _toggle_post_num(self):
+        """Enables or disables the post number entry based on the selected rewrite mode."""
+        if self.rewrite_mode_var.get() == "single":
+            self.post_num_label.config(state="normal")
+            self.post_num_entry.config(state="normal")
+        else:
+            self.post_num_label.config(state="disabled")
+            self.post_num_entry.delete(0, tk.END) # Clear any old numbers
+            self.post_num_entry.config(state="disabled")
 
-    def open_single_post_rewrite_dialog(self):
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Rewrite single post (Cyrene)")
-        dlg.geometry("920x560")
-        dlg.configure(bg="white")
-        dlg.minsize(640, 420)
-        dlg.transient(self.root)
-
-        outer = tk.Frame(dlg, bg="white")
-        outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
-        outer.columnconfigure(0, weight=1)
-        outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(1, weight=3)
-        outer.rowconfigure(3, weight=1)
-
-        tk.Label(
-            outer,
-            text="Post to rewrite",
-            bg="white",
-            font=self.HEADER_FONT,
-        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
-        tk.Label(
-            outer,
-            text="Rewrite instruction (optional)",
-            bg="white",
-            font=self.HEADER_FONT,
-        ).grid(row=0, column=1, sticky="w", pady=(0, 4))
-
-        post_t = scrolledtext.ScrolledText(
-            outer,
-            height=12,
-            font=self.UI_FONT,
-            wrap=tk.WORD,
-            relief="solid",
-            borderwidth=1,
-            highlightthickness=1,
-            highlightbackground="white",
-            highlightcolor="black",
-        )
-        post_t.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
-
-        instr_t = scrolledtext.ScrolledText(
-            outer,
-            height=12,
-            font=self.UI_FONT,
-            wrap=tk.WORD,
-            relief="solid",
-            borderwidth=1,
-            highlightthickness=1,
-            highlightbackground="white",
-            highlightcolor="black",
-        )
-        instr_t.insert(
-            "1.0",
-            "Leave blank for random stylistic noise, or type a specific instruction.",
-        )
-        instr_t.grid(row=1, column=1, sticky="nsew")
-
-        tk.Label(
-            outer,
-            text="Theme (optional, preserved through rewrite)",
-            bg="white",
-            font=self.HEADER_FONT,
-        ).grid(row=2, column=0, sticky="w", pady=(12, 4))
-
-        tk.Label(
-            outer,
-            text="Image suggestion (optional, preserved through rewrite)",
-            bg="white",
-            font=self.HEADER_FONT,
-        ).grid(row=2, column=1, sticky="w", pady=(12, 4))
-
-        theme_t = tk.Entry(
-            outer,
-            font=self.UI_FONT,
-            relief="solid",
-            borderwidth=1,
-        )
-        theme_t.grid(row=3, column=0, sticky="ew", padx=(0, 8))
-
-        img_sug_t = scrolledtext.ScrolledText(
-            outer,
-            height=3,
-            font=self.UI_FONT,
-            wrap=tk.WORD,
-            relief="solid",
-            borderwidth=1,
-            highlightthickness=1,
-            highlightbackground="white",
-            highlightcolor="black",
-        )
-        img_sug_t.grid(row=3, column=1, sticky="nsew")
-
-        ctx_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            outer, text="Load client context (transcripts, feedback, accepted posts)",
-            variable=ctx_var, bg="white", activebackground="white", font=self.UI_FONT,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
-
-        btn_row = tk.Frame(dlg, bg="white")
-        btn_row.pack(fill=tk.X, padx=12, pady=(0, 12))
-
-        run_lbl = self._create_clickable_label(
-            btn_row,
-            "✨ Rewrite",
-            lambda: self._submit_single_post_rewrite_from_dialog(post_t, instr_t, img_sug_t, theme_t, ctx_var, run_lbl, dlg),
-        )
-        run_lbl.pack(side=tk.LEFT, padx=(0, 10))
-
-        self._create_clickable_label(btn_row, "Close", dlg.destroy).pack(side=tk.LEFT)
-
-    def _submit_single_post_rewrite_from_dialog(self, post_t, instr_t, img_sug_t, theme_t, ctx_var, run_lbl, dlg):
-        post_text = post_t.get("1.0", tk.END).strip()
-        if not post_text:
-            messagebox.showerror(
-                "Error",
-                "Paste the post you want rewritten.",
-                parent=dlg,
-            )
-            return
-
-        style_instruction = instr_t.get("1.0", tk.END).strip()
+    def run_rewrite(self):
+        company = self.company_var.get().strip()
+        client_name = self.client_name_var.get().strip()
+        model_choice = self.model_var.get()
+        
+        # Determine if the user left the instruction blank or with the default text
+        style_instruction = self.style_prompt_text.get("1.0", tk.END).strip()
         if "Leave blank for random stylistic noise" in style_instruction:
             style_instruction = ""
-
-        image_suggestion = img_sug_t.get("1.0", tk.END).strip()
-        theme = theme_t.get().strip()
-        client_context = self._load_client_context() if ctx_var.get() else ""
-
-        run_lbl.config(state="disabled")
-
-        def on_done():
-            run_lbl.config(state="normal")
-
-        threading.Thread(
-            target=self._rewrite_pasted_thread,
-            args=(post_text, style_instruction, image_suggestion, theme, client_context, on_done),
-            daemon=True,
-        ).start()
-
-    def _rewrite_pasted_thread(self, post_text: str, style_instruction: str, image_suggestion: str = "", theme: str = "", client_context: str = "", on_done=None):
-        try:
-            print("\n[CYRENE] Rewriting pasted post...")
-            cyrene = Cyrene()
-            result = cyrene.rewrite_single_post(
-                post_text=post_text,
-                style_instruction=style_instruction,
-                image_suggestion=image_suggestion,
-                theme=theme,
-                client_context=client_context,
-            )
-            print("[CYRENE] Pasted post rewrite complete.")
             
-            self.root.after(
-                0,
-                lambda r=result: self._show_rewrite_result_popup(r),
-            )
-        except Exception as e:
-            print(f"Rewrite (pasted) error: {e}")
-            self.root.after(
-                0,
-                lambda err=str(e): messagebox.showerror(
-                    "Rewrite failed",
-                    err,
-                    parent=self.root,
-                ),
-            )
-        finally:
-            if on_done:
-                self.root.after(0, on_done)
+        if not company or not client_name:
+            messagebox.showerror("Error", "Client Name and Company Keyword are required.")
+            return
 
-    def _show_rewrite_result_popup(self, result: dict):
-        popup = tk.Toplevel(self.root)
-        popup.title("Rewritten post")
-        popup.geometry("780x720")
-        popup.configure(bg="white")
-        popup.transient(self.root)
-
-        final_post = result.get("final_post", "N/A")
-        image_suggestion = result.get("image_suggestion", "")
-        theme = result.get("theme", "")
-
-        tk.Label(
-            popup,
-            text="Rewritten post",
-            font=self.HEADER_FONT,
-            bg="white",
-        ).pack(anchor="w", padx=12, pady=(12, 4))
-
-        body = scrolledtext.ScrolledText(
-            popup,
-            height=12,
-            font=("Helvetica", 11),
-            wrap="word",
-            relief="solid",
-            borderwidth=1,
-            bg="#ffffff",
-            fg="#333333",
-        )
-        body.pack(fill="both", expand=True, padx=12, pady=(0, 8))
-        body.insert(tk.END, final_post + "\n")
-        body.configure(state="disabled")
-
-        btn_row = tk.Frame(popup, bg="white")
-        btn_row.pack(fill="x", padx=12, pady=(0, 8))
-
-        def copy_final():
-            self.root.clipboard_clear()
-            self.root.clipboard_append(final_post)
-            self.root.update_idletasks()
-
-        def show_cyrene_steps():
-            detail = tk.Toplevel(popup)
-            detail.title("Cyrene steps")
-            detail.geometry("640x480")
-            detail.configure(bg="white")
-            t = scrolledtext.ScrolledText(
-                detail,
-                font=("Helvetica", 10),
-                wrap="word",
-                relief="solid",
-                borderwidth=1,
-            )
-            t.pack(fill="both", expand=True, padx=10, pady=10)
-            t.insert(
-                tk.END,
-                "**Step 1: Fact extraction**\n"
-                + result.get("fact_extraction", "N/A")
-                + "\n\n**Step 2: Style approach**\n"
-                + result.get("style_analysis", "N/A")
-                + "\n\n**Step 3: Rewrite strategy**\n"
-                + result.get("strategy", "N/A")
-                + "\n",
-            )
-            t.configure(state="disabled")
-            self._create_clickable_label(detail, "Close", detail.destroy).pack(pady=(0, 10))
-
-        self._create_clickable_label(btn_row, "Copy rewritten post", copy_final).pack(side="left", padx=(0, 8))
-        self._create_clickable_label(btn_row, "Cyrene steps", show_cyrene_steps).pack(side="left", padx=(0, 8))
-        self._create_clickable_label(btn_row, "Close", popup.destroy).pack(side="left")
-
-        separator = ttk.Separator(popup, orient="horizontal")
-        separator.pack(fill="x", padx=12, pady=(8, 8))
-
-        ordinal_frame = tk.LabelFrame(
-            popup,
-            text="Push to Ordinal",
-            bg="white",
-            padx=8,
-            pady=8,
-            font=self.HEADER_FONT,
-        )
-        ordinal_frame.pack(fill="x", padx=12, pady=(0, 12))
-
-        row1 = tk.Frame(ordinal_frame, bg="white")
-        row1.pack(fill="x", pady=(0, 6))
-
-        tk.Label(row1, text="Company:", bg="white", font=self.UI_FONT).pack(side="left")
-        company_var = tk.StringVar(value=self.company_var.get().strip())
-        company_entry = tk.Entry(row1, textvariable=company_var, width=20, font=self.UI_FONT)
-        company_entry.pack(side="left", padx=(4, 12))
-
-        tk.Label(row1, text="Publish date (YYYY-MM-DD HH:MM):", bg="white", font=self.UI_FONT).pack(side="left")
-        default_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d 09:00")
-        date_var = tk.StringVar(value=default_date)
-        date_entry = tk.Entry(row1, textvariable=date_var, width=18, font=self.UI_FONT)
-        date_entry.pack(side="left", padx=(4, 0))
-
-        row2 = tk.Frame(ordinal_frame, bg="white")
-        row2.pack(fill="x", pady=(0, 6))
-
-        tk.Label(row2, text="Label:", bg="white", font=self.UI_FONT).pack(side="left")
-        label_var = tk.StringVar()
-        label_combo = ttk.Combobox(row2, textvariable=label_var, width=24, state="readonly")
-        label_combo.pack(side="left", padx=(4, 12))
-
-        tk.Label(row2, text="Approvers:", bg="white", font=self.UI_FONT).pack(side="left")
-        approver_listbox = tk.Listbox(row2, selectmode=tk.MULTIPLE, height=3, width=30, font=("Arial", 10))
-        approver_listbox.pack(side="left", padx=(4, 0))
-
-        labels_cache = {"data": [], "ids": {}}
-        users_cache = {"data": []}
-
-        def fetch_ordinal_data():
-            co = company_var.get().strip()
-            if not co:
-                return
-            hyacinthia = Hyacinthia()
-            labels = hyacinthia.get_labels(co)
-            users = hyacinthia.get_users(co)
-            labels_cache["data"] = labels
-            labels_cache["ids"] = {lbl.get("name"): lbl.get("id") for lbl in labels}
-            users_cache["data"] = users
-
-            label_names = [lbl.get("name", "Unknown") for lbl in labels]
-            label_combo["values"] = label_names
-            if label_names:
-                label_combo.current(0)
-
-            approver_listbox.delete(0, tk.END)
-            for u in users:
-                name = f"{u.get('firstName', '')} {u.get('lastName', '')}".strip() or u.get("email", "Unknown")
-                approver_listbox.insert(tk.END, name)
-
-        fetch_btn = self._create_clickable_label(row2, "Fetch labels/approvers",
-            lambda: threading.Thread(target=fetch_ordinal_data, daemon=True).start(),
-            font=("Arial", 10))
-        fetch_btn.pack(side="left", padx=(8, 0))
-
-        if theme or image_suggestion:
-            row3 = tk.Frame(ordinal_frame, bg="white")
-            row3.pack(fill="x", pady=(0, 6))
-            tk.Label(row3, text="Theme & image suggestion (will be added as comment):", bg="white", font=self.UI_FONT).pack(anchor="w")
-            meta_text = scrolledtext.ScrolledText(row3, height=3, font=("Arial", 10), wrap="word", bg="#f9f9f9")
-            meta_text.pack(fill="x")
-            parts = []
-            if theme:
-                parts.append(f"Theme: {theme}")
-            if image_suggestion:
-                parts.append(f"Image suggestion: {image_suggestion}")
-            meta_text.insert(tk.END, "\n".join(parts))
-            meta_text.configure(state="disabled")
-
-        def push_to_ordinal():
-            co = company_var.get().strip()
-            if not co:
-                messagebox.showerror("Error", "Company keyword required.", parent=popup)
-                return
+        # --- NEW: Capture mode and validate target index ---
+        mode = self.rewrite_mode_var.get()
+        target_index = -1
+        if mode == "single":
             try:
-                pub_dt = datetime.strptime(date_var.get().strip(), "%Y-%m-%d %H:%M")
+                target_index = int(self.post_num_entry.get().strip()) - 1
+                if target_index < 0: raise ValueError
             except ValueError:
-                messagebox.showerror("Error", "Invalid date format. Use YYYY-MM-DD HH:MM", parent=popup)
+                messagebox.showerror("Error", "Please enter a valid Post Number (e.g., 1, 2, 3).")
                 return
 
-            selected_label_name = label_var.get()
-            label_ids = []
-            if selected_label_name and selected_label_name in labels_cache["ids"]:
-                label_ids = [labels_cache["ids"][selected_label_name]]
-
-            selected_approver_indices = list(approver_listbox.curselection())
-            approvals = []
-            for idx in selected_approver_indices:
-                if idx < len(users_cache["data"]):
-                    user = users_cache["data"][idx]
-                    approvals.append({"userId": user.get("id")})
-
-            def do_push():
-                hyacinthia = Hyacinthia()
-                res = hyacinthia.push_single_post(
-                    company_keyword=co,
-                    content=final_post,
-                    publish_date=pub_dt,
-                    status="ForReview",
-                    label_ids=label_ids if label_ids else None,
-                    approvals=approvals if approvals else None,
-                )
-                if not res["success"]:
-                    popup.after(0, lambda: messagebox.showerror("Ordinal Error", res["error"], parent=popup))
-                    return
-
-                post_id = res["post_id"]
-                post_url = res["url"]
-
-                if theme or image_suggestion:
-                    comment_parts = []
-                    if theme:
-                        comment_parts.append(f"**Theme:** {theme}")
-                    if image_suggestion:
-                        comment_parts.append(f"**Image Suggestion:**\n{image_suggestion}")
-                    comment_msg = "\n\n".join(comment_parts)
-                    cmt_res = hyacinthia.create_comment(co, post_id, comment_msg)
-                    if not cmt_res["success"]:
-                        print(f"[ORDINAL] Comment creation failed: {cmt_res['error']}")
-
-                popup.after(0, lambda: messagebox.showinfo(
-                    "Success",
-                    f"Post pushed to Ordinal!\nID: {post_id}\nURL: {post_url}",
-                    parent=popup,
-                ))
-
-            threading.Thread(target=do_push, daemon=True).start()
-
-        push_btn = self._create_clickable_label(ordinal_frame, "Push to Ordinal", push_to_ordinal, fg="#4CAF50")
-        push_btn.pack(anchor="w", pady=(4, 0))
-
-    def _parse_posts_from_output_file(self, filepath: str) -> list:
-        """
-        Parse posts from a Stelle output file ({company}_posts.md).
-
-        Returns list of dicts with keys: post, theme, image_suggestion, why_post, origin
-        Extracts the "Final Post" section (post-fact-check), plus metadata.
-        """
-        import re
-
-        if not os.path.exists(filepath):
-            return []
-
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        post_blocks = re.split(r'^## Post \d+:', content, flags=re.MULTILINE)
-
-        parsed = []
-        for block in post_blocks[1:]:
-            block = block.strip()
-
-            hook = block.split("\n")[0].strip() if block else ""
-
-            origin_match = re.search(r'\*\*Origin:\*\*\s*(.+)', block)
-            origin = origin_match.group(1).strip() if origin_match else ""
-
-            final_match = re.search(
-                r'### Final Post\s*\n(.*?)(?=###|\Z)', block, re.DOTALL,
-            )
-            if final_match:
-                post_text = final_match.group(1).strip()
-            else:
-                draft_match = re.search(
-                    r'### Draft\s*\n(.*?)(?=###|\Z)', block, re.DOTALL,
-                )
-                post_text = draft_match.group(1).strip() if draft_match else ""
-
-            why_match = re.search(
-                r'### Why Post\s*\n(.*?)(?=###|---|\Z)', block, re.DOTALL,
-            )
-            why_post = why_match.group(1).strip() if why_match else ""
-
-            img_match = re.search(
-                r'### Image Suggestion\s*\n(.*?)(?=###|---|\Z)', block, re.DOTALL,
-            )
-            image_suggestion = img_match.group(1).strip() if img_match else ""
-
-            if post_text:
-                parsed.append({
-                    "post": post_text,
-                    "theme": hook,
-                    "origin": origin,
-                    "image_suggestion": image_suggestion,
-                    "why_post": why_post,
-                })
-
-        return parsed[:MAX_BATCH_POSTS]
-
-    def open_batch_post_rewrite_dialog(self):
-        dlg = tk.Toplevel(self.root)
-        dlg.title(f"Rewrite multiple posts — Cyrene (max {MAX_BATCH_POSTS})")
-        dlg.geometry("820x640")
-        dlg.configure(bg="white")
-        dlg.minsize(640, 480)
-        dlg.transient(self.root)
-
-        outer = tk.Frame(dlg, bg="white")
-        outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
-
-        top = tk.Frame(outer, bg="white")
-        top.pack(fill=tk.X, pady=(0, 8))
-        tk.Label(
-            top,
-            text="How many posts?",
-            bg="white",
-            font=self.UI_FONT,
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        count_var = tk.IntVar(value=3)
-        spin = tk.Spinbox(
-            top,
-            from_=1,
-            to=MAX_BATCH_POSTS,
-            textvariable=count_var,
-            width=4,
-            font=self.UI_FONT,
-        )
-        spin.pack(side=tk.LEFT)
-        tk.Label(
-            top,
-            text="(Each slot below must contain text.)",
-            bg="white",
-            fg="gray",
-            font=("Arial", 9),
-        ).pack(side=tk.LEFT, padx=(12, 0))
-
-        load_row = tk.Frame(outer, bg="white")
-        load_row.pack(fill=tk.X, pady=(0, 8))
-        tk.Label(
-            load_row,
-            text="Or load from output file:",
-            bg="white",
-            font=self.UI_FONT,
-        ).pack(side=tk.LEFT, padx=(0, 8))
+        self.rewrite_btn.config(state="disabled", text="Rewriting...")
+        self.console.delete(1.0, tk.END)
+        self.output_viewer.delete(1.0, tk.END)
         
-        # post_entries will be defined later, so we need a reference holder
-        post_entries_ref = {"entries": None, "sync_visible": None, "count_var": count_var, "scroll_region": None}
-
-        def load_from_output():
-            company = self.company_var.get().strip()
-            if not company:
-                messagebox.showerror("Error", "Please enter a Company Keyword first.", parent=dlg)
-                return
-
-            filename = f"{company}_posts.md"
-            filepath = str(P.post_dir(company) / filename)
-            
-            if not os.path.exists(filepath):
-                messagebox.showerror("Error", f"File not found:\n{filepath}", parent=dlg)
-                return
-            
-            parsed = self._parse_posts_from_output_file(filepath)
-            if not parsed:
-                messagebox.showwarning("Warning", "No posts found in file.", parent=dlg)
-                return
-            
-            entries = post_entries_ref["entries"]
-            if not entries:
-                return
-            
-            # Update count and sync visible
-            n = min(len(parsed), MAX_BATCH_POSTS)
-            count_var.set(n)
-            if post_entries_ref["sync_visible"]:
-                post_entries_ref["sync_visible"]()
-            
-            # Load data into entries
-            for i, p in enumerate(parsed):
-                if i >= len(entries):
-                    break
-                lf, st, img_entry, theme_entry = entries[i]
-                
-                # Clear and set post text
-                st.delete("1.0", tk.END)
-                st.insert("1.0", p.get("post", ""))
-                
-                # Clear and set theme
-                theme_entry.delete(0, tk.END)
-                theme_entry.insert(0, p.get("theme", ""))
-                
-                # Clear and set image suggestion
-                img_entry.delete(0, tk.END)
-                img_entry.insert(0, p.get("image_suggestion", ""))
-            
-            messagebox.showinfo("Loaded", f"Loaded {n} post(s) from {filename}", parent=dlg)
-
-        self._create_clickable_label(load_row, "Load posts", load_from_output).pack(side=tk.LEFT)
-
-        scroll_wrap = tk.Frame(outer, bg="white")
-        scroll_wrap.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
-        canvas = tk.Canvas(scroll_wrap, bg="white", highlightthickness=0)
-        vsb = ttk.Scrollbar(scroll_wrap, orient="vertical", command=canvas.yview)
-        inner = tk.Frame(canvas, bg="white")
-        inner_win = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-        def _scroll_region(_event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _canvas_width(event):
-            canvas.itemconfigure(inner_win, width=event.width)
-
-        inner.bind("<Configure>", _scroll_region)
-        canvas.bind("<Configure>", _canvas_width)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.configure(yscrollcommand=vsb.set)
-
-        self._bind_mousewheel(canvas)
-
-        post_entries: list[tuple] = []
-        for i in range(MAX_BATCH_POSTS):
-            lf = tk.LabelFrame(
-                inner,
-                text=f"Post {i + 1}",
-                bg="white",
-                padx=6,
-                pady=6,
-                font=self.UI_FONT,
-            )
-            st = scrolledtext.ScrolledText(
-                lf,
-                height=5,
-                font=self.UI_FONT,
-                wrap=tk.WORD,
-                relief="solid",
-                borderwidth=1,
-                highlightthickness=1,
-                highlightbackground="white",
-                highlightcolor="black",
-            )
-            st.pack(fill=tk.BOTH, expand=True)
-            
-            meta_row = tk.Frame(lf, bg="white")
-            meta_row.pack(fill=tk.X, pady=(4, 0))
-            
-            tk.Label(meta_row, text="Theme:", bg="white", fg="gray", font=("Arial", 9)).pack(side=tk.LEFT)
-            theme_entry = tk.Entry(meta_row, font=("Arial", 10), width=25)
-            theme_entry.pack(side=tk.LEFT, padx=(2, 10))
-            
-            tk.Label(meta_row, text="Image suggestion:", bg="white", fg="gray", font=("Arial", 9)).pack(side=tk.LEFT)
-            img_entry = tk.Entry(meta_row, font=("Arial", 10), width=40)
-            img_entry.pack(side=tk.LEFT, padx=(2, 0), fill=tk.X, expand=True)
-            
-            post_entries.append((lf, st, img_entry, theme_entry))
-
-        def sync_visible(*_args):
-            try:
-                n = int(count_var.get())
-            except (tk.TclError, ValueError):
-                n = 1
-            n = max(1, min(n, MAX_BATCH_POSTS))
-            count_var.set(n)
-            for idx, (lf, _st, _img_entry, _theme_entry) in enumerate(post_entries):
-                if idx < n:
-                    lf.pack(fill=tk.BOTH, expand=False, pady=(0, 10))
-            else:
-                    lf.pack_forget()
-            _scroll_region()
-
-        spin.configure(command=sync_visible)
-        sync_visible()
-
-        # Store references for load_from_output
-        post_entries_ref["entries"] = post_entries
-        post_entries_ref["sync_visible"] = sync_visible
-        post_entries_ref["scroll_region"] = _scroll_region
-
-        tk.Label(
-            outer,
-            text="Batch rewrite instruction (applies to the whole set; Cyrene sees every post at once)",
-            bg="white",
-            font=self.HEADER_FONT,
-        ).pack(anchor="w", pady=(0, 4))
-        instr_t = scrolledtext.ScrolledText(
-            outer,
-            height=4,
-            font=self.UI_FONT,
-            wrap=tk.WORD,
-            relief="solid",
-            borderwidth=1,
-            highlightthickness=1,
-            highlightbackground="white",
-            highlightcolor="black",
-        )
-        instr_t.insert(
-            "1.0",
-            "e.g. Remove redundant lines across posts, align tone, or leave blank for varied stylistic noise.",
-        )
-        instr_t.pack(fill=tk.X, pady=(0, 8))
-
-        batch_ctx_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            outer, text="Load client context (transcripts, feedback, accepted posts)",
-            variable=batch_ctx_var, bg="white", activebackground="white", font=self.UI_FONT,
-        ).pack(anchor="w", pady=(0, 8))
-
-        btn_row = tk.Frame(dlg, bg="white")
-        btn_row.pack(fill=tk.X, padx=12, pady=(0, 12))
-
-        run_lbl = self._create_clickable_label(
-            btn_row,
-            "✨ Rewrite batch",
-            lambda: self._submit_batch_post_rewrite_from_dialog(
-                count_var, post_entries, instr_t, batch_ctx_var, run_lbl, dlg
-            ),
-        )
-        run_lbl.pack(side=tk.LEFT, padx=(0, 10))
-
-        self._create_clickable_label(btn_row, "Close", dlg.destroy).pack(side=tk.LEFT)
-
-    def _submit_batch_post_rewrite_from_dialog(self, count_var, post_entries, instr_t, batch_ctx_var, run_lbl, dlg):
-        try:
-            n = int(count_var.get())
-        except (tk.TclError, ValueError):
-            n = 1
-        n = max(1, min(n, MAX_BATCH_POSTS))
-        posts = [post_entries[i][1].get("1.0", tk.END).strip() for i in range(n)]
-        image_suggestions = [post_entries[i][2].get().strip() for i in range(n)]
-        themes = [post_entries[i][3].get().strip() for i in range(n)]
-        if not any(posts):
-            messagebox.showerror(
-                "Error",
-                "Paste at least one post in the active slots.",
-                parent=dlg,
-            )
-            return
-        if any(not p for p in posts):
-            messagebox.showerror(
-                "Error",
-                f"All {n} active post slots must contain text (or lower the count).",
-                parent=dlg,
-            )
-            return
-
-        style_instruction = instr_t.get("1.0", tk.END).strip()
-        if "e.g. Remove redundant lines across posts" in style_instruction:
-            style_instruction = ""
-
-        client_context = self._load_client_context() if batch_ctx_var.get() else ""
-
-        run_lbl.config(state="disabled")
-
-        def on_done():
-            run_lbl.config(state="normal")
-
+        # Pass the new variables to the thread
         threading.Thread(
-            target=self._rewrite_batch_pasted_thread,
-            args=(posts, style_instruction, image_suggestions, themes, client_context, on_done),
-            daemon=True,
+            target=self._rewrite_thread, 
+            args=(client_name, company, model_choice, style_instruction, mode, target_index), 
+            daemon=True
         ).start()
 
-    def _rewrite_batch_pasted_thread(self, posts: list, style_instruction: str, image_suggestions: list = None, themes: list = None, client_context: str = "", on_done=None):
+    def _rewrite_thread(self, client_name, company, model_choice, style_instruction, mode, target_index):
+        import re
         try:
-            print(f"\n[CYRENE] Rewriting pasted batch ({len(posts)} posts)...")
-            cyrene = Cyrene()
-            result = cyrene.rewrite_post_batch(
-                posts=posts,
-                style_instruction=style_instruction,
-                image_suggestions=image_suggestions,
-                themes=themes,
-                client_context=client_context,
-            )
-            print("[CYRENE] Batch rewrite complete.")
+            print(f"\n[CYRENE] Starting Rewrite Pipeline for {client_name} (Mode: {mode})...")
             
-            self.root.after(
-                0,
-                lambda r=result: self._show_batch_rewrite_result_popup(r),
-            )
-        except ValueError as e:
-            self.root.after(
-                0,
-                lambda err=str(e): messagebox.showerror(
-                    "Batch rewrite",
-                    err,
-                    parent=self.root,
-                ),
-            )
-        except Exception as e:
-            print(f"Rewrite (batch paste) error: {e}")
-            self.root.after(
-                0,
-                lambda err=str(e): messagebox.showerror(
-                    "Rewrite failed",
-                    err,
-                    parent=self.root,
-                ),
-            )
-        finally:
-            if on_done:
-                self.root.after(0, on_done)
-
-    def _show_batch_rewrite_result_popup(self, result: dict):
-        popup = tk.Toplevel(self.root)
-        popup.title("Rewritten posts (batch)")
-        popup.geometry("820x780")
-        popup.configure(bg="white")
-        popup.transient(self.root)
-
-        notes = result.get("batch_coordinator_notes", "N/A")
-        posts = result.get("posts") or []
-
-        tk.Label(
-            popup,
-            text="Batch coordinator notes",
-            font=self.HEADER_FONT,
-            bg="white",
-        ).pack(anchor="w", padx=12, pady=(12, 4))
-        notes_w = scrolledtext.ScrolledText(
-            popup,
-            height=4,
-            font=("Helvetica", 10),
-            wrap="word",
-            relief="solid",
-            borderwidth=1,
-            bg="#fafafa",
-            fg="#333333",
-        )
-        notes_w.pack(fill=tk.X, padx=12, pady=(0, 8))
-        notes_w.insert(tk.END, notes + "\n")
-        notes_w.configure(state="disabled")
-
-        pick_row = tk.Frame(popup, bg="white")
-        pick_row.pack(fill=tk.X, padx=12, pady=(0, 4))
-        tk.Label(pick_row, text="Post:", bg="white", font=self.UI_FONT).pack(side=tk.LEFT)
-        post_labels = [f"Post {p.get('index', i + 1)}" for i, p in enumerate(posts)]
-        sel_var = tk.StringVar(value=post_labels[0] if post_labels else "")
-        combo = ttk.Combobox(
-            pick_row,
-            textvariable=sel_var,
-            values=post_labels,
-            state="readonly",
-            width=14,
-            font=self.UI_FONT,
-        )
-        if post_labels:
-            combo.pack(side=tk.LEFT, padx=(8, 0))
-
-        tk.Label(
-            popup,
-            text="Rewritten post",
-            font=("Arial", 11, "bold"),
-            bg="white",
-        ).pack(anchor="w", padx=12, pady=(8, 4))
-
-        body = scrolledtext.ScrolledText(
-            popup,
-            height=10,
-            font=("Helvetica", 11),
-            wrap="word",
-            relief="solid",
-            borderwidth=1,
-            bg="#ffffff",
-            fg="#333333",
-        )
-        body.pack(fill="both", expand=True, padx=12, pady=(0, 8))
-
-        def current_post_dict():
-            if not posts:
-                return {}
-            try:
-                idx = post_labels.index(sel_var.get())
-            except ValueError:
-                idx = 0
-            return posts[idx] if idx < len(posts) else posts[0]
-
-        def refresh_body(*_args):
-            body.configure(state="normal")
-            body.delete("1.0", tk.END)
-            pd = current_post_dict()
-            body.insert(tk.END, (pd.get("final_post") or "N/A") + "\n")
-            body.configure(state="disabled")
-
-        if post_labels:
-            combo.bind("<<ComboboxSelected>>", refresh_body)
-        refresh_body()
-
-        btn_row = tk.Frame(popup, bg="white")
-        btn_row.pack(fill="x", padx=12, pady=(0, 8))
-
-        def copy_current():
-            pd = current_post_dict()
-            text = (pd.get("final_post") or "").strip()
-            if text:
-                self.root.clipboard_clear()
-                self.root.clipboard_append(text)
-                self.root.update_idletasks()
-
-        def copy_all_finals():
-            parts = []
-            for p in posts:
-                i = p.get("index", "?")
-                fp = (p.get("final_post") or "").strip()
-                parts.append(f"--- Post {i} ---\n{fp}")
-            blob = "\n\n".join(parts)
-            self.root.clipboard_clear()
-            self.root.clipboard_append(blob)
-            self.root.update_idletasks()
-
-        def show_steps_for_current():
-            pd = current_post_dict()
-            detail = tk.Toplevel(popup)
-            detail.title(f"Cyrene steps — post {pd.get('index', '?')}")
-            detail.geometry("640x480")
-            detail.configure(bg="white")
-            t = scrolledtext.ScrolledText(
-                detail,
-                font=("Helvetica", 10),
-                wrap="word",
-                relief="solid",
-                borderwidth=1,
-            )
-            t.pack(fill="both", expand=True, padx=10, pady=10)
-            t.insert(
-                tk.END,
-                "**Step 1: Fact extraction**\n"
-                + str(pd.get("fact_extraction", "N/A"))
-                + "\n\n**Step 2: Style approach**\n"
-                + str(pd.get("style_analysis", "N/A"))
-                + "\n\n**Step 3: Rewrite strategy**\n"
-                + str(pd.get("strategy", "N/A"))
-                + "\n",
-            )
-            t.configure(state="disabled")
-            self._create_clickable_label(detail, "Close", detail.destroy).pack(pady=(0, 10))
-
-        self._create_clickable_label(btn_row, "Copy this post", copy_current).pack(side=tk.LEFT, padx=(0, 8))
-        self._create_clickable_label(btn_row, "Copy all finals", copy_all_finals).pack(side=tk.LEFT, padx=(0, 8))
-        self._create_clickable_label(btn_row, "Cyrene steps (this post)", show_steps_for_current).pack(side=tk.LEFT, padx=(0, 8))
-        self._create_clickable_label(btn_row, "Close", popup.destroy).pack(side=tk.LEFT)
-
-        separator = ttk.Separator(popup, orient="horizontal")
-        separator.pack(fill="x", padx=12, pady=(8, 8))
-
-        per_post_ordinal = [{"label": "", "approver_idxs": set()} for _ in posts]
-        _batch_ord_nav_prev = [None]
-
-        ordinal_frame = tk.LabelFrame(
-            popup,
-            text="Push current post to Ordinal",
-            bg="white",
-            padx=8,
-            pady=8,
-            font=self.HEADER_FONT,
-        )
-        ordinal_frame.pack(fill="x", padx=12, pady=(0, 12))
-
-        row1 = tk.Frame(ordinal_frame, bg="white")
-        row1.pack(fill="x", pady=(0, 6))
-
-        tk.Label(row1, text="Company:", bg="white", font=self.UI_FONT).pack(side="left")
-        company_var = tk.StringVar(value=self.company_var.get().strip())
-        company_entry = tk.Entry(row1, textvariable=company_var, width=20, font=self.UI_FONT)
-        company_entry.pack(side="left", padx=(4, 12))
-
-        tk.Label(row1, text="Publish date (YYYY-MM-DD HH:MM):", bg="white", font=self.UI_FONT).pack(side="left")
-        default_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d 09:00")
-        date_var = tk.StringVar(value=default_date)
-        date_entry = tk.Entry(row1, textvariable=date_var, width=18, font=self.UI_FONT)
-        date_entry.pack(side="left", padx=(4, 0))
-
-        row2 = tk.Frame(ordinal_frame, bg="white")
-        row2.pack(fill="x", pady=(0, 6))
-
-        tk.Label(row2, text="Label:", bg="white", font=self.UI_FONT).pack(side="left")
-        label_var = tk.StringVar()
-        label_combo = ttk.Combobox(row2, textvariable=label_var, width=20, state="readonly")
-        label_combo.pack(side="left", padx=(4, 4))
-
-        tk.Label(row2, text="Approvers:", bg="white", font=self.UI_FONT).pack(side="left")
-        approver_listbox = tk.Listbox(row2, selectmode=tk.MULTIPLE, height=3, width=26, font=("Arial", 10))
-        approver_listbox.pack(side="left", padx=(4, 0))
-
-        tk.Label(
-            row2,
-            text="(per post — switch Post above)",
-            bg="white",
-            fg="gray",
-            font=("Arial", 9),
-        ).pack(side="left", padx=(4, 0))
-
-        labels_cache = {"data": [], "ids": {}}
-        users_cache = {"data": []}
-
-        def _current_post_index():
-            if not post_labels:
-                return -1
-            try:
-                return post_labels.index(sel_var.get())
-            except ValueError:
-                return 0
-
-        def fetch_ordinal_data():
-            co = company_var.get().strip()
-            if not co:
-                return
-            hyacinthia = Hyacinthia()
-            labels_data = hyacinthia.get_labels(co)
-            users = hyacinthia.get_users(co)
-            labels_cache["data"] = labels_data
-            labels_cache["ids"] = {lbl.get("name"): lbl.get("id") for lbl in labels_data}
-            users_cache["data"] = users
-
-            label_names = [lbl.get("name", "Unknown") for lbl in labels_data]
-            label_combo["values"] = label_names
-            if label_names:
-                for st in per_post_ordinal:
-                    if not st["label"]:
-                        st["label"] = label_names[0]
-
-            approver_listbox.delete(0, tk.END)
-            for u in users:
-                name = f"{u.get('firstName', '')} {u.get('lastName', '')}".strip() or u.get("email", "Unknown")
-                approver_listbox.insert(tk.END, name)
-
-            cur = _current_post_index()
-            if 0 <= cur < len(per_post_ordinal):
-                st = per_post_ordinal[cur]
-                label_var.set(st["label"])
-                approver_listbox.selection_clear(0, tk.END)
-                for i in st["approver_idxs"]:
-                    if 0 <= i < approver_listbox.size():
-                        approver_listbox.selection_set(i)
-
-        fetch_btn = self._create_clickable_label(row2, "Fetch labels/approvers",
-            lambda: threading.Thread(target=fetch_ordinal_data, daemon=True).start(),
-            font=("Arial", 10))
-        fetch_btn.pack(side="left", padx=(8, 0))
-
-        row3 = tk.Frame(ordinal_frame, bg="white")
-        row3.pack(fill="x", pady=(0, 6))
-        tk.Label(row3, text="Post metadata (auto-comment on Ordinal):", bg="white", font=self.UI_FONT).pack(anchor="w")
-        meta_text = scrolledtext.ScrolledText(row3, height=4, font=("Arial", 10), wrap="word", bg="#f9f9f9")
-        meta_text.pack(fill="x")
-
-        def refresh_post_metadata(*_args):
-            pd = current_post_dict()
-            post_theme = pd.get("theme", "")
-            img_sug = pd.get("image_suggestion", "")
-            wp = pd.get("why_post", "")
-            meta_text.configure(state="normal")
-            meta_text.delete("1.0", tk.END)
-            parts = []
-            if wp:
-                parts.append(f"Why post: {wp}")
-            if post_theme:
-                parts.append(f"Theme: {post_theme}")
-            if img_sug:
-                parts.append(f"Image suggestion: {img_sug}")
-            if parts:
-                meta_text.insert(tk.END, "\n".join(parts))
-            else:
-                meta_text.insert(tk.END, "(No theme or image suggestion for this post)")
-            meta_text.configure(state="disabled")
-
-        def _on_batch_post_pick(*_args):
-            new_idx = _current_post_index()
-            if new_idx < 0 or new_idx >= len(per_post_ordinal):
-                return
-            prev = _batch_ord_nav_prev[0]
-            if prev is not None and 0 <= prev < len(per_post_ordinal):
-                per_post_ordinal[prev]["label"] = label_var.get()
-                per_post_ordinal[prev]["approver_idxs"] = set(approver_listbox.curselection())
-            st = per_post_ordinal[new_idx]
-            label_var.set(st["label"])
-            approver_listbox.selection_clear(0, tk.END)
-            for i in st["approver_idxs"]:
-                if 0 <= i < approver_listbox.size():
-                    approver_listbox.selection_set(i)
-            _batch_ord_nav_prev[0] = new_idx
-            refresh_body()
-            refresh_post_metadata()
-
-        if post_labels:
-            combo.bind("<<ComboboxSelected>>", _on_batch_post_pick)
-            _on_batch_post_pick()
-        else:
-            refresh_post_metadata()
-
-        def push_to_ordinal():
-            co = company_var.get().strip()
-            if not co:
-                messagebox.showerror("Error", "Company keyword required.", parent=popup)
-                return
-            try:
-                pub_dt = datetime.strptime(date_var.get().strip(), "%Y-%m-%d %H:%M")
-            except ValueError:
-                messagebox.showerror("Error", "Invalid date format. Use YYYY-MM-DD HH:MM", parent=popup)
+            # 1. Determine base and output file paths
+            if model_choice == "Gemini 3.1 Pro": filename = f"{company}_gemini_posts.md"
+            elif model_choice == "GPT-5": filename = f"{company}_gpt_posts.md"
+            elif model_choice == "Claude Opus 4.6": filename = f"{company}_claude_posts.md"
+            else: filename = f"{company}_posts.md"
+            
+            output_dir = os.path.join(".", "client_data", company, "output")
+            input_filepath = os.path.join(output_dir, filename)
+            output_filepath = os.path.join(output_dir, f"{company}_rewritten_posts.md")
+            
+            if not os.path.exists(input_filepath):
+                print(f"Error: Could not find generated drafts at {input_filepath}. Please run generation first.")
                 return
 
-            pd = current_post_dict()
-            final_post = pd.get("final_post", "").strip()
-            image_suggestion = pd.get("image_suggestion", "").strip()
-            post_theme = pd.get("theme", "").strip()
-            why_post = pd.get("why_post", "").strip()
+            # HELPER FIX: Filter out headers so index 0 is ALWAYS Post 1
+            def extract_blocks(filepath, is_rewritten=False):
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                if is_rewritten:
+                    blocks = re.split(r'(?m)^(?=## POST \d+ REWRITE)', content)
+                    # Only keep blocks that actually start with the Post header
+                    return [b.strip() for b in blocks if re.search(r'^## POST \d+ REWRITE', b.strip())]
+                else:
+                    if "--- FINAL LINKEDIN POST DRAFTS ---" in content:
+                        content = content.split("--- FINAL LINKEDIN POST DRAFTS ---")[-1]
+                    blocks = re.split(r'(?m)^(?=POST \d+ THEME:)', content)
+                    return [b.strip() for b in blocks if re.search(r'^POST \d+ THEME:', b.strip())]
 
-            if not final_post:
-                messagebox.showerror("Error", "No post content to push.", parent=popup)
-                return
+            cyrene = Cyrene()
+            
+            # Fetch the base blocks. Cyrene must ALWAYS read from these clean, raw drafts.
+            base_blocks = extract_blocks(input_filepath, is_rewritten=False)
+            
+            # ---------------------------------------------------------
+            # PATH A: SINGLE POST REWRITE
+            # ---------------------------------------------------------
+            if mode == "single":
+                # Determine what our output array looks like
+                if os.path.exists(output_filepath):
+                    blocks_to_save = extract_blocks(output_filepath, is_rewritten=True)
+                    # Failsafe: if the lengths mismatch somehow, pad it out
+                    while len(blocks_to_save) < len(base_blocks):
+                        blocks_to_save.append(base_blocks[len(blocks_to_save)])
+                else:
+                    blocks_to_save = list(base_blocks)
 
-            pidx = _current_post_index() if post_labels else -1
-            if 0 <= pidx < len(per_post_ordinal):
-                per_post_ordinal[pidx]["label"] = label_var.get()
-                per_post_ordinal[pidx]["approver_idxs"] = set(approver_listbox.curselection())
-
-            st = per_post_ordinal[pidx] if 0 <= pidx < len(per_post_ordinal) else {"label": "", "approver_idxs": set()}
-            selected_label_name = st["label"]
-            label_ids = []
-            if selected_label_name and selected_label_name in labels_cache["ids"]:
-                label_ids = [labels_cache["ids"][selected_label_name]]
-            approvals = []
-            for aidx in sorted(st["approver_idxs"]):
-                if aidx < len(users_cache["data"]):
-                    approvals.append({"userId": users_cache["data"][aidx].get("id")})
-
-            def do_push():
-                hyacinthia = Hyacinthia()
-                res = hyacinthia.push_single_post(
-                    company_keyword=co,
-                    content=final_post,
-                    publish_date=pub_dt,
-                    status="ForReview",
-                    label_ids=label_ids if label_ids else None,
-                    approvals=approvals if approvals else None,
-                )
-                if not res["success"]:
-                    popup.after(0, lambda: messagebox.showerror("Ordinal Error", res["error"], parent=popup))
+                if target_index >= len(base_blocks):
+                    print(f"Error: Post #{target_index + 1} does not exist. Only {len(base_blocks)} found.")
                     return
 
-                post_id = res["post_id"]
-                post_url = res["url"]
+                print(f"  -> Rewriting Post {target_index + 1}...")
+                
+                # IMPORTANT: Feed the clean base draft to the LLM
+                raw_text_to_feed = base_blocks[target_index]
+                
+                # Call the black-boxed function
+                result = cyrene.rewrite_single_post(
+                    post_text=raw_text_to_feed, 
+                    style_instruction=style_instruction
+                )
+                
+                # Format the new block
+                formatted_rewrite = (
+                    f"## POST {target_index + 1} REWRITE\n"
+                    f"**Step 1: Fact Extraction**\n{result.get('fact_extraction', 'N/A')}\n\n"
+                    f"**Step 2: Style Approach**\n{result.get('style_analysis', 'N/A')}\n\n"
+                    f"**Step 3: Rewrite Strategy**\n{result.get('strategy', 'N/A')}\n\n"
+                    f"**FINAL STYLIZED POST**\n{result.get('final_post', 'N/A')}\n"
+                    f"{'*' * 50}"
+                )
+                
+                # Overwrite just this specific index
+                blocks_to_save[target_index] = formatted_rewrite
 
-                comment_parts = []
-                if why_post:
-                    comment_parts.append(f"**Why Post:**\n{why_post}")
-                if post_theme:
-                    comment_parts.append(f"**Theme:** {post_theme}")
-                if image_suggestion:
-                    comment_parts.append(f"**Image Suggestion:**\n{image_suggestion}")
-                if comment_parts:
-                    cmt_res = hyacinthia.create_comment(co, post_id, "\n\n".join(comment_parts))
-                    if not cmt_res["success"]:
-                        print(f"[ORDINAL] Comment creation failed: {cmt_res['error']}")
+                # Save the entire updated array back to the file
+                with open(output_filepath, "w", encoding="utf-8") as out_file:
+                    out_file.write(f"# FINAL REWRITTEN POSTS: {client_name.upper()}\n")
+                    out_file.write(f"Style Intent: {style_instruction or 'Random Stylistic Noise'}\n{'='*60}\n\n")
+                    for block in blocks_to_save:
+                        out_file.write(block + "\n\n")
+            
+            # ---------------------------------------------------------
+            # PATH B: REWRITE ALL POSTS
+            # ---------------------------------------------------------
+            else:
+                with open(output_filepath, "w", encoding="utf-8") as out_file:
+                    out_file.write(f"# FINAL REWRITTEN POSTS: {client_name.upper()}\n")
+                    out_file.write(f"Style Intent: {style_instruction or 'Random Stylistic Noise'}\n{'='*60}\n\n")
+                
+                for idx, raw_text in enumerate(base_blocks):
+                    print(f"     Rewriting post {idx + 1}/{len(base_blocks)}...")
+                    
+                    result = cyrene.rewrite_single_post(
+                        post_text=raw_text, 
+                        style_instruction=style_instruction 
+                    )
+                    
+                    with open(output_filepath, "a", encoding="utf-8") as out_file:
+                        out_file.write(f"## POST {idx + 1} REWRITE\n")
+                        out_file.write(f"**Step 1: Fact Extraction**\n{result.get('fact_extraction', 'N/A')}\n\n")
+                        out_file.write(f"**Step 2: Style Approach**\n{result.get('style_analysis', 'N/A')}\n\n")
+                        out_file.write(f"**Step 3: Rewrite Strategy**\n{result.get('strategy', 'N/A')}\n\n")
+                        out_file.write(f"**FINAL STYLIZED POST**\n{result.get('final_post', 'N/A')}\n")
+                        out_file.write("*" * 50 + "\n\n")
 
-                popup.after(0, lambda: messagebox.showinfo(
-                    "Success",
-                    f"Post pushed to Ordinal!\nID: {post_id}\nURL: {post_url}",
-                    parent=popup,
-                ))
-
-            threading.Thread(target=do_push, daemon=True).start()
-
-        push_btn = self._create_clickable_label(ordinal_frame, "Push current post to Ordinal", push_to_ordinal, fg="#4CAF50")
-        push_btn.pack(anchor="w", pady=(4, 0))
+            print(f"\nRewrite pipeline complete! Saved to {output_filepath}. Loading into viewer...")
+            
+        except Exception as e:
+            print(f"Rewrite Pipeline Error: {e}")
+        finally:
+            self.rewrite_btn.config(state="normal", text="✨ Rewrite Posts")
+            if 'output_filepath' in locals():
+                self.root.after(0, lambda: self._load_specific_file(output_filepath))
+            self.root.after(0, self.refresh_file_tree)
 
     def _load_specific_file(self, filepath):
         self.output_viewer.delete(1.0, tk.END)
@@ -2472,20 +923,27 @@ class AmphoreusExperiment:
         else:
             self.output_viewer.insert(tk.END, "File not found.")
 
-    def load_output_to_viewer(self):
+    def load_output_to_viewer(self, model_choice=None):
+        if not model_choice:
+            model_choice = self.model_var.get()
+            
         company = self.company_var.get().strip()
         action = self.action_var.get()
-        if not company:
+        if not company: 
             return
-
+            
         if action == "brief":
-            filename = f"{company}_briefing.md"
-            out_dir = P.brief_dir(company)
+            if model_choice == "Gemini 3.1 Pro": filename = f"{company}_gemini_briefing.md"
+            elif model_choice == "GPT-5": filename = f"{company}_gpt_briefing.md"
+            elif model_choice == "Claude Opus 4.6": filename = f"{company}_claude_briefing.md"
+            else: filename = f"{company}_briefing.md"
         else:
-            filename = f"{company}_posts.md"
-            out_dir = P.post_dir(company)
-
-        filepath = str(out_dir / filename)
+            if model_choice == "Gemini 3.1 Pro": filename = f"{company}_gemini_posts.md"
+            elif model_choice == "GPT-5": filename = f"{company}_gpt_posts.md"
+            elif model_choice == "Claude Opus 4.6": filename = f"{company}_claude_posts.md"
+            else: filename = f"{company}_posts.md"
+            
+        filepath = os.path.join("./client_data", company, "output", filename)
         self.output_viewer.delete(1.0, tk.END)
         
         if os.path.exists(filepath):
@@ -2544,337 +1002,166 @@ class AmphoreusExperiment:
         self.doc_search_var.set("")
         self.output_viewer.tag_remove("search_highlight", "1.0", tk.END)
     
-    # =============================================================================
-    # DEPRECATED: Text Gradient / Prompt Graph Tuning Methods
-    # These features have been removed. Methods kept as stubs for backwards compat.
-    # =============================================================================
-    def open_gradient_dialog(self):
-        """DEPRECATED: Prompt graph tuning has been removed."""
-        messagebox.showinfo("Deprecated", "Prompt graph tuning has been removed from this version.")
-
-    def open_paste_feedback_dialog(self):
-        """DEPRECATED: Prompt graph tuning has been removed."""
-        messagebox.showinfo("Deprecated", "Prompt graph tuning has been removed from this version.")
-
-    def rollback_gradient_step(self):
-        """DEPRECATED: Prompt graph tuning has been removed."""
-        messagebox.showinfo("Deprecated", "Prompt graph tuning has been removed from this version.")
-
-    def push_to_ordinal(self):
-        """
-        Parse generated posts from the selected model's output file and open a
-        per-post push dialog with labels, approvers, date, and auto-comment
-        for theme + image suggestion.
-        """
+    # --- TEXT GRADIENT METHODS ---
+    def run_text_gradient(self):
+        """Runs the TextGradient pipeline on accumulated client feedback."""
         company = self.company_var.get().strip()
-
         if not company:
             messagebox.showerror("Error", "Please enter a Company Keyword first.")
             return
 
-        filename = f"{company}_posts.md"
-        filepath = os.path.join(str(P.post_dir(company)), filename)
-        if not os.path.exists(filepath):
-            messagebox.showerror("Error", f"Could not find generated posts.\nLooked for: {filepath}")
+        # Check if feedback files exist
+        feedback_dir = os.path.join("client_data", company, "feedback")
+        if not os.path.exists(feedback_dir) or not os.listdir(feedback_dir):
+            messagebox.showwarning(
+                "No Feedback",
+                f"No feedback files found in {feedback_dir}.\n\n"
+                "Use 'Fetch Comments from Ordinal' first, or manually add feedback files."
+            )
             return
-                
-        parsed = self._parse_posts_from_output_file(filepath)
-        if not parsed:
-            messagebox.showwarning("Warning", f"No posts found in {filename}")
-            return
 
-        # Per-post Ordinal options (label name + approver listbox indices)
-        per_post_ordinal = [{"label": "", "approver_idxs": set()} for _ in range(len(parsed))]
-        _ordinal_nav_prev_idx = [None]
+        self.gradient_btn.config(state="disabled", text="Tuning...")
+        self.console.delete(1.0, tk.END)
+        threading.Thread(target=self._gradient_thread, args=(company,), daemon=True).start()
 
-        # ---- build dialog ----
-        dlg = tk.Toplevel(self.root)
-        dlg.title(f"Push to Ordinal — {filename} ({len(parsed)} posts)")
-        dlg.geometry("980x720")
-        dlg.configure(bg="white")
-        dlg.minsize(800, 550)
-        dlg.transient(self.root)
+    def _gradient_thread(self, company):
+        try:
+            from text_gradient import TextGradient
+            gradient = TextGradient()
 
-        outer = tk.Frame(dlg, bg="white")
-        outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
+            # Load feedback pairs from Evernight's saved feedback files
+            pairs = TextGradient.load_feedback_from_files(company)
 
-        # -- post navigator --
-        nav = tk.Frame(outer, bg="white")
-        nav.pack(fill=tk.X, pady=(0, 6))
-
-        post_labels = [f"Post {i+1}: {p.get('theme','')[:60]}" for i, p in enumerate(parsed)]
-        nav_var = tk.StringVar(value=post_labels[0])
-        nav_combo = ttk.Combobox(nav, textvariable=nav_var, values=post_labels,
-                                  state="readonly", width=70, font=self.UI_FONT)
-        nav_combo.pack(side=tk.LEFT)
-
-        def _prev():
-            idx = nav_combo.current()
-            if idx > 0:
-                nav_combo.current(idx - 1)
-                _on_nav_change()
-
-        def _next():
-            idx = nav_combo.current()
-            if idx < len(parsed) - 1:
-                nav_combo.current(idx + 1)
-                _on_nav_change()
-
-        self._create_clickable_label(nav, "◀", _prev).pack(side=tk.LEFT, padx=(8, 2))
-        self._create_clickable_label(nav, "▶", _next).pack(side=tk.LEFT)
-
-        # -- post preview --
-        preview = scrolledtext.ScrolledText(outer, height=12, font=("Arial", 10), wrap=tk.WORD,
-                                            relief="solid", borderwidth=1, state="normal")
-        preview.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
-
-        # -- Ordinal settings --
-        settings = tk.LabelFrame(outer, text="Ordinal Settings", bg="white", padx=8, pady=8,
-                                  font=self.HEADER_FONT)
-        settings.pack(fill=tk.X, pady=(0, 6))
-
-        row1 = tk.Frame(settings, bg="white")
-        row1.pack(fill=tk.X, pady=(0, 6))
-
-        tk.Label(row1, text="Company:", bg="white", font=self.UI_FONT).pack(side=tk.LEFT)
-        co_var = tk.StringVar(value=company)
-        tk.Entry(row1, textvariable=co_var, width=18, font=self.UI_FONT).pack(side=tk.LEFT, padx=(4, 12))
-
-        tk.Label(row1, text="Publish date:", bg="white", font=self.UI_FONT).pack(side=tk.LEFT)
-        default_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d 09:00")
-        date_var = tk.StringVar(value=default_date)
-        tk.Entry(row1, textvariable=date_var, width=18, font=self.UI_FONT).pack(side=tk.LEFT, padx=(4, 12))
-
-        tk.Label(row1, text="Freq:", bg="white", font=self.UI_FONT).pack(side=tk.LEFT)
-        freq_var = tk.IntVar(value=12)
-        tk.Radiobutton(row1, text="12/mo", variable=freq_var, value=12, bg="white",
-                        font=("Arial", 9)).pack(side=tk.LEFT)
-        tk.Radiobutton(row1, text="8/mo", variable=freq_var, value=8, bg="white",
-                        font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 8))
-
-        row2 = tk.Frame(settings, bg="white")
-        row2.pack(fill=tk.X, pady=(0, 6))
-
-        tk.Label(row2, text="Label:", bg="white", font=self.UI_FONT).pack(side=tk.LEFT)
-        label_var = tk.StringVar()
-        label_combo = ttk.Combobox(row2, textvariable=label_var, width=22, state="readonly")
-        label_combo.pack(side=tk.LEFT, padx=(4, 4))
-
-        tk.Label(row2, text="Approvers:", bg="white", font=self.UI_FONT).pack(side=tk.LEFT)
-        approver_listbox = tk.Listbox(row2, selectmode=tk.MULTIPLE, height=3, width=28,
-                                       font=("Arial", 10))
-        approver_listbox.pack(side=tk.LEFT, padx=(4, 0))
-
-        tk.Label(
-            row2,
-            text="(each post — pick post above, set label/approvers, then next)",
-            bg="white",
-            fg="gray",
-            font=("Arial", 9),
-        ).pack(side=tk.LEFT, padx=(6, 0))
-
-        labels_cache = {"data": [], "ids": {}}
-        users_cache = {"data": []}
-
-        def fetch_ordinal_data():
-            co = co_var.get().strip()
-            if not co:
-                return
-            hyacinthia = Hyacinthia()
-            labels_data = hyacinthia.get_labels(co)
-            users = hyacinthia.get_users(co)
-            labels_cache["data"] = labels_data
-            labels_cache["ids"] = {lbl.get("name"): lbl.get("id") for lbl in labels_data}
-            users_cache["data"] = users
-
-            label_names = [lbl.get("name", "Unknown") for lbl in labels_data]
-            label_combo["values"] = label_names
-            if label_names:
-                for st in per_post_ordinal:
-                    if not st["label"]:
-                        st["label"] = label_names[0]
-
-            approver_listbox.delete(0, tk.END)
-            for u in users:
-                name = f"{u.get('firstName', '')} {u.get('lastName', '')}".strip() or u.get("email", "Unknown")
-                approver_listbox.insert(tk.END, name)
-
-            cur = nav_combo.current()
-            if cur >= 0 and cur < len(per_post_ordinal):
-                st = per_post_ordinal[cur]
-                label_var.set(st["label"])
-                approver_listbox.selection_clear(0, tk.END)
-                for i in st["approver_idxs"]:
-                    if 0 <= i < approver_listbox.size():
-                        approver_listbox.selection_set(i)
-
-        self._create_clickable_label(row2, "Fetch labels/approvers",
-                  lambda: threading.Thread(target=fetch_ordinal_data, daemon=True).start(),
-                  font=("Arial", 10)).pack(side=tk.LEFT, padx=(8, 0))
-
-        # -- theme / image suggestion meta --
-        meta_frame = tk.Frame(settings, bg="white")
-        meta_frame.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(meta_frame, text="Why post, theme & image suggestion (auto-comment):", bg="white",
-                 font=self.UI_FONT).pack(anchor="w")
-        meta_text = scrolledtext.ScrolledText(meta_frame, height=3, font=("Arial", 10),
-                                               wrap="word", bg="#f9f9f9")
-        meta_text.pack(fill=tk.X)
-
-        # -- refresh preview, metadata, and per-post label/approver widgets when nav changes --
-        def _on_nav_change(*_):
-            new_idx = nav_combo.current()
-            if new_idx < 0 or new_idx >= len(parsed):
-                return
-            prev = _ordinal_nav_prev_idx[0]
-            if prev is not None and 0 <= prev < len(per_post_ordinal):
-                per_post_ordinal[prev]["label"] = label_var.get()
-                per_post_ordinal[prev]["approver_idxs"] = set(approver_listbox.curselection())
-            st = per_post_ordinal[new_idx]
-            label_var.set(st["label"])
-            approver_listbox.selection_clear(0, tk.END)
-            for i in st["approver_idxs"]:
-                if 0 <= i < approver_listbox.size():
-                    approver_listbox.selection_set(i)
-            _ordinal_nav_prev_idx[0] = new_idx
-
-            p = parsed[new_idx]
-            preview.configure(state="normal")
-            preview.delete("1.0", tk.END)
-            preview.insert("1.0", p.get("post", ""))
-            preview.configure(state="disabled")
-
-            meta_text.configure(state="normal")
-            meta_text.delete("1.0", tk.END)
-            parts = []
-            if p.get("why_post"):
-                parts.append(f"Why post: {p['why_post']}")
-            if p.get("theme"):
-                parts.append(f"Theme: {p['theme']}")
-            if p.get("image_suggestion"):
-                parts.append(f"Image suggestion: {p['image_suggestion']}")
-            meta_text.insert(tk.END, "\n".join(parts) if parts else "(none)")
-            meta_text.configure(state="disabled")
-
-        nav_combo.bind("<<ComboboxSelected>>", _on_nav_change)
-        _on_nav_change()
-
-        # -- push checkboxes (select which posts to push) --
-        sel_frame = tk.Frame(outer, bg="white")
-        sel_frame.pack(fill=tk.X, pady=(0, 6))
-        tk.Label(sel_frame, text="Select posts to push:", bg="white", font=self.UI_FONT).pack(side=tk.LEFT)
-
-        post_checks: list[tk.BooleanVar] = []
-        checks_inner = tk.Frame(sel_frame, bg="white")
-        checks_inner.pack(side=tk.LEFT, padx=(8, 0))
-        for i in range(len(parsed)):
-            v = tk.BooleanVar(value=True)
-            post_checks.append(v)
-            tk.Checkbutton(checks_inner, text=str(i + 1), variable=v, bg="white",
-                           font=("Arial", 9)).pack(side=tk.LEFT)
-
-        def _sel_all():
-            for v in post_checks:
-                v.set(True)
-
-        def _sel_none():
-            for v in post_checks:
-                v.set(False)
-
-        self._create_clickable_label(sel_frame, "All", _sel_all, font=("Arial", 9)).pack(side=tk.LEFT, padx=(12, 2))
-        self._create_clickable_label(sel_frame, "None", _sel_none, font=("Arial", 9)).pack(side=tk.LEFT)
-
-        # -- action buttons --
-        btn_frame = tk.Frame(outer, bg="white")
-        btn_frame.pack(fill=tk.X, pady=(4, 0))
-
-        status_lbl = tk.Label(btn_frame, text="", bg="white", fg="gray", font=("Arial", 10))
-        status_lbl.pack(side=tk.LEFT, padx=(0, 12))
-
-        def _do_push():
-            co = co_var.get().strip()
-            if not co:
-                messagebox.showerror("Error", "Company keyword required.", parent=dlg)
-                return
-            try:
-                start_dt = datetime.strptime(date_var.get().strip(), "%Y-%m-%d %H:%M")
-            except ValueError:
-                messagebox.showerror("Error", "Invalid date. Use YYYY-MM-DD HH:MM", parent=dlg)
+            if not pairs:
+                print("[TextGradient] No valid (draft, feedback) pairs found in feedback files.")
+                print("Tip: Fetch comments from Ordinal first, or ensure feedback files contain both original post and comments.")
                 return
 
-            selected = [i for i, v in enumerate(post_checks) if v.get()]
-            if not selected:
-                messagebox.showwarning("Nothing selected", "Select at least one post.", parent=dlg)
-                return
+            print(f"[TextGradient] Loaded {len(pairs)} feedback pair(s). Running gradient step...\n")
 
-            cur_nav = nav_combo.current()
-            if 0 <= cur_nav < len(per_post_ordinal):
-                per_post_ordinal[cur_nav]["label"] = label_var.get()
-                per_post_ordinal[cur_nav]["approver_idxs"] = set(approver_listbox.curselection())
+            result = gradient.run_gradient_step(
+                company_keyword=company,
+                feedback_pairs=pairs,
+            )
 
-            posts_per_month = freq_var.get()
-            hyacinthia = Hyacinthia()
-            dates = hyacinthia._compute_publish_dates(start_dt, len(selected), posts_per_month)
+            # Display results
+            committed = [n for n, s in result.get("commit_status", {}).items() if s == "committed"]
+            rejected = [n for n, s in result.get("commit_status", {}).items() if s == "rejected"]
 
-            def thread_push():
-                ok_count = 0
-                for seq, post_idx in enumerate(selected):
-                    p = parsed[post_idx]
-                    post_content = p.get("post", "")
-                    theme = p.get("theme", "")
-                    img_sug = p.get("image_suggestion", "")
-                    why_post = p.get("why_post", "")
-
-                    pub_dt = dates[seq] if seq < len(dates) else dates[-1]
-                    status_lbl.config(text=f"Pushing post {post_idx + 1}...")
-
-                    st = per_post_ordinal[post_idx]
-                    selected_label_name = st["label"]
-                    label_ids = []
-                    if selected_label_name and selected_label_name in labels_cache["ids"]:
-                        label_ids = [labels_cache["ids"][selected_label_name]]
-                    approvals = []
-                    for aidx in sorted(st["approver_idxs"]):
-                        if aidx < len(users_cache["data"]):
-                            approvals.append({"userId": users_cache["data"][aidx].get("id")})
-
-                    res = hyacinthia.push_single_post(
-                        company_keyword=co,
-                        content=post_content,
-                        publish_date=pub_dt,
-                        status="ForReview",
-                        label_ids=label_ids if label_ids else None,
-                        approvals=approvals if approvals else None,
-                    )
-                    if not res["success"]:
-                        print(f"[ORDINAL] Post {post_idx + 1} failed: {res['error']}")
-                        continue
-
-                    post_id = res["post_id"]
-                    ok_count += 1
-
-                    comment_parts = []
-                    if why_post:
-                        comment_parts.append(f"**Why Post:**\n{why_post}")
-                    if theme:
-                        comment_parts.append(f"**Theme:** {theme}")
-                    if img_sug:
-                        comment_parts.append(f"**Image Suggestion:**\n{img_sug}")
-                    if comment_parts:
-                        hyacinthia.create_comment(co, post_id, "\n\n".join(comment_parts))
-
-                schedule_desc = "Mon/Wed/Thu" if posts_per_month == 12 else "Tue/Thu"
-                dlg.after(0, lambda: status_lbl.config(text=f"Done — {ok_count}/{len(selected)} pushed."))
-                dlg.after(0, lambda: messagebox.showinfo(
-                    "Ordinal Push Complete",
-                    f"Pushed {ok_count} of {len(selected)} posts.\nSchedule: {schedule_desc}",
-                    parent=dlg,
+            if committed:
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Gradient Step Complete",
+                    f"Updated {len(committed)} node template(s):\n" +
+                    "\n".join(f"  - {n}" for n in committed) +
+                    f"\n\nRejected: {len(rejected)}" +
+                    "\n\nBackups saved to gradient_logs/. Use 'Rollback' to undo."
+                ))
+            else:
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Gradient Step Complete",
+                    "No template changes were accepted by the evaluator.\n"
+                    "The current templates may already address the feedback."
                 ))
 
-            threading.Thread(target=thread_push, daemon=True).start()
+        except Exception as e:
+            print(f"\n[TextGradient ERROR] {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.gradient_btn.config(state="normal", text="\U0001f9ec Tune Graph from Feedback")
+            self.root.after(0, self.refresh_file_tree)
 
-        self._create_clickable_label(btn_frame, "Push Selected Posts", _do_push, fg="#4CAF50").pack(side=tk.RIGHT)
-        self._create_clickable_label(btn_frame, "Close", dlg.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+    def rollback_gradient_step(self):
+        """Rolls back the most recent gradient step for the current client."""
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showerror("Error", "Please enter a Company Keyword first.")
+            return
+
+        log_dir = os.path.join("gradient_logs", company)
+        if not os.path.exists(log_dir):
+            messagebox.showinfo("No History", f"No gradient history found for '{company}'.")
+            return
+
+        # Find the most recent timestamp directory
+        timestamps = sorted(os.listdir(log_dir), reverse=True)
+        if not timestamps:
+            messagebox.showinfo("No History", f"No gradient steps found for '{company}'.")
+            return
+
+        latest = timestamps[0]
+        confirm = messagebox.askyesno(
+            "Confirm Rollback",
+            f"Roll back gradient step from {latest} for '{company}'?\n\n"
+            "This will restore the previous node templates."
+        )
+
+        if confirm:
+            from text_gradient import TextGradient
+            gradient = TextGradient()
+            success = gradient.rollback(company, latest)
+            if success:
+                messagebox.showinfo("Rollback Complete", f"Restored templates from before {latest}.")
+            else:
+                messagebox.showerror("Rollback Failed", "Could not find backup files.")
+
+    def push_to_ordinal(self):
+        """
+        Reads the generated text file based on the selected model and pushes it to Ordinal.
+        """
+        company = self.company_var.get().strip()
+        model_choice = self.model_var.get()
+        
+        if not company:
+            messagebox.showerror("Error", "Please enter a Company Keyword first.")
+            return
+            
+        # Determine the correct file name based on Amphoreus's model_var options
+        output_dir = os.path.join("./client_data", company, "output")
+        filename = ""
+        
+        if "Gemini" in model_choice:
+            filename = f"{company}_gemini_posts.md"
+        elif "GPT" in model_choice:
+            filename = f"{company}_gpt_posts.md"
+        elif "Claude" in model_choice:
+            filename = f"{company}_claude_posts.md"
+        elif "All" in model_choice:
+            filename = f"{company}_posts.md"
+            
+        filepath = os.path.join(output_dir, filename)
+        
+        # Fallback for naming variations
+        if not os.path.exists(filepath):
+            filepath = os.path.join(output_dir, f"{company}_posts.md")
+            if not os.path.exists(filepath):
+                messagebox.showerror("Error", f"Could not find generated posts for {model_choice}.\nLooked for: {filepath}")
+                return
+                
+        try:
+            # Read the selected model's drafts
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+                
+            # Initialize Client and Push
+            from evernight import Evernight
+            evernight = Evernight()
+            success, result_or_url = evernight.push_drafts(
+                company_keyword=company, 
+                model_name=model_choice, 
+                content=content
+            )
+            
+            if success:
+                messagebox.showinfo(
+                    "Ordinal Integration", 
+                    f"Successfully pushed {model_choice} drafts!\n\nView and manage them at:\n{result_or_url}"
+                )
+            else:
+                messagebox.showerror("Ordinal Integration Failed", f"API Error:\n{result_or_url}")
+                
+        except Exception as e:
+            messagebox.showerror("System Error", f"An error occurred while pushing to Ordinal: {str(e)}")
 
     def fetch_comments_from_ordinal(self):
         """
@@ -2899,8 +1186,9 @@ class AmphoreusExperiment:
         publish_date_min = f"{date_str}T00:00:00.000Z"
         
         try:
-            hyacinthia = Hyacinthia()
-            comments_data = hyacinthia.get_recent_comments(company_keyword=company, publish_date_min=publish_date_min)
+            from evernight import Evernight
+            evernight = Evernight()
+            comments_data = evernight.get_recent_comments(company_keyword=company, publish_date_min=publish_date_min)
             
             standard_comments = comments_data.get("standard_comments", [])
             inline_comments = comments_data.get("inline_comments", [])
@@ -2909,7 +1197,7 @@ class AmphoreusExperiment:
                 messagebox.showinfo("Fetch Comments", "No comments found for the given criteria.")
                 return
 
-            tmp_dir = str(P.tmp_dir(company))
+            tmp_dir = os.path.join("./client_data", company, "tmp")
             os.makedirs(tmp_dir, exist_ok=True)
             
             json_file = os.path.join(tmp_dir, "fetched_comments.json")
@@ -2954,15 +1242,8 @@ class AmphoreusExperiment:
             messagebox.showerror("System Error", f"An error occurred while fetching comments: {str(e)}")
 
 if __name__ == "__main__":
-    import traceback
-    P.MEMORY_ROOT.mkdir(parents=True, exist_ok=True)
-    P.PRODUCTS_ROOT.mkdir(parents=True, exist_ok=True)
-    os.makedirs(os.path.join(os.path.dirname(__file__), "backend", "static", "images"), exist_ok=True)
-    try:
-        root = tk.Tk()
-        print("[Amphoreus] Tk root created")
-        app = AmphoreusExperiment(root)
-        print("[Amphoreus] App initialized — launching GUI")
-        root.mainloop()
-    except Exception:
-        traceback.print_exc()
+    os.makedirs("./client_data", exist_ok=True)
+    os.makedirs("./static/images", exist_ok=True)
+    root = tk.Tk()
+    app = AmphoreusExperiment(root)
+    root.mainloop()

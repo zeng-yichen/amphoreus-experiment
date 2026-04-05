@@ -1,13 +1,15 @@
 """Images API — generate, stream, list, and serve assembled images."""
 
+import json
 import logging
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from backend.src.core.events import done_event, status_event
+from backend.src.db import vortex as P
 from backend.src.services import job_manager
 
 logger = logging.getLogger(__name__)
@@ -18,29 +20,91 @@ class GenerateImageRequest(BaseModel):
     company: str
     post_text: str
     model: str = "claude-opus-4-6"
+    feedback: str = Field(
+        default="",
+        description="Human revision notes for Phainon (bitter-lesson iteration).",
+    )
+    reference_image_id: str = Field(
+        default="",
+        description="Stem of a prior PNG in products/{company}/images (e.g. image_20260101_120000).",
+    )
+    local_post_id: str = Field(
+        default="",
+        description="Optional local_posts.id for feedback log correlation.",
+    )
+
+
+def _append_image_feedback_log(company: str, entry: dict) -> None:
+    path = P.image_feedback_log_path(company)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {**entry, "ts": time.time()}
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 @router.post("/generate")
 async def generate_image(req: GenerateImageRequest):
-    """Start an image assembly job."""
+    """Start an image assembly job (initial or revision with feedback + optional reference image)."""
+    prompt_bits = req.post_text[:200]
+    if req.feedback.strip():
+        prompt_bits += " | feedback"
+
     job_id = job_manager.create_job(
         client_slug=req.company,
         agent="phainon",
-        prompt=req.post_text[:200],
+        prompt=prompt_bits,
         creator_id=None,
     )
 
-    def _run(jid: str, company: str, post_text: str, model: str):
+    ref_path = ""
+    if (req.reference_image_id or "").strip():
+        stem = req.reference_image_id.strip()
+        p = P.images_dir(req.company) / f"{stem}.png"
+        if p.is_file():
+            ref_path = str(p)
+
+    if req.feedback.strip() or ref_path:
+        _append_image_feedback_log(
+            req.company,
+            {
+                "job_id": job_id,
+                "local_post_id": (req.local_post_id or "").strip() or None,
+                "feedback": req.feedback.strip(),
+                "reference_image_id": (req.reference_image_id or "").strip() or None,
+                "post_text_excerpt": req.post_text[:500],
+            },
+        )
+
+    def _run(
+        jid: str,
+        company: str,
+        post_text: str,
+        model: str,
+        feedback: str,
+        reference_path: str,
+    ):
         from backend.src.agents.phainon_adapter import run_phainon
-        job_manager.emit_event(jid, status_event(f"Starting image assembly for {company}..."))
-        result_path = run_phainon(company, post_text, model, job_id=jid)
-        job_manager.emit_event(jid, done_event(result_path or ""))
-        return result_path
+
+        return run_phainon(
+            company,
+            post_text,
+            model,
+            job_id=jid,
+            feedback_instruction=feedback,
+            reference_image_path=reference_path or None,
+        )
 
     job_manager.run_in_background(
         job_id,
         target=_run,
-        args=(job_id, req.company, req.post_text, req.model),
+        args=(
+            job_id,
+            req.company,
+            req.post_text,
+            req.model,
+            req.feedback or "",
+            ref_path,
+        ),
     )
 
     return {"job_id": job_id, "status": "pending"}

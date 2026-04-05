@@ -1,5 +1,5 @@
 """
-screwllum.py — Content Strategy Agent
+herta.py — Content Strategy Agent
 ======================================
 Wraps Claude Opus (claude-opus-4-6) with three self-research tools:
 
@@ -15,12 +15,12 @@ the company keyword.
 Two modes of use
 ----------------
 1. Programmatic (called by amphoreus.py):
-       from screwllum import run_programmatic
+       from herta import run_programmatic
        run_programmatic("hensley-biostats", output_callback=fn)
 
 2. CLI (standalone):
-       python screwllum.py
-       python screwllum.py --client hensley-biostats
+       python herta.py
+       python herta.py --client hensley-biostats
 
 Requirements
 ------------
@@ -733,7 +733,7 @@ Timeline sections — one per period
       Short-Term  : emerald  #0d6e4f  /  tint #f0faf5
       Medium-Term : navy     #1a5a8a  /  tint #f0f6fc
       Long-Term   : violet   #5c2d91  /  tint #f8f4ff
-  • Section header: period label + month range in the accent colour, 18px bold
+  • Section header: period label only ("Short-Term", "Medium-Term", "Long-Term") in the accent colour, 18px bold — do NOT include month ranges (e.g. "Month 1" or "Months 2–3") in the header
   • Bullets: concise, max 12 words each; use a custom CSS bullet in the accent colour
   • Content split bar — three labelled segments side by side using flexbox:
       Each segment is a coloured rectangle (height 28px) whose flex-basis equals its percentage,
@@ -978,8 +978,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             Examples:
-              python screwllum.py
-              python screwllum.py --client hensley-biostats
+              python herta.py
+              python herta.py --client hensley-biostats
         """),
     )
     parser.add_argument("--client",  default="", help="Client folder / company keyword.")

@@ -1,7 +1,7 @@
 """Tracing stubs — no-op replacements for Langfuse.
 
 The @traced decorator and trace_llm_call are retained as no-ops so that
-adapter modules (stelle_adapter, screwllum_adapter, aglaea_adapter) need
+adapter modules (stelle_adapter, herta_adapter, aglaea_adapter) need
 zero changes.
 """
 

@@ -1,10 +1,23 @@
 import os
 import csv
-import requests
 import json
 import re
+import time
+import difflib
+import requests
 from backend.src.db import vortex as P
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+_MAX_ORDINAL_COMMENT_LEN = 10000
+_WHY_POST_COMMENT_PREFIX = "Why we're posting this (internal):\n"
+
+_LINKEDIN_MENTION_RE = re.compile(r"@\[([^\]]+)\]\(urn:li:\w+:\d+\)")
+
+
+def _strip_linkedin_mentions(text: str) -> str:
+    """Replace @[Name](urn:li:...) mention markup with plain-text Name."""
+    return _LINKEDIN_MENTION_RE.sub(r"\1", text)
+
 
 class Hyacinthia:
     """
@@ -16,6 +29,131 @@ class Hyacinthia:
         self.fallback_api_key = api_key or os.environ.get("ORDINAL_API_KEY")
         self.base_url = "https://app.tryordinal.com/api/v1"
         self.auth_csv_path = str(P.ordinal_auth_csv())
+
+    def _update_story_inventory(
+        self, company: str, post_id: str, post_text: str, publish_date: str
+    ) -> None:
+        """Append a USED record to story_inventory.md after confirmed Ordinal push.
+
+        Only Hyacinthia writes USED records — Stelle never marks stories as used.
+        This prevents rejected posts from permanently blocking stories.
+        """
+        inv_path = P.story_inventory_path(company)
+        try:
+            inv_path.parent.mkdir(parents=True, exist_ok=True)
+            excerpt = post_text[:100].replace("\n", " ")
+            line = f'\n- [USED — published {publish_date}] Ordinal ID: {post_id} | "{excerpt}..."\n'
+            with open(inv_path, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception as e:
+            print(f"[Hyacinthia] Failed to update story inventory: {e}")
+
+    def _save_draft_map_entry(
+        self, company_keyword: str, post_id: str, content: str, title: str,
+        generation_metadata: dict | None = None,
+    ) -> None:
+        """Persist a post_id → original_text + generation quality metadata to draft_map.json."""
+        path = P.draft_map_path(company_keyword)
+        try:
+            draft_map = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except Exception:
+            draft_map = {}
+        entry = {
+            "original_text": content,
+            "title": title,
+            "company": company_keyword,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        # Attach generation-time quality metadata for ordinal_sync to pick up
+        if generation_metadata:
+            for k in ("cyrene_composite", "cyrene_dimensions", "cyrene_dimension_set",
+                       "cyrene_iterations", "cyrene_weights_tier",
+                       "constitutional_results", "alignment_score"):
+                if k in generation_metadata:
+                    entry[k] = generation_metadata[k]
+        draft_map[post_id] = entry
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(draft_map, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def remove_draft_map_entry(self, company_keyword: str, ordinal_post_id: str) -> None:
+        """Drop a stale Ordinal post id from draft_map.json (e.g. local draft was re-pushed)."""
+        oid = (ordinal_post_id or "").strip()
+        if not oid:
+            return
+        path = P.draft_map_path(company_keyword)
+        try:
+            draft_map = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except Exception:
+            draft_map = {}
+        if oid not in draft_map:
+            return
+        del draft_map[oid]
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(draft_map, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            print(f"[ORDINAL CLIENT] Failed to update draft_map.json: {e}")
+
+    def upload_asset_from_public_url(
+        self,
+        company_keyword: str,
+        file_url: str,
+        poll_interval: float = 2.0,
+        max_wait_seconds: float = 120.0,
+    ) -> str | None:
+        """Ordinal downloads from URL; poll until assetId is ready. Returns asset UUID or None."""
+        api_key = self._get_api_key_for_client(company_keyword)
+        if not api_key:
+            print(f"[ORDINAL CLIENT] No API key for upload_asset_from_public_url ({company_keyword})")
+            return None
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            r = requests.post(
+                f"{self.base_url}/uploads",
+                headers=headers,
+                json={"url": file_url},
+                timeout=60,
+            )
+            r.raise_for_status()
+            job = r.json()
+            job_id = job.get("id")
+            if not job_id:
+                print(f"[ORDINAL CLIENT] Upload response missing id: {job}")
+                return None
+        except requests.exceptions.RequestException as e:
+            print(f"[ORDINAL CLIENT] Upload POST failed: {e}")
+            return None
+
+        deadline = time.monotonic() + max_wait_seconds
+        while time.monotonic() < deadline:
+            try:
+                sr = requests.get(
+                    f"{self.base_url}/uploads/{job_id}",
+                    headers=headers,
+                    timeout=30,
+                )
+                sr.raise_for_status()
+                st = sr.json()
+                status = (st.get("status") or "").lower()
+                if status == "ready":
+                    aid = st.get("assetId")
+                    if aid:
+                        return str(aid)
+                    print(f"[ORDINAL CLIENT] Upload ready but no assetId: {st}")
+                    return None
+                if status in ("failed", "expired"):
+                    print(f"[ORDINAL CLIENT] Upload {status}: {st.get('error', st)}")
+                    return None
+            except requests.exceptions.RequestException as e:
+                print(f"[ORDINAL CLIENT] Upload poll failed: {e}")
+                return None
+            time.sleep(poll_interval)
+
+        print(f"[ORDINAL CLIENT] Upload timed out waiting for asset (job {job_id})")
+        return None
 
     def _get_api_key_for_client(self, company_keyword: str) -> str:
         """Reads the CSV file to find the specific API key for the company."""
@@ -38,6 +176,27 @@ class Hyacinthia:
             print(f"[ORDINAL CLIENT WARNING] Failed to read auth CSV: {e}")
             
         return self.fallback_api_key
+
+    def _post_castorice_thread_comments(
+        self, company_keyword: str, post_id: str, cr: dict | None
+    ) -> None:
+        """Post Castorice citation comments and optional why-post blurb as Ordinal thread comments."""
+        if not post_id or not isinstance(cr, dict):
+            return
+        for cite_comment in cr.get("citation_comments") or []:
+            if not cite_comment:
+                continue
+            c_res = self.create_comment(company_keyword, post_id, str(cite_comment))
+            if not c_res.get("success"):
+                print(f"[ORDINAL CLIENT WARNING] Citation comment failed: {c_res.get('error')}")
+        why = (cr.get("why_post") or "").strip()
+        if why:
+            msg = _WHY_POST_COMMENT_PREFIX + why
+            if len(msg) > _MAX_ORDINAL_COMMENT_LEN:
+                msg = msg[: _MAX_ORDINAL_COMMENT_LEN - 3] + "..."
+            w_res = self.create_comment(company_keyword, post_id, msg)
+            if not w_res.get("success"):
+                print(f"[ORDINAL CLIENT WARNING] Why-post comment failed: {w_res.get('error')}")
 
     def parse_rewritten_posts(self, content: str) -> list:
         """
@@ -191,6 +350,12 @@ class Hyacinthia:
         posts_per_month: int = 12,
         start_date: datetime = None,
         per_post: list = None,
+        castorice_results: list = None,
+        schedule_publish_at: datetime | None = None,
+        default_approvals: list | None = None,
+        prefer_rewritten_file: bool = True,
+        inline_single_post: bool = False,
+        single_post_title: str | None = None,
     ) -> tuple:
         """
         Parses the file and iteratively pushes each drafted post to the Ordinal workspace.
@@ -205,55 +370,109 @@ class Hyacinthia:
             per_post: Optional list aligned with parsed posts; each entry may be a dict with
                 optional keys: label_ids (list of UUID str), approvals (list of dicts for
                 create_approvals: userId, optional message, dueDate, isBlocking).
+            schedule_publish_at: If set, each post uses this moment as publishAt (UTC-aware
+                or naive treated as UTC in strftime) instead of computed cadence slots.
+            default_approvals: Used when per_post[i] has no approvals entry; same list
+                applied to every created post in this batch.
+            prefer_rewritten_file: If True and Cyrene's _rewritten_posts.md exists, parse that
+                file instead of `content` (batch desktop workflow). Set False for API single-draft push.
+            inline_single_post: If True, push exactly one post from `content` (no file read, no parse_posts).
+            single_post_title: Optional title/theme when inline_single_post is True.
         """
         api_key = self._get_api_key_for_client(company_keyword)
         if not api_key:
-            return False, f"API key not found for '{company_keyword}' in CSV and fallback ORDINAL_API_KEY is not set."
+            return (
+                False,
+                f"API key not found for '{company_keyword}' in CSV and fallback ORDINAL_API_KEY is not set.",
+                [],
+            )
 
         endpoint = f"{self.base_url}/posts"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
-        
-        # --- Check for Cyrene's Edited Posts ---
+
         rewritten_filepath = str(P.post_dir(company_keyword) / f"{company_keyword}_rewritten_posts.md")
-        
-        if os.path.exists(rewritten_filepath):
+
+        if inline_single_post:
+            body = (content or "").strip()
+            if not body:
+                return False, "No content to push.", []
+            theme = (single_post_title or "").strip() or "Draft"
+            parsed_posts = [{"theme": theme[:200], "content": body}]
+            print(f"\n[ORDINAL CLIENT] Single inline draft push ({len(body)} chars) for {company_keyword}...")
+        elif prefer_rewritten_file and os.path.exists(rewritten_filepath):
             print(f"\n[ORDINAL CLIENT] Overriding base text. Found Cyrene edits at: {rewritten_filepath}")
-            with open(rewritten_filepath, 'r', encoding='utf-8') as f:
+            with open(rewritten_filepath, "r", encoding="utf-8") as f:
                 rewritten_content = f.read()
             parsed_posts = self.parse_rewritten_posts(rewritten_content)
             model_name = "Cyrene Edit"
         else:
-            # Fallback to the base text passed from the UI
             parsed_posts = self.parse_posts(content)
         
         print(f"\n[ORDINAL CLIENT] Parsed {len(parsed_posts)} {model_name} draft(s). Pushing to Ordinal API for {company_keyword}...")
         
-        # Compute publish dates based on posting frequency
+        # Compute publish dates — use Temporal Orchestrator when available,
+        # fall back to fixed cadence logic otherwise.
         if start_date is None:
             start_date = datetime.utcnow() + timedelta(days=7)
-        
-        publish_dates = self._compute_publish_dates(start_date, len(parsed_posts), posts_per_month)
+
+        _use_orchestrator = False
+        publish_dates = []
+        try:
+            from backend.src.services.temporal_orchestrator import compute_publish_dates_optimized
+            publish_dates = compute_publish_dates_optimized(
+                company_keyword, len(parsed_posts), start_date,
+            )
+            if publish_dates:
+                _use_orchestrator = True
+                print(f"[ORDINAL CLIENT] Using Temporal Orchestrator scheduling for {company_keyword}")
+        except Exception as _to_err:
+            print(f"[ORDINAL CLIENT] Temporal Orchestrator unavailable, using fixed cadence: {_to_err}")
+
+        if not publish_dates:
+            publish_dates = self._compute_publish_dates(start_date, len(parsed_posts), posts_per_month)
         weekday_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
         schedule_type = "Mon/Wed/Thu" if posts_per_month == 12 else "Tue/Thu"
-        print(f"[ORDINAL CLIENT] Scheduling {len(parsed_posts)} posts on {schedule_type} starting from {start_date.strftime('%Y-%m-%d')}")
+        if schedule_publish_at is not None:
+            print(
+                f"[ORDINAL CLIENT] Scheduling {len(parsed_posts)} post(s) at "
+                f"{schedule_publish_at.strftime('%Y-%m-%dT%H:%M:%S')} (UTC) publishAt"
+            )
+        else:
+            print(
+                f"[ORDINAL CLIENT] Scheduling {len(parsed_posts)} posts on {schedule_type} "
+                f"starting from {start_date.strftime('%Y-%m-%d')}"
+            )
         
         success_count = 0
         error_msgs = []
         first_url = None
-        
+        created_ordinal_ids: list[str] = []
+
         # Iteratively post each draft
+        shared_approvals = list(default_approvals) if default_approvals else []
+
         for i, post_data in enumerate(parsed_posts):
-            pub_date = publish_dates[i]
-            tentative_date = pub_date.strftime('%Y-%m-%dT09:00:00.000Z')
-            
+            if schedule_publish_at is not None:
+                pub_date = schedule_publish_at
+                tentative_date = schedule_publish_at.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            elif _use_orchestrator:
+                pub_date = publish_dates[i]
+                tentative_date = pub_date.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            else:
+                pub_date = publish_dates[i]
+                tentative_date = pub_date.strftime("%Y-%m-%dT09:00:00.000Z")
+
             extras = {}
             if per_post and i < len(per_post) and isinstance(per_post[i], dict):
                 extras = per_post[i]
             label_ids = extras.get("label_ids") or []
-            post_approvals = extras.get("approvals") or []
+            if "approvals" in extras:
+                post_approvals = extras["approvals"] or []
+            else:
+                post_approvals = list(shared_approvals)
             
             # --- NEW: Create title from the first 5 words of the post content ---
             content_words = post_data["content"].split()
@@ -266,13 +485,16 @@ class Hyacinthia:
             if not clean_title.strip():
                 clean_title = f"Draft {i+1}"
             
+            linked_in_cfg: dict = {"copy": _strip_linkedin_mentions(post_data["content"])}
+            li_assets = extras.get("linkedin_asset_ids") or []
+            if li_assets:
+                linked_in_cfg["assetIds"] = li_assets
+
             payload = {
                 "title": clean_title,
                 "publishAt": tentative_date,
-                "status": "ForReview",
-                "linkedIn": {
-                    "copy": post_data["content"]
-                }
+                "status": "InProgress",
+                "linkedIn": linked_in_cfg,
             }
             if label_ids:
                 payload["labelIds"] = label_ids
@@ -287,13 +509,32 @@ class Hyacinthia:
                     first_url = data.get("url")
                     
                 success_count += 1
-                day_name = weekday_names[pub_date.weekday()]
-                print(f"[ORDINAL CLIENT] Success! Post {i+1} created (scheduled {day_name} {pub_date.strftime('%Y-%m-%d')}) ID: {post_id}")
-                
+                if post_id:
+                    created_ordinal_ids.append(str(post_id))
+                if schedule_publish_at is not None:
+                    print(
+                        f"[ORDINAL CLIENT] Success! Post {i+1} created "
+                        f"(publishAt={tentative_date}) ID: {post_id}"
+                    )
+                else:
+                    day_name = weekday_names[pub_date.weekday()]
+                    print(
+                        f"[ORDINAL CLIENT] Success! Post {i+1} created "
+                        f"(scheduled {day_name} {pub_date.strftime('%Y-%m-%d')}) ID: {post_id}"
+                    )
+
+                if post_id:
+                    self._save_draft_map_entry(company_keyword, post_id, post_data["content"], clean_title)
+                    self._update_story_inventory(company_keyword, post_id, post_data["content"], tentative_date)
+
                 if post_approvals and post_id:
                     app_res = self.create_approvals(company_keyword, post_id, post_approvals)
                     if not app_res.get("success"):
                         print(f"[ORDINAL CLIENT WARNING] Post {i+1} approvals failed: {app_res.get('error')}")
+
+                if castorice_results and post_id and i < len(castorice_results):
+                    cr = castorice_results[i]
+                    self._post_castorice_thread_comments(company_keyword, post_id, cr)
                 
             except requests.exceptions.HTTPError as e:
                 error_msg = str(e)
@@ -309,10 +550,9 @@ class Hyacinthia:
                 error_msgs.append(f"Post {i+1} failed: {e}")
 
         if success_count > 0:
-            return True, first_url
-        else:
-            return False, "\n".join(error_msgs)
-        
+            return True, first_url, created_ordinal_ids
+        return False, "\n".join(error_msgs), []
+
     def get_recent_comments(self, company_keyword: str, publish_date_min: str) -> dict: 
         """
         Fetches all standard AND inline comments from posts scheduled on or after a specific date.
@@ -510,10 +750,13 @@ class Hyacinthia:
         company_keyword: str,
         content: str,
         publish_date: datetime,
-        status: str = "ForReview",
+        status: str = "InProgress",
         label_ids: list = None,
         title: str = None,
         approvals: list = None,
+        castorice_result: dict = None,
+        linkedin_asset_ids: list | None = None,
+        generation_metadata: dict | None = None,
     ) -> dict:
         """
         Push a single post to Ordinal.
@@ -522,11 +765,12 @@ class Hyacinthia:
             company_keyword: Client identifier
             content: LinkedIn post copy
             publish_date: Datetime for scheduled publish
-            status: Post status (Tentative, ToDo, InProgress, ForReview, Blocked, Finalized, Scheduled)
+            status: Post status (Tentative, ToDo, InProgress, ForReview, Blocked, Finalized, Scheduled); default InProgress
             label_ids: Optional list of label UUIDs to attach
             title: Optional title (defaults to first 5 words of content)
             approvals: Optional list of approval dicts (userId, optional message, dueDate, isBlocking);
                 submitted after the post is created.
+            linkedin_asset_ids: Optional Ordinal asset UUIDs for LinkedIn image attachments.
             
         Returns:
             Dict with 'success', 'post_id', 'url', 'error' keys
@@ -548,14 +792,17 @@ class Hyacinthia:
                 title = " ".join(content_words) if content_words else "Untitled Draft"
         
         publish_at = publish_date.strftime('%Y-%m-%dT%H:%M:%S.000Z')
-        
+
+        content = _strip_linkedin_mentions(content)
+        linked_in_cfg: dict = {"copy": content}
+        if linkedin_asset_ids:
+            linked_in_cfg["assetIds"] = linkedin_asset_ids
+
         payload = {
             "title": title,
             "publishAt": publish_at,
             "status": status,
-            "linkedIn": {
-                "copy": content
-            }
+            "linkedIn": linked_in_cfg,
         }
         
         if label_ids:
@@ -570,6 +817,13 @@ class Hyacinthia:
                 app_res = self.create_approvals(company_keyword, post_id, approvals)
                 if not app_res.get("success"):
                     print(f"[ORDINAL] Approval request failed: {app_res.get('error')}")
+            if post_id:
+                self._save_draft_map_entry(company_keyword, post_id, content,
+                                           title or content.split()[0],
+                                           generation_metadata=generation_metadata)
+                self._update_story_inventory(company_keyword, post_id, content, publish_at)
+            if post_id:
+                self._post_castorice_thread_comments(company_keyword, post_id, castorice_result)
             return {
                 "success": True,
                 "post_id": post_id,
@@ -690,3 +944,81 @@ class Hyacinthia:
             return {"success": False, "comment_id": None, "error": error_msg}
         except Exception as e:
             return {"success": False, "comment_id": None, "error": str(e)}
+
+    def harvest_feedback_diffs(self, company_keyword: str) -> list:
+        """Compare current Ordinal post copy against stored draft_map originals.
+
+        For every post in draft_map.json, fetches the live copy from Ordinal.
+        If it differs from the stored original, writes a unified diff to the
+        client's feedback directory and returns a summary list.
+
+        Returns:
+            List of dicts: {post_id, title, diff_path} for posts that changed.
+        """
+        api_key = self._get_api_key_for_client(company_keyword)
+        if not api_key:
+            print(f"[HARVEST] API key not found for '{company_keyword}'.")
+            return []
+
+        draft_map_file = P.draft_map_path(company_keyword)
+        if not draft_map_file.exists():
+            print(f"[HARVEST] No draft_map.json found for '{company_keyword}'.")
+            return []
+
+        try:
+            draft_map = json.loads(draft_map_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[HARVEST] Failed to read draft_map.json: {e}")
+            return []
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        feedback_path = P.feedback_dir(company_keyword)
+        os.makedirs(feedback_path, exist_ok=True)
+
+        changed = []
+        for post_id, entry in draft_map.items():
+            original = entry.get("original_text", "")
+            title = entry.get("title", post_id[:8])
+
+            try:
+                resp = requests.get(f"{self.base_url}/posts/{post_id}", headers=headers, timeout=10)
+                if resp.status_code == 404:
+                    print(f"[HARVEST] Post {post_id} no longer exists — skipping.")
+                    continue
+                resp.raise_for_status()
+                post_data = resp.json().get("post", {})
+                current = ""
+                if post_data.get("linkedIn") and post_data["linkedIn"].get("copy"):
+                    current = post_data["linkedIn"]["copy"]
+            except Exception as e:
+                print(f"[HARVEST] Failed to fetch post {post_id}: {e}")
+                continue
+
+            if current.strip() == original.strip():
+                continue
+
+            diff_lines = list(difflib.unified_diff(
+                original.splitlines(keepends=True),
+                current.splitlines(keepends=True),
+                fromfile=f"original/{title}",
+                tofile=f"ordinal/{title}",
+            ))
+            if not diff_lines:
+                continue
+
+            safe_title = "".join(c if c.isalnum() else "_" for c in title)[:40]
+            diff_filename = f"diff_{safe_title}_{post_id[:8]}.txt"
+            diff_path = os.path.join(str(feedback_path), diff_filename)
+            with open(diff_path, "w", encoding="utf-8") as f:
+                f.write(f"=== POST: {title} ({post_id}) ===\n")
+                f.write(f"=== HARVESTED: {datetime.now(timezone.utc).isoformat()} ===\n\n")
+                f.writelines(diff_lines)
+
+            print(f"[HARVEST] Diff saved: {diff_filename}")
+            changed.append({"post_id": post_id, "title": title, "diff_path": diff_path})
+
+        print(f"[HARVEST] {len(changed)} post(s) with edits found for '{company_keyword}'.")
+        return changed

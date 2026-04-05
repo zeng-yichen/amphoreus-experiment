@@ -22,13 +22,13 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     parallel_api_key: str = ""
 
-    # --- Supabase (read/write existing tables only — no schema changes) ---
+    # --- Supabase (read-only from app tables; auth/session may use Supabase client on frontend) ---
     supabase_url: str = ""
     supabase_key: str = ""
 
     # --- Pinecone ---
     pinecone_api_key: str = ""
-    pinecone_index: str = ""
+    pinecone_index: str = "user-posts"
 
     # --- Serper (Google Search API) ---
     serper_api_key: str = ""
@@ -36,6 +36,9 @@ class Settings(BaseSettings):
 
     # --- Ordinal ---
     ordinal_api_key: str = ""
+    # Public origin where this API is reachable (no trailing slash). Required for Ordinal to fetch
+    # draft images from POST /uploads (e.g. https://your-app.com or an ngrok URL).
+    public_base_url: str = ""
 
     # --- E2B ---
     e2b_api_key: str = ""

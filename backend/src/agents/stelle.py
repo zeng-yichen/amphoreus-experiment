@@ -8,7 +8,7 @@ to a direct Anthropic API loop if Pi is not installed.
 The agent explores the client workspace (transcripts, published posts,
 content strategy, ABM profiles, feedback, revisions), drafts posts grounded
 in transcripts, self-reviews against a "magic moment" quality bar, and
-outputs structured JSON.  Posts are then fact-checked by Permansor Terrae.
+outputs structured JSON.  Posts are then fact-checked by Cyrene Terrae.
 """
 
 from __future__ import annotations
@@ -86,6 +86,9 @@ You ghostwrite LinkedIn posts for the client. Your workspace:
 
 - `memory/config.md` — what you know about the client. Bounded at 4000 \
 chars. Manage with `./memory.sh`.
+- `memory/story-inventory.md` — cross-session record of stories already \
+told (published or drafted) and candidate stories not yet used. Read this \
+before drafting to avoid repeating angles the client has already published.
 - `memory/profile.md` — client's LinkedIn profile, company facts, ICP \
 segments, active initiatives, recent context.
 - `memory/strategy.md` — content strategy, angles, cadence, guardrails.
@@ -158,14 +161,20 @@ these share the same core insight? If yes, kill one and replace it with \
 a genuinely different angle from the transcripts. Two posts can share a \
 topic domain but must have different underlying insights. Repeat until \
 every post in the plan is distinct.
+1b. Read `memory/story-inventory.md`. If it is empty or missing, build \
+it now: scan every transcript and published/draft post, and write a list \
+of every story, anecdote, or specific moment you find — one bullet per \
+story, with file + timestamp + one-sentence description, and whether it \
+has been used. If the inventory already exists, consult it before picking \
+angles: do not draft a post around a story already marked as used. \
+Do not mark stories as used yourself — the publisher marks them after \
+confirmed Ordinal push.
 2. Pick the next unwritten topic from the plan. Identify the specific \
 source material (file + timestamps) you'll draw from.
-3. Draft in `scratch/`. After each paragraph with a factual claim, add a \
-citation comment: `<!-- [filename, timestamp] "quote" -->`. Read it back. \
-Check it against `memory/config.md` and `memory/constraints.md`. Revise \
-until it's right.
-4. Submit the final version: `./draft.sh "your full post text including \
-citation comments" YYYY-MM-DDTHH:MM` (date from the plan, if any).
+3. Draft in `scratch/`. Read it back. Check it against \
+`memory/config.md` and `memory/constraints.md`. Revise until it's right.
+4. Submit the final version: `./draft.sh "your full post text" \
+YYYY-MM-DDTHH:MM` (date from the plan, if any).
 5. Repeat steps 2-4 for all planned posts.
 6. When every post is drafted, write the final result JSON to \
 `output/result.json`.
@@ -203,7 +212,7 @@ On desktop, ~210 characters.
 
 ## Hard constraints
 
-- 1300-3000 characters (excluding citation comments).
+- 1300-3000 characters.
 - Every claim traces to a source file. No fabrication.
 - No em-dashes. No emojis unless the client's published posts use them.
 - No markdown formatting in posts (no #, **, etc.)
@@ -214,22 +223,6 @@ On desktop, ~210 characters.
 - `./draft.sh "post text" YYYY-MM-DDTHH:MM` — submit a new draft
 - `./edit.sh <draft-filename> "revised text"` — update an existing draft
 - `./memory.sh` — manage config.md (see Memory tool section)
-
-## Source citations
-
-Cite every factual claim with an HTML comment on its own line after the \
-relevant paragraph:
-
-```
-We had about 20 people in Seattle for the meetup.
-<!-- [2026-03-13-remote-work, 6:04] "we had like 20ish people in the area" -->
-```
-
-Format: `<!-- [filename, timestamp] quote or brief description -->`
-
-Only cite paragraphs with factual claims from source material. Don't cite \
-your own framing, thesis, or inference. draft.sh strips these before \
-counting characters — they exist for editorial review only.
 
 ## Web Research
 
@@ -328,8 +321,7 @@ When you're done, also write a JSON file to `output/result.json`:
     {{
       "hook": "First sentence or opening line (required, <=200 chars)",
       "hook_variants": ["Alternative hook 1", "Alternative hook 2"],
-      "text": "Full post text without citation comments (required, <=3000 chars)",
-      "text_with_citations": "Full post text WITH citation comments (for editorial review)",
+      "text": "Full post text (required, <=3000 chars)",
       "origin": "What sparked this post (required)",
       "citations": [
         {{"claim": "exact number or factual assertion", "source": "where you found it"}}
@@ -388,6 +380,9 @@ You ghostwrite LinkedIn posts for the client. Your workspace:
 
 - `memory/config.md` — what you know about the client. Bounded at 4000 \
 chars.
+- `memory/story-inventory.md` — cross-session record of stories already \
+told (published or drafted) and candidate stories not yet used. Read this \
+before drafting to avoid repeating angles the client has already published.
 - `memory/profile.md` — client's LinkedIn profile, company facts, ICP \
 segments, active initiatives, recent context.
 - `memory/strategy.md` — content strategy, angles, cadence, guardrails.
@@ -484,29 +479,19 @@ these share the same core insight? If yes, kill one and replace it with \
 a genuinely different angle from the transcripts. Two posts can share a \
 topic domain but must have different underlying insights. Repeat until \
 every post in the plan is distinct.
+1b. Read `memory/story-inventory.md`. If it is empty or missing, build \
+it now: scan every transcript and published/draft post, and write a list \
+of every story, anecdote, or specific moment you find — one bullet per \
+story, with file + timestamp + one-sentence description, and whether it \
+has been used. If the inventory already exists, consult it before picking \
+angles: do not draft a post around a story already marked as used. \
+Do not mark stories as used yourself — the publisher marks them after \
+confirmed Ordinal push.
 2. Pick the next unwritten topic from the plan. Identify the specific \
 source material (file + timestamps) you'll draw from.
-3. Draft in `scratch/`. After each paragraph with a factual claim, add a \
-citation comment: `<!-- [filename, timestamp] "quote" -->`. Read it back. \
-Revise until it's right.
+3. Draft in `scratch/`. Read it back. Revise until it's right.
 4. Save each final draft to `memory/draft-posts/`.
 5. When every post is complete, call `write_result` with the final JSON.
-
-## Source citations
-
-Cite every factual claim with an HTML comment on its own line after the \
-relevant paragraph:
-
-```
-We had about 20 people in Seattle for the meetup.
-<!-- [2026-03-13-remote-work, 6:04] "we had like 20ish people in the area" -->
-```
-
-Format: `<!-- [filename, timestamp] quote or brief description -->`
-
-Only cite paragraphs with factual claims from source material. Don't cite \
-your own framing, thesis, or inference. Citation comments are stripped \
-before counting characters — they exist for editorial review only.
 
 ## Output
 
@@ -518,8 +503,7 @@ When you're done, call the `write_result` tool with a JSON string:
     {{{{
       "hook": "First sentence or opening line (required, <=200 chars)",
       "hook_variants": ["Alternative hook 1", "Alternative hook 2"],
-      "text": "Full post text without citation comments (required, <=3000 chars)",
-      "text_with_citations": "Full post text WITH citation comments (for editorial review)",
+      "text": "Full post text (required, <=3000 chars)",
       "origin": "What sparked this post (required)",
       "citations": [
         {{{{"claim": "exact number or factual assertion", "source": "where you found it"}}}}
@@ -566,7 +550,7 @@ On desktop, ~210 characters.
 
 ## Hard constraints
 
-- 1300-3000 characters (excluding citation comments).
+- 1300-3000 characters.
 - Every claim traces to a source file. No fabrication.
 - No em-dashes. No emojis unless the client's published posts use them.
 - No markdown formatting in posts (no #, **, etc.)
@@ -1153,7 +1137,7 @@ def _exec_subagent(args: dict) -> str:
 
     try:
         resp = _call_with_retry(lambda: _client.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-opus-4-6",
             max_tokens=4096,
             messages=[{"role": "user", "content": prompt}],
         ))
@@ -1231,53 +1215,31 @@ def _validate_output(result: dict) -> tuple[bool, list[str], list[str]]:
 # LLM-based draft validation (Claude Haiku — cheap, fast)
 # ---------------------------------------------------------------------------
 
-_VALIDATION_SYSTEM_PROMPT = """\
-You are a LinkedIn post quality reviewer. Analyze the post for common AI-generated \
-writing patterns and quality issues. Be concise and specific.
-
-## AI Slop Detection Rules
-
-Flag these patterns:
-- "It's not X; it's Y" constructions (extremely common AI pattern)
-- Excessive em dashes (3+ in a single post)
-- Formulaic rhetorical questions used as transitions
-- "Secret reveal" posturing ("Here's what nobody tells you...")
-- LinkedIn formula meta-patterns (hook → vulnerable admission → numbered list → call to action)
-- Fabrication signals: perfectly round numbers, generic unnamed references ("a Fortune 500 CEO told me...")
-- Casual hyperbolic statements ("This changes everything", "The results were staggering")
-- Repetitive sentence rhythm (3+ sentences with the same structure back-to-back)
-
-## Output Format
-
-Return a JSON object:
-```json
-{
-  "needs_correction": true/false,
-  "issues": [
-    {
-      "type": "ai_pattern|fabrication|structure|char_count|preference",
-      "description": "What the issue is",
-      "severity": "critical|warning|info",
-      "offending_text": "The exact text that triggered this",
-      "suggested_fix": "How to fix it"
-    }
-  ]
-}
-```
-
-Only flag genuine issues. A post with 1-2 em dashes is fine. A post that uses a \
-single rhetorical question is fine. Flag patterns, not individual instances.
-
-If the post is clean, return `{"needs_correction": false, "issues": []}`.
-"""
-
-
 def _validate_draft_with_llm(post_text: str, company_keyword: str) -> dict:
-    """Run a lightweight Claude Haiku validation pass on a single post."""
+    """Structural validation of a single post. No LLM call.
+
+    Content quality (AI patterns, banned phrases) is the constitutional
+    verifier's domain — it runs post-generation with learned principle
+    weights. This function handles only structural checks that don't
+    need an LLM: character count and client-specific preference violations.
+    """
     result = {"needs_correction": False, "issues": []}
 
+    # --- Character count ---
     char_count = len(post_text)
-    if char_count > 3000:
+
+    # Use learned char limit if available (from _build_overrides)
+    char_min, char_max = 1300, 3000
+    try:
+        overrides = _build_overrides(company_keyword)
+        if overrides.get("char_limit_min"):
+            char_min = overrides["char_limit_min"]
+        if overrides.get("char_limit_max"):
+            char_max = overrides["char_limit_max"]
+    except Exception:
+        pass
+
+    if char_count > 3000:  # LinkedIn platform limit (not ours — theirs)
         result["needs_correction"] = True
         result["issues"].append({
             "type": "char_count",
@@ -1286,53 +1248,14 @@ def _validate_draft_with_llm(post_text: str, company_keyword: str) -> dict:
             "offending_text": "",
             "suggested_fix": f"Cut {char_count - 2800} characters",
         })
-    elif char_count < 400:
+    elif char_count < char_min:
         result["issues"].append({
             "type": "char_count",
-            "description": f"Post is only {char_count} chars — very short for LinkedIn",
-            "severity": "warning",
+            "description": f"Post is {char_count} chars — below {'learned' if char_min != 1300 else 'default'} minimum {char_min} for this client",
+            "severity": "info",
             "offending_text": "",
-            "suggested_fix": "Consider expanding with more detail or context",
+            "suggested_fix": f"This client's accepted posts are typically {char_min}-{char_max} chars",
         })
-
-    prefs_context = ""
-    feedback_dir = P.memory_dir(company_keyword) / "feedback"
-    strategy_dir = P.memory_dir(company_keyword) / "content_strategy"
-    if feedback_dir.exists():
-        for fp in sorted(feedback_dir.glob("*.txt"))[:5]:
-            try:
-                prefs_context += f"\n--- Feedback: {fp.name} ---\n{fp.read_text(encoding='utf-8')[:500]}\n"
-            except Exception:
-                pass
-    if strategy_dir.exists():
-        for fp in sorted(strategy_dir.iterdir())[:3]:
-            try:
-                prefs_context += f"\n--- Strategy: {fp.name} ---\n{fp.read_text(encoding='utf-8')[:500]}\n"
-            except Exception:
-                pass
-
-    user_msg = f"Analyze this LinkedIn post:\n\n{post_text}"
-    if prefs_context:
-        user_msg += f"\n\nClient preferences/feedback for context:\n{prefs_context}"
-
-    try:
-        client = Anthropic()
-        resp = _call_with_retry(lambda: client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=2048,
-            system=_VALIDATION_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-        ))
-        text = resp.content[0].text.strip() if resp.content else ""
-        json_match = re.search(r"\{[\s\S]*\}", text)
-        if json_match:
-            parsed = json.loads(json_match.group())
-            if isinstance(parsed.get("issues"), list):
-                result["issues"].extend(parsed["issues"])
-            if parsed.get("needs_correction"):
-                result["needs_correction"] = True
-    except Exception as e:
-        logger.warning("[Stelle] Draft validation LLM call failed: %s", e)
 
     return result
 
@@ -1820,6 +1743,16 @@ def _setup_workspace(company_keyword: str) -> Path:
         persistent_config.write_text("", encoding="utf-8")
         os.symlink(persistent_config.resolve(), ws_config)
 
+    # memory/story-inventory.md — cross-session record of stories told/untold
+    persistent_inventory = client_mem / "story_inventory.md"
+    ws_inventory = mem / "story-inventory.md"
+    if persistent_inventory.exists():
+        os.symlink(persistent_inventory.resolve(), ws_inventory)
+    else:
+        persistent_inventory.parent.mkdir(parents=True, exist_ok=True)
+        persistent_inventory.write_text("", encoding="utf-8")
+        os.symlink(persistent_inventory.resolve(), ws_inventory)
+
     # ----- context/ hierarchy (our additions beyond Jacquard) -----
     ctx = workspace / "context"
     ctx.mkdir()
@@ -1838,6 +1771,11 @@ def _setup_workspace(company_keyword: str) -> Path:
     research_dir.mkdir()
     for rf in research_files:
         (research_dir / rf["filename"]).write_text(rf["content"], encoding="utf-8")
+
+    # context/topic-velocity.md — recent industry signal from Serper
+    tv_src = client_mem / "topic_velocity.md"
+    if tv_src.exists():
+        os.symlink(tv_src.resolve(), ctx / "topic-velocity.md")
 
     # ----- Other top-level dirs -----
     for subdir in ("abm_profiles", "revisions"):
@@ -1858,6 +1796,121 @@ def _setup_workspace(company_keyword: str) -> Path:
     )
 
     return workspace
+
+
+# ---------------------------------------------------------------------------
+# Learned overrides — graduated defaults from data
+# ---------------------------------------------------------------------------
+
+_OVERRIDE_MIN_EDITS_FOR_CHAR_LIMIT = 5
+
+
+def _build_overrides(company_keyword: str) -> dict:
+    """Check feedback history and RuanMei insights for learnable overrides.
+
+    Returns dict with keys like "char_limit" that replace hard-coded defaults
+    when enough data supports it. Logs when an override activates.
+    """
+    overrides: dict[str, Any] = {}
+
+    # --- 1. Character limit override ---
+    # If the feedback engine has 5+ edit deltas where the human editor
+    # consistently makes posts longer/shorter, adjust the range.
+    try:
+        from backend.src.agents.ruan_mei import RuanMei
+        rm = RuanMei(company_keyword)
+        scored = [
+            o for o in rm._state.get("observations", [])
+            if o.get("status") == "scored"
+            and (o.get("posted_body") or "").strip()
+        ]
+        # Use posted_body (final accepted text) char counts
+        accepted_lengths = [len(o["posted_body"].strip()) for o in scored if o.get("posted_body", "").strip()]
+
+        if len(accepted_lengths) >= _OVERRIDE_MIN_EDITS_FOR_CHAR_LIMIT:
+            accepted_lengths.sort()
+            median_len = accepted_lengths[len(accepted_lengths) // 2]
+            learned_min = max(400, int(median_len * 0.7))
+            learned_max = max(learned_min + 200, int(median_len * 1.3))
+            # Only override if the learned range differs meaningfully from default
+            if learned_min != 1300 or learned_max != 3000:
+                overrides["char_limit"] = f"{learned_min}-{learned_max}"
+                overrides["char_limit_min"] = learned_min
+                overrides["char_limit_max"] = learned_max
+                overrides["char_limit_median"] = median_len
+                overrides["char_limit_sample_size"] = len(accepted_lengths)
+                logger.info(
+                    "[Stelle] Override active for %s: char_limit=%s (median=%d, n=%d)",
+                    company_keyword, overrides["char_limit"], median_len, len(accepted_lengths),
+                )
+    except Exception as e:
+        logger.debug("[Stelle] Char limit override check failed for %s: %s", company_keyword, e)
+
+    # --- 2. Cadence override ---
+    # If RuanMei insights show a specific cadence pattern, inject as system-level.
+    try:
+        from backend.src.agents.ruan_mei import RuanMei
+        rm = RuanMei(company_keyword)
+        scored = [o for o in rm._state.get("observations", []) if o.get("status") == "scored"]
+        if len(scored) >= 10:
+            # Compute actual posting cadence from data
+            timestamps = []
+            for o in scored:
+                ts = o.get("posted_at") or o.get("recorded_at", "")
+                if ts:
+                    try:
+                        from datetime import datetime as _dt, timezone as _tz
+                        dt = _dt.fromisoformat(ts.replace("Z", "+00:00"))
+                        timestamps.append(dt)
+                    except Exception:
+                        pass
+            if len(timestamps) >= 5:
+                timestamps.sort()
+                gaps = [(timestamps[i+1] - timestamps[i]).days for i in range(len(timestamps)-1)]
+                gaps = [g for g in gaps if g > 0]  # filter same-day
+                if gaps:
+                    median_gap = sorted(gaps)[len(gaps) // 2]
+                    if median_gap <= 2:
+                        cadence_note = f"This client posts frequently (median {median_gap} days between posts). Maintain this momentum."
+                    elif median_gap <= 4:
+                        cadence_note = f"This client posts ~{7 // median_gap}x per week (median gap: {median_gap} days). Match this rhythm."
+                    elif median_gap <= 7:
+                        cadence_note = f"This client posts weekly (median gap: {median_gap} days)."
+                    else:
+                        cadence_note = f"This client posts infrequently (median gap: {median_gap} days). Each post matters more — prioritize quality."
+                    overrides["cadence_note"] = cadence_note
+                    logger.info(
+                        "[Stelle] Override active for %s: cadence (median_gap=%d days)",
+                        company_keyword, median_gap,
+                    )
+    except Exception as e:
+        logger.debug("[Stelle] Cadence override check failed for %s: %s", company_keyword, e)
+
+    return overrides
+
+
+def _apply_overrides_to_prompt(prompt: str, overrides: dict) -> str:
+    """Replace hard-coded values in system prompt with learned overrides."""
+    if not overrides:
+        return prompt
+
+    # Character limit override
+    char_limit = overrides.get("char_limit")
+    if char_limit:
+        prompt = prompt.replace("- 1300-3000 characters.", f"- {char_limit} characters.")
+
+    # Cadence override — inject as a system-level directive
+    cadence_note = overrides.get("cadence_note")
+    if cadence_note:
+        # Insert cadence insight right after the hard constraints section
+        cadence_block = f"\n## Posting Cadence (learned from data)\n\n{cadence_note}\n"
+        # Insert before the Tools section
+        if "## Tools" in prompt:
+            prompt = prompt.replace("## Tools", cadence_block + "## Tools", 1)
+        elif "## Process" in prompt:
+            prompt = prompt.replace("## Process", cadence_block + "## Process", 1)
+
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1911,6 +1964,17 @@ def _build_dynamic_directives(company_keyword: str) -> str:
                 f"Internalize the patterns.\n\n"
                 + "\n---\n".join(rev_texts)
             )
+
+    # Learned directives: data-driven writing rules extracted from editorial
+    # feedback, approved posts, and engagement patterns. These have been
+    # distilled into specific, actionable rules by the feedback distiller.
+    try:
+        from backend.src.utils.feedback_distiller import build_stelle_directives_section
+        _learned = build_stelle_directives_section(company_keyword)
+        if _learned:
+            sections.append(_learned)
+    except Exception:
+        pass
 
     return "\n\n".join(sections) if sections else ""
 
@@ -2596,145 +2660,21 @@ if __name__ == "__main__":
 
 
 _VALIDATE_DRAFT_SCRIPT = r'''#!/usr/bin/env python3
-"""Validate a LinkedIn post draft for AI patterns and quality issues.
+"""Validate a LinkedIn post draft — structural checks only.
+
+Content quality (AI patterns, writing style) is handled by the constitutional
+verifier post-generation, with learned principle weights. This tool only checks
+structural issues that don't need an LLM: character count and deterministic
+banned-phrase detection.
+
 Usage: python3 validate_draft.py "Your full post text here"
        python3 validate_draft.py --file memory/draft-posts/my-draft.md
        python3 validate_draft.py --attempt 2 --file memory/draft-posts/my-draft.md
-Returns JSON with issues found. Use BEFORE submitting via draft.sh.
-After attempt 2, issues are downgraded to info and needs_correction=false (escape hatch).
+
+After attempt 2, issues are downgraded to info (escape hatch).
 """
 import json, os, sys, re
 
-VALIDATION_SYSTEM_PROMPT = r"""You are a content quality reviewer for LinkedIn posts.
-Your job is to catch real problems while allowing creative variation.
-
-CRITICAL: You must detect AI-generated content patterns. LinkedIn posts that sound
-like they were written by AI damage the author's credibility. Be ruthless about
-catching AI slop - generic phrasing, fabricated specifics, and formulaic structures.
-
-## Output Schema
-Return JSON with:
-- needs_correction: true if any critical/warning issues, false otherwise
-- issues: array of issues found (can be empty)
-
-Each issue must have:
-- issue_type: "taboo_topic" | "formatting" | "tone" | "ai_quality" | "structure" | "other"
-- description: Brief explanation (1-2 sentences)
-- severity: "critical" | "warning" | "info"
-- offending_text: The EXACT text from the post (copy-paste it)
-- suggested_fix: Concrete replacement or edit instruction
-
-## 1. Content Preferences
-- Taboo topics mentioned -> severity: critical
-- Formatting rule violations (em dashes, emojis) -> severity: warning
-- Tone slightly off -> severity: info
-
-## 2. AI Quality Detection
-
-Flag these AI slop patterns. Be ruthless but fair.
-
-### Pattern 1: "It's Not X; It's Y" Construction
-Dramatic reframing that's a dead giveaway of AI writing.
-
-DETECT:
-- "This isn't a feature update. It's a category shift."
-- "They're not the ones who complain. They're the ones who leave."
-- "It's not about working harder. It's about working smarter."
-
-FIX: Just state Y directly with evidence. Cut the dramatic setup.
--> severity: warning
-
-### Pattern 2: Casual Hyperbolic Statements
-Sweeping claims that promise transformation without substance.
-
-DETECT:
-- "This one simple thing changes everything about how startups get built."
-- "The framework that's quietly revolutionizing how teams communicate."
-- "What I learned in 5 minutes that took others 10 years to figure out."
-
-FIX: Specific, bounded claims with proof. Cut the breathless packaging.
--> severity: warning
-
-### Pattern 3: "Secret Reveal" Posturing
-Theatrical lead-ins that promise insider knowledge.
-
-DETECT:
-- "And here's the quiet part no one says aloud..."
-- "Here's what nobody tells you about..."
-- "The truth that most people miss..."
-
-DO NOT flag:
-- "But here's the thing:" (natural conversational transition humans use)
-- "Let me be clear:" (emphasis, not posturing)
-
-FIX: Cut it entirely. Start with the actual point.
--> severity: warning
-
-### Pattern 4: Excessive Em Dashes
-Using em dashes as a stylistic crutch.
-
-DETECT: 3+ em dashes in a single post.
-BAD: "The best leaders-the ones who actually ship-know that speed matters. But speed without direction-that's just chaos."
-
-FIX: Use periods and commas. Vary punctuation naturally.
--> severity: warning
-
-### Pattern 5: Short Dramatic Lead-Up Questions
-Formulaic rhetorical questions as filler.
-
-DETECT (generic, empty subject):
-- "The real signal? Their merchant partnerships." (vague, no reasoning)
-- "What separates good from great? Consistency." (aphorism, no substance)
-
-DO NOT flag:
-- Questions that introduce a specific anecdote or concrete data point
-- Questions used as a structural beat when the answer has real substance
-
-FIX: "Y matters because [reason]." Direct statement with reasoning.
--> severity: warning
-
-### Additional AI Signals
-
-**LinkedIn Formula (flag the meta-pattern):**
-Hook -> vulnerable admission -> specific numbers -> pivot -> bullet wisdom
-- Opening with manufactured vulnerability ("I almost...", "I was wrong about...")
-- Fake specificity: precise numbers without context ($6,400/day, 4.2s latency, 73%)
-- Ending with generic CTA: "What do you think?", "Drop a comment below?"
-
-**Aphorism-as-Insight (pseudo-profound closers):**
-- "The [boring/simple] choice that [X] beats the [exciting/complex] choice that [Y]"
-- "[X] is a lagging indicator"
-- Rhyming or parallel structure designed to sound wise
-- Any sentence that sounds clever but says nothing concrete
-
-**Fabrication Signals:**
-- Suspiciously round numbers ($10K, 100%, 3x) without source
-- Precise metrics without context ("$0.08 per request", "4.2 seconds p99")
-- Generic references ("a startup", "a popular framework") where specifics should exist
-- Templated stories ("I scrapped everything and started over...")
-
-**Sentence Pattern Red Flags:**
-- 3+ consecutive sentences with similar length (+/-10 chars)
-- Predictable openers repeating: "This shows...", "This means...", "It's worth noting..."
-- Transition word overuse: "Furthermore", "Moreover", "In addition", "As a result"
-
-## Sniff Test
-
-Before flagging, ask:
-- Is this pattern actually hollow, or does the post have real specifics (names, numbers, events)?
-- Would a thoughtful human writer in this domain actually write this?
-- Is dramatic structure hiding thin substance, or is there real content underneath?
-
-**Specificity credit**: If the post has real named details, concrete numbers, or a specific story,
-partial pattern matches should be downgraded one severity level.
-
-## Decision Logic
-
-IF 2+ strong AI slop patterns detected (with no specificity credit) -> needs_correction=true (ai_quality, severity=critical)
-IF 1 strong AI slop pattern detected -> needs_correction=true (ai_quality, severity=warning)
-IF patterns are weak/partial AND post has real specifics (names, numbers, story) -> downgrade to info, needs_correction=false
-IF only minor signals (transition words, slight repetition) -> note as info but can pass
-"""
 
 def main():
     post_text = ""
@@ -2773,10 +2713,10 @@ def main():
         return
 
     escape_hatch = attempt > 2
-
     issues = []
     char_count = len(post_text)
 
+    # --- Character count (structural, always checked) ---
     if char_count > 3000:
         issues.append({"type": "char_count", "severity": "critical",
             "description": f"Post is {char_count} chars — exceeds 3000 char limit",
@@ -2790,58 +2730,10 @@ def main():
             "description": f"Post is only {char_count} chars — unusually short",
             "suggested_fix": f"Consider adding ~{800 - char_count} chars of substance"})
 
-    banned = ["game-changer", "game changer", "let that sink in",
-        "here's the kicker", "hot take", "full stop", "hard truth",
-        "if you're not .* you're already behind", "the real question is",
-        "nobody is talking about", "the dirty secret", "wake-up call",
-        "this changes everything", "the results were staggering"]
-    for pattern in banned:
-        match = re.search(pattern, post_text, re.IGNORECASE)
-        if match:
-            issues.append({"type": "ai_pattern", "severity": "critical",
-                "description": "Banned AI phrase detected",
-                "offending_text": match.group(),
-                "suggested_fix": "Rewrite without this cliche"})
-
-    em_dash_count = post_text.count("\u2014") + post_text.count("--")
-    if em_dash_count >= 3:
-        issues.append({"type": "ai_pattern", "severity": "warning",
-            "description": f"{em_dash_count} em-dashes detected — max 0 allowed",
-            "suggested_fix": "Replace em-dashes with periods, commas, or restructure"})
-
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if key:
-        try:
-            import httpx
-            resp = httpx.post("https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": key, "anthropic-version": "2023-06-01",
-                         "content-type": "application/json"},
-                json={"model": "claude-haiku-4-5", "max_tokens": 4096,
-                    "system": VALIDATION_SYSTEM_PROMPT,
-                    "messages": [{"role": "user",
-                        "content": f"<post_to_validate>\n{post_text[:3000]}\n</post_to_validate>"}]},
-                timeout=30.0)
-            resp.raise_for_status()
-            data = resp.json()
-            text = data.get("content", [{}])[0].get("text", "")
-            arr_match = re.search(r"\{[\s\S]*\}", text)
-            if arr_match:
-                parsed = json.loads(arr_match.group())
-                if isinstance(parsed, dict):
-                    llm_issues = parsed.get("issues", [])
-                    if isinstance(llm_issues, list):
-                        issues.extend(llm_issues)
-                elif isinstance(parsed, list):
-                    issues.extend(parsed)
-            else:
-                arr_match = re.search(r"\[[\s\S]*\]", text)
-                if arr_match:
-                    llm_issues = json.loads(arr_match.group())
-                    if isinstance(llm_issues, list):
-                        issues.extend(llm_issues)
-        except Exception as e:
-            issues.append({"type": "tool_error", "severity": "info",
-                "description": f"LLM validation unavailable: {e}"})
+    # No content quality checks here — AI patterns, banned phrases, and
+    # writing style are the constitutional verifier's domain. It runs
+    # post-generation with learned principle weights that adapt to what
+    # actually affects engagement for each client.
 
     if escape_hatch:
         downgraded = []
@@ -2947,7 +2839,9 @@ def _write_tool_scripts(workspace_root: Path) -> None:
 def _write_agents_md(workspace_root: Path, company_keyword: str) -> None:
     """Write AGENTS.md to workspace root for Pi to discover."""
     directives = _build_dynamic_directives(company_keyword)
+    overrides = _build_overrides(company_keyword)
     content = _PI_AGENTS_TEMPLATE.format(dynamic_directives=directives)
+    content = _apply_overrides_to_prompt(content, overrides)
     (workspace_root / "AGENTS.md").write_text(content, encoding="utf-8")
 
 
@@ -3302,7 +3196,6 @@ def _extract_result_from_scratch(workspace_root: Path) -> dict | None:
             posts.append({
                 "hook": hook,
                 "text": clean_text,
-                "text_with_citations": raw_text,
                 "origin": f"Extracted from {f.name}",
                 "citations": [],
             })
@@ -3619,7 +3512,7 @@ def _generate_why_post(
 
     try:
         resp = _call_with_retry(lambda: _client.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-opus-4-6",
             max_tokens=400,
             messages=[{
                 "role": "user",
@@ -3628,11 +3521,12 @@ def _generate_why_post(
                     f"Post origin: {origin}\n"
                     f"{strategy_block}\n"
                     f"Post:\n{post_text}\n\n"
-                    f"In 2-3 plain sentences, explain why this specific post is worth "
-                    f"publishing. Connect it to the client's content strategy if provided. "
-                    f"Name the specific audience it speaks to and what reaction it should "
-                    f"trigger (save, share, comment, DM). No filler, no generic praise. "
-                    f"Write like a coworker on Slack, not a strategist on a slide deck."
+                    f"Why should we publish this? 2-3 sentences max. "
+                    f"Say who specifically will care and what they'll do (save it, share it, DM the client, etc). "
+                    f"If there's a content strategy above, say which part this hits. "
+                    f"Write like you're explaining it to a teammate over coffee. "
+                    f"No words like 'strategically,' 'positions,' 'leverages,' 'resonates,' or 'ecosystem.' "
+                    f"Just say what makes it good in plain English."
                 ),
             }],
         ))
@@ -3646,7 +3540,7 @@ def _generate_image_suggestion(post_text: str, hook: str) -> str:
     """Generate a simple, easy-to-produce image suggestion for the post."""
     try:
         resp = _call_with_retry(lambda: _client.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-opus-4-6",
             max_tokens=200,
             messages=[{
                 "role": "user",
@@ -3673,6 +3567,84 @@ def _generate_image_suggestion(post_text: str, hook: str) -> str:
 # Result processing + fact-check
 # ---------------------------------------------------------------------------
 
+def _compute_cv_thresholds(company: str) -> dict:
+    """Compute data-driven constitutional verification gating thresholds.
+
+    Returns {skip, ensemble_upper, ensemble_lower}. Falls back to
+    hard-coded defaults (4.0, 3.8, 3.0) when insufficient data.
+    """
+    defaults = {"skip": 4.0, "ensemble_upper": 3.8, "ensemble_lower": 3.0}
+
+    # Check cache
+    cache_path = P.memory_dir(company) / "cv_thresholds.json"
+    if cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            computed = cached.get("computed_at", "")
+            if computed:
+                from datetime import datetime, timezone
+                dt = datetime.fromisoformat(computed.replace("Z", "+00:00"))
+                age_h = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+                if age_h < 24 and cached.get("observation_count", 0) >= 15:
+                    return {k: cached[k] for k in ("skip", "ensemble_upper", "ensemble_lower") if k in cached}
+        except Exception:
+            pass
+
+    # Need observations with both cyrene_composite and engagement reward
+    try:
+        from backend.src.agents.ruan_mei import RuanMei
+        rm = RuanMei(company)
+        obs_with_scores = [
+            o for o in rm._state.get("observations", [])
+            if o.get("status") == "scored"
+            and o.get("cyrene_composite") is not None
+            and o.get("reward", {}).get("immediate") is not None
+        ]
+    except Exception:
+        return defaults
+
+    if len(obs_with_scores) < 15:
+        return defaults
+
+    perm_scores = [o["cyrene_composite"] for o in obs_with_scores]
+    rewards = [o["reward"]["immediate"] for o in obs_with_scores]
+    median_reward = sorted(rewards)[len(rewards) // 2]
+
+    # Skip threshold: 75th percentile of Cyrene scores for above-median-engagement posts
+    good_perms = sorted([p for p, r in zip(perm_scores, rewards) if r > median_reward])
+    skip = good_perms[int(len(good_perms) * 0.75)] if good_perms else 4.0
+
+    # Ensemble upper: median Cyrene score across all posts
+    all_sorted = sorted(perm_scores)
+    ensemble_upper = all_sorted[len(all_sorted) // 2]
+
+    # Ensemble lower: 25th percentile
+    ensemble_lower = all_sorted[int(len(all_sorted) * 0.25)]
+
+    # Sanity: ensure lower < upper < skip
+    ensemble_lower = min(ensemble_lower, ensemble_upper - 0.1)
+    skip = max(skip, ensemble_upper + 0.1)
+
+    result = {
+        "skip": round(skip, 2),
+        "ensemble_upper": round(ensemble_upper, 2),
+        "ensemble_lower": round(ensemble_lower, 2),
+        "observation_count": len(obs_with_scores),
+        "computed_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    }
+
+    # Cache
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        tmp.rename(cache_path)
+    except Exception:
+        pass
+
+    return result
+
+
 def _process_result(
     result: dict,
     client_name: str,
@@ -3688,7 +3660,14 @@ def _process_result(
 
     logger.info("[Stelle] Processing %d posts...", len(posts))
 
-    from castorice import Castorice
+    from backend.src.agents.castorice import Castorice
+    try:
+        from backend.src.db.local import create_local_post as _save_post
+        import uuid as _uuid
+        _sqlite_available = True
+    except Exception:
+        _sqlite_available = False
+
     castorice = Castorice()
     output_lines = [f"# {client_name.upper()} — ONE-SHOT POSTS (Stelle)\n"]
     output_lines.append(f"Generated {len(posts)} posts via jacquard-style agentic workflow.\n")
@@ -3709,13 +3688,11 @@ def _process_result(
 
     for i, post in enumerate(posts, 1):
         hook = post.get("hook", "")
-        raw_text = post.get("text_with_citations") or post.get("text", "")
-        text = _strip_citation_comments(post.get("text", raw_text))
+        text = post.get("text", "")
         origin = post.get("origin", "")
         citations = post.get("citations", [])
         image_suggestion = post.get("image_suggestion")
         hook_variants = post.get("hook_variants", [])
-        inline_citations = _extract_citation_comments(raw_text)
 
         output_lines.append(f"## Post {i}: {hook}\n")
         output_lines.append(f"**Origin:** {origin}\n")
@@ -3727,44 +3704,118 @@ def _process_result(
                 output_lines.append(f"- {hv}")
             output_lines.append("")
 
-        if inline_citations:
-            output_lines.append("**Source Citations (inline):**")
-            for ic in inline_citations:
-                output_lines.append(f"- {ic.strip()}")
-            output_lines.append("")
-
         if citations:
             output_lines.append("**Citations (structured):**")
             for c in citations:
                 output_lines.append(f"- {c.get('claim', '')}: {c.get('source', '')}")
             output_lines.append("")
 
-        output_lines.append("### Draft\n")
+        # Save original draft before Cyrene revision
+        pre_revision_text = text
+
+        output_lines.append("### Original Draft\n")
         output_lines.append(text + "\n")
 
-        if raw_text != text:
-            output_lines.append("### Annotated Draft (with citation comments)\n")
-            output_lines.append(raw_text + "\n")
+        # -----------------------------------------------------------
+        # SELF-REFINE: Critique-revise loop (Cyrene)
+        # Runs BEFORE fact-checking so Castorice gets the best version.
+        # -----------------------------------------------------------
+        print(f"[Stelle] SELF-REFINE post {i}/{len(posts)}: {hook[:50]}...")
+        refine_report_lines: list[str] = []
+        _refine_result = None
+        try:
+            from backend.src.agents.cyrene import refine_post as _refine
+            _refine_result = _refine(
+                company=company_keyword,
+                draft_text=text,
+                transcript_excerpt=origin[:1000] if origin else "",
+                max_iterations=3,
+            )
+            if _refine_result.final_text != text:
+                text = _refine_result.final_text
+                refine_report_lines.append(f"**SELF-REFINE:** {_refine_result.total_iterations} iterations, "
+                                           f"best score {_refine_result.best_score}/5.0 ({_refine_result.method})")
+                for it in _refine_result.iterations:
+                    weak = it.get("weak_dimensions", [])
+                    if weak:
+                        weak_str = ", ".join(f"{d['name']}={d['score']}" for d in weak)
+                        refine_report_lines.append(f"  Iter {it['iteration']}: weak=[{weak_str}]")
+            else:
+                refine_report_lines.append(f"**SELF-REFINE:** Passed on first critique "
+                                           f"(score {_refine_result.best_score}/5.0)")
+        except Exception as _refine_err:
+            logger.debug("[Stelle] SELF-REFINE skipped for post %d: %s", i, _refine_err)
 
+        if refine_report_lines:
+            output_lines.append("### Quality Refinement\n")
+            output_lines.extend(refine_report_lines)
+            output_lines.append("")
+
+        # -----------------------------------------------------------
+        # Fact-check (Castorice) — runs on the refined version
+        # -----------------------------------------------------------
         print(f"[Stelle] Fact-checking post {i}/{len(posts)}: {hook[:50]}...")
         corrected = text
+        citation_comments: list[str] = []
         try:
-            fc_report = permansor.fact_check_post(company_keyword, text)
-            corrected_match = re.search(
-                r"\[CORRECTED POST\]\s*\n([\s\S]+?)(?:\n##|\Z)", fc_report
-            )
-            if corrected_match:
-                corrected = corrected_match.group(1).strip()
-                fc_header = fc_report[:fc_report.index("[CORRECTED POST]")].strip()
+            fc_result = castorice.fact_check_post(company_keyword, text)
+            corrected = fc_result.get("corrected_post") or text
+            raw_cc = fc_result.get("citation_comments") or []
+            citation_comments = raw_cc if isinstance(raw_cc, list) else []
+            fc_report_text = fc_result.get("report", "")
+            if "[CORRECTED POST]" in fc_report_text:
+                fc_header = fc_report_text[:fc_report_text.index("[CORRECTED POST]")].strip()
             else:
-                fc_header = fc_report.strip()
+                fc_header = fc_report_text.strip()
 
             output_lines.append(f"### Fact-Check Report\n\n{fc_header}\n")
             output_lines.append(f"### Final Post\n\n{corrected}\n")
         except Exception as e:
             logger.warning("[Stelle] Fact-check failed for post %d: %s", i, e)
+            citation_comments = []
             output_lines.append(f"### Fact-Check\n\nFact-check failed: {e}\n")
             output_lines.append(f"### Final Post\n\n{corrected}\n")
+
+        # -----------------------------------------------------------
+        # Constitutional Verifier — gated to borderline Cyrene scores only.
+        # Full ensemble (3 models) on ambiguous posts; single-model on others.
+        # Skipped entirely when SELF-REFINE scored ≥4.0 (high confidence).
+        # -----------------------------------------------------------
+        _cyrene_score = _refine_result.best_score if _refine_result is not None else 0.0
+        _cv_thresholds = _compute_cv_thresholds(company_keyword)
+        _cv_borderline = _cv_thresholds["ensemble_lower"] <= _cyrene_score < _cv_thresholds["ensemble_upper"]
+        _cv_low = _cyrene_score < _cv_thresholds["ensemble_lower"] and _cyrene_score > 0
+        if _cv_borderline or _cv_low:
+            _cv_models = ["claude", "gemini", "gpt"] if _cv_borderline else ["claude"]
+            print(f"[Stelle] Constitutional verification post {i}/{len(posts)} "
+                  f"(Cyrene {_cyrene_score:.1f}, {'ensemble' if _cv_borderline else 'single'})...")
+            try:
+                from backend.src.utils.constitutional_verifier import verify_post as _verify
+                _cv_result = _verify(corrected, company=company_keyword, models=_cv_models)
+                _cv_score = _cv_result.get("constitutional_score")
+                _cv_mode = _cv_result.get("mode", "binary")
+                if not _cv_result.get("passed"):
+                    violations = _cv_result.get("violations", [])
+                    score_str = f" score={_cv_score:.2f}" if _cv_score is not None else ""
+                    output_lines.append(f"### Constitutional Verification: FAIL ({_cv_mode}{score_str})\n")
+                    for v in violations:
+                        conf = v.get("confidence")
+                        weight = v.get("weight")
+                        if conf is not None and weight is not None:
+                            output_lines.append(f"- **{v['name']}** (confidence: {conf:.0%}, weight: {weight:.2f})")
+                        else:
+                            notes = " | ".join(v.get("notes", []))
+                            output_lines.append(f"- **{v['name']}** ({v.get('votes_fail', 0)}/{v.get('votes_pass', 0) + v.get('votes_fail', 0)} models failed) {notes}")
+                        for note in v.get("notes", []):
+                            output_lines.append(f"  {note}")
+                    output_lines.append(f"\nModel agreement: {_cv_result.get('model_agreement', 0):.0%}\n")
+                else:
+                    score_str = f" score={_cv_score:.2f}" if _cv_score is not None else ""
+                    output_lines.append(f"### Constitutional Verification: PASS ({_cv_mode}{score_str}, {_cv_result.get('model_agreement', 0):.0%} agreement)\n")
+            except Exception as _cv_err:
+                logger.debug("[Stelle] Constitutional verification skipped for post %d: %s", i, _cv_err)
+        elif _cyrene_score >= _cv_thresholds["skip"]:
+            output_lines.append(f"### Constitutional Verification: SKIPPED (Cyrene score {_cyrene_score:.1f} — high confidence)\n")
 
         print(f"[Stelle] Generating why-post + image for post {i}/{len(posts)}...")
         why_post = _generate_why_post(corrected, origin, client_name, company_keyword)
@@ -3796,6 +3847,105 @@ def _process_result(
             output_lines.append("")
 
         output_lines.append("---\n")
+
+        import uuid as _uuid_for_draft
+
+        _draft_id = str(_uuid_for_draft.uuid4())
+
+        # RuanMei: analyze the generated post and record the observation.
+        # Same local id as SQLite row so Ordinal push can link metrics by workspace post id.
+        try:
+            import asyncio as _asyncio
+            from backend.src.agents.ruan_mei import RuanMei as _RM
+            _rm_inst = _RM(company_keyword)
+            _post_hash = __import__("hashlib").sha1(
+                corrected.encode("utf-8", errors="replace")
+            ).hexdigest()[:16]
+            try:
+                _aloop = _asyncio.get_running_loop()
+            except RuntimeError:
+                _aloop = None
+            if _aloop and _aloop.is_running():
+                import concurrent.futures as _cf
+                _descriptor = _cf.ThreadPoolExecutor().submit(
+                    lambda: _asyncio.run(_rm_inst.analyze_post(corrected))
+                ).result(timeout=30)
+            else:
+                _descriptor = _asyncio.run(_rm_inst.analyze_post(corrected))
+            _rm_inst.record(
+                _post_hash,
+                _descriptor,
+                post_body=corrected,
+                local_post_id=_draft_id,
+            )
+
+            # Persist Cyrene scores and constitutional results on the observation.
+            # Persist Cyrene scores and constitutional results on the observation.
+            # existing adaptive config code and readiness checks.
+            _extra_fields = {}
+            if _refine_result is not None and _refine_result.iterations:
+                _last_iter = _refine_result.iterations[-1]
+                _dim_scores = _last_iter.get("all_dimensions", {})
+                if not _dim_scores:
+                    _dim_scores = {d["name"]: d["score"] for d in _last_iter.get("weak_dimensions", [])}
+                if _dim_scores:
+                    _extra_fields["cyrene_dimensions"] = _dim_scores
+                _extra_fields["cyrene_composite"] = _refine_result.best_score
+                _extra_fields["cyrene_iterations"] = _refine_result.total_iterations
+                _extra_fields["cyrene_weights_tier"] = _refine_result.adaptive_tier
+                _extra_fields["cyrene_dimension_set"] = _refine_result.dimension_set
+
+            # Constitutional results — _cv_result is only set when verifier ran
+            try:
+                if _cv_result and isinstance(_cv_result, dict):
+                    _cv_principles = {}
+                    for _pr in _cv_result.get("principles", []):
+                        if _pr.get("id"):
+                            _cv_principles[_pr["id"]] = _pr.get("passed", True)
+                    if _cv_principles:
+                        _extra_fields["constitutional_results"] = _cv_principles
+            except NameError:
+                pass  # _cv_result not defined — verifier was skipped
+
+            # Alignment score — compute and store for threshold learning
+            try:
+                from backend.src.utils.alignment_scorer import score_draft_alignment as _score_align
+                _align_result = _score_align(company_keyword, corrected)
+                if _align_result and _align_result.get("score") is not None:
+                    _extra_fields["alignment_score"] = _align_result["score"]
+            except Exception:
+                pass
+
+            if _extra_fields:
+                for _obs in reversed(_rm_inst._state.get("observations", [])):
+                    if _obs.get("post_hash") == _post_hash:
+                        _obs.update(_extra_fields)
+                        _rm_inst._save()
+                        break
+        except Exception as _e:
+            logger.debug("[Stelle] RuanMei analysis skipped for post %d: %s", i, _e)
+
+        if _sqlite_available:
+            try:
+                # Store both pre-revision and post-revision content
+                _pre_rev = pre_revision_text if pre_revision_text != corrected else None
+                _perm_score = _refine_result.best_score if _refine_result is not None else None
+                # Build generation metadata for draft_map persistence
+                _gen_meta = dict(_extra_fields) if _extra_fields else {}
+                _save_post(
+                    post_id=_draft_id,
+                    company=company_keyword,
+                    content=corrected,
+                    title=hook[:200] if hook else None,
+                    status="draft",
+                    why_post=why_post or None,
+                    citation_comments=citation_comments,
+                    pre_revision_content=_pre_rev,
+                    cyrene_score=_perm_score,
+                    generation_metadata=_gen_meta if _gen_meta else None,
+                )
+            except Exception as _e:
+                logger.warning("[Stelle] Could not save post %d to local SQLite: %s", i, _e)
 
     Path(output_filepath).parent.mkdir(parents=True, exist_ok=True)
     with open(output_filepath, "w", encoding="utf-8") as f:
@@ -3837,6 +3987,137 @@ def generate_one_shot(
     print("[Stelle] Setting up workspace...")
     workspace_root = _setup_workspace(company_keyword)
 
+    # RuanMei: generate performance insight context (soft, non-prescriptive).
+    # This is additive context that Stelle can use or ignore. If RuanMei
+    # has insufficient data (< 5 scored posts), this is silently empty.
+    ruan_mei_insight_context = ""
+    try:
+        import asyncio
+        from backend.src.agents.ruan_mei import RuanMei
+        _rm = RuanMei(company_keyword)
+        if _rm.scored_count() >= 5:
+            try:
+                _loop = asyncio.get_running_loop()
+            except RuntimeError:
+                _loop = None
+            if _loop and _loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as _pool_exec:
+                    _insights = _pool_exec.submit(
+                        lambda: asyncio.run(_rm.generate_insights())
+                    ).result(timeout=30)
+            else:
+                _insights = asyncio.run(_rm.generate_insights())
+            if _insights:
+                ruan_mei_insight_context = (
+                    "\n\nPERFORMANCE INSIGHTS (from engagement data):\n"
+                    "The following patterns have been observed from this client's "
+                    "post performance history. Use your judgment on whether these "
+                    "apply to the current source material. These are observations, "
+                    "not directives.\n\n"
+                    + _insights
+                )
+        else:
+            _cross = RuanMei.generate_cross_client_insights()
+            if _cross:
+                ruan_mei_insight_context = (
+                    "\n\nCROSS-CLIENT INSIGHTS (this client has limited history — "
+                    "these patterns are from other clients' top-performing posts, anonymized):\n"
+                    "Use your judgment on which apply. These are general observations.\n\n"
+                    + _cross
+                )
+    except Exception as _e:
+        logger.debug("[Stelle] RuanMei insight generation skipped: %s", _e)
+
+    # LOLA: topic/format bandit recommendations.
+    lola_context = ""
+    try:
+        from backend.src.agents.lola import LOLA
+        _lola = LOLA(company_keyword)
+        # Auto-seed arms: cross-client auto-seed is primary path.
+        # topic_arms.json is manual override only.
+        if not _lola._state.arms:
+            _arms_path = P.memory_dir(company_keyword) / "topic_arms.json"
+            if _arms_path.exists():
+                # Manual override takes precedence
+                import json as _json
+                _seed_arms = _json.loads(_arms_path.read_text(encoding="utf-8"))
+                _lola.seed_arms(_seed_arms)
+            else:
+                # Primary: auto-seed from universal patterns + client ICP
+                try:
+                    from backend.src.services.cross_client_learning import auto_seed_lola as _auto_seed
+                    _auto_seed(company_keyword)
+                except Exception as _seed_err:
+                    logger.debug("[Stelle] LOLA auto-seed skipped: %s", _seed_err)
+
+        # Auto-plan series from hot LOLA arms (no human gate)
+        try:
+            from backend.src.services.market_intelligence import auto_plan_series_from_lola as _auto_series
+            _auto_series(company_keyword)
+        except Exception as _series_err:
+            logger.debug("[Stelle] Auto series plan skipped: %s", _series_err)
+        lola_context = _lola.recommend_context()
+    except Exception as _e:
+        logger.debug("[Stelle] LOLA context skipped: %s", _e)
+
+    # Feedback learning is handled entirely through RuanMei observations:
+    # draft (post_body) → client edits → final (posted_body) → engagement (reward).
+    # No separate feedback ingestion pipeline needed.
+
+    # Market intelligence: trending topics, hook shifts, whitespace from vertical monitoring.
+    market_context = ""
+    try:
+        from backend.src.services.market_intelligence import build_market_context as _mktctx
+        market_context = _mktctx(company_keyword)
+    except Exception as _e:
+        logger.debug("[Stelle] Market intelligence skipped: %s", _e)
+
+    # Cross-client hook library: top-performing hooks as reference exemplars.
+    hook_library_context = ""
+    try:
+        from backend.src.services.cross_client_learning import load_hook_library_for_stelle as _hooks
+        hook_library_context = _hooks(company=company_keyword, limit=10)
+    except Exception as _e:
+        logger.debug("[Stelle] Hook library skipped: %s", _e)
+
+    # Series Engine: inject series context if a series post is due.
+    series_context = ""
+    try:
+        from backend.src.services.series_engine import get_stelle_series_context as _series_ctx
+        series_context = _series_ctx(company_keyword)
+    except Exception as _e:
+        logger.debug("[Stelle] Series context skipped: %s", _e)
+
+    # Temporal Orchestrator: scheduling intelligence for generation context.
+    scheduling_context = ""
+    try:
+        from backend.src.services.temporal_orchestrator import build_scheduling_context as _sched_ctx
+        scheduling_context = _sched_ctx(company_keyword)
+    except Exception as _e:
+        logger.debug("[Stelle] Scheduling context skipped: %s", _e)
+
+    # 360Brew alignment scorer: pre-generation semantic consistency check.
+    alignment_context = ""
+    try:
+        from backend.src.utils.alignment_scorer import build_stelle_context as _align
+        # Sample source material from transcripts for alignment check.
+        _transcripts_dir = P.transcripts_dir(company_keyword)
+        _source_sample = ""
+        if _transcripts_dir.exists():
+            for _tf in sorted(_transcripts_dir.iterdir()):
+                if _tf.suffix in (".txt", ".md") and _tf.stat().st_size < 30_000:
+                    try:
+                        _source_sample += _tf.read_text(encoding="utf-8")[:1500] + "\n\n"
+                        if len(_source_sample) > 3000:
+                            break
+                    except Exception:
+                        pass
+        if _source_sample:
+            alignment_context = _align(company_keyword, _source_sample, client_name)
+    except Exception as _e:
+        logger.debug("[Stelle] Alignment scoring skipped: %s", _e)
+
     user_prompt = prompt or (
         f"Write up to {num_posts} LinkedIn posts for {client_name}. "
         f"The transcripts are from content interviews — conversations designed "
@@ -3845,6 +4126,21 @@ def generate_one_shot(
         f"distinct insights — if the material supports 7, write 7, not {num_posts}. "
         f"Quality and distinctness over quantity."
     )
+    if ruan_mei_insight_context:
+        user_prompt += ruan_mei_insight_context
+    if lola_context:
+        user_prompt += lola_context
+    if alignment_context:
+        user_prompt += alignment_context
+
+    if scheduling_context:
+        user_prompt += scheduling_context
+    if series_context:
+        user_prompt += series_context
+    if market_context:
+        user_prompt += market_context
+    if hook_library_context:
+        user_prompt += hook_library_context
 
     if _PI_AVAILABLE:
         print(f"[Stelle] Using Pi agent (context compaction enabled)...")
@@ -3856,7 +4152,9 @@ def generate_one_shot(
         logger.warning("[Stelle] Pi not installed — falling back to direct API loop (higher token usage)")
         print(f"[Stelle] Pi not found. Using direct API loop (max {MAX_AGENT_TURNS} turns)...")
         directives = _build_dynamic_directives(company_keyword)
+        overrides = _build_overrides(company_keyword)
         system_prompt = _DIRECT_SYSTEM_TEMPLATE.format(dynamic_directives=directives)
+        system_prompt = _apply_overrides_to_prompt(system_prompt, overrides)
         result, session_log = _run_agent_loop(system_prompt, user_prompt, workspace_root)
 
     session_path = output_filepath.replace(".md", "_session.jsonl")
@@ -3979,7 +4277,7 @@ def inline_edit(
     try:
         client = Anthropic()
         resp = _call_with_retry(lambda: client.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-opus-4-6",
             max_tokens=4096,
             messages=[{"role": "user", "content": edit_prompt}],
         ))

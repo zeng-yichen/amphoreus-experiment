@@ -45,8 +45,11 @@ def error_event(message: str) -> AgentEvent:
     return AgentEvent(type="error", data={"message": message})
 
 
-def done_event(output: str | None = None) -> AgentEvent:
-    return AgentEvent(type="done", data={"output": output or ""})
+def done_event(output: str | None = None, image_id: str | None = None) -> AgentEvent:
+    data: dict = {"output": output or ""}
+    if image_id:
+        data["image_id"] = image_id
+    return AgentEvent(type="done", data=data)
 
 
 def status_event(message: str) -> AgentEvent:

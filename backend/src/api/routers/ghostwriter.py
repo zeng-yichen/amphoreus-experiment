@@ -25,6 +25,10 @@ class InlineEditRequest(BaseModel):
     instruction: str
 
 
+class LinkedInUsernameRequest(BaseModel):
+    username: str
+
+
 class FeedbackRequest(BaseModel):
     company: str
     original: str
@@ -164,9 +168,51 @@ async def rollback_to_run(company: str, run_id: str):
     return {"status": "rolled_back", "run_id": run_id}
 
 
+@router.get("/{company}/ordinal-users")
+async def list_ordinal_users(company: str):
+    """Workspace members from Ordinal (for approver picker). Requires API key in ordinal_auth CSV."""
+    from backend.src.agents.hyacinthia import Hyacinthia
+    raw = Hyacinthia().get_users(company)
+    if isinstance(raw, list):
+        users = raw
+    elif isinstance(raw, dict):
+        users = raw.get("users") or raw.get("data") or []
+    else:
+        users = []
+    return {"users": users}
+
+
 @router.get("/sandbox/{company}/files")
 async def browse_workspace_files(company: str, path: str = Query("")):
     """Browse workspace files."""
     from backend.src.services.workspace_manager import list_workspace_files
     files = list_workspace_files(company, path)
     return {"files": files}
+
+
+@router.get("/{company}/linkedin-username")
+async def get_linkedin_username(company: str):
+    """Return the stored LinkedIn username for a client, or null if not set."""
+    from backend.src.db import vortex
+    path = vortex.linkedin_username_path(company)
+    if not path.exists():
+        return {"username": None}
+    return {"username": path.read_text(encoding="utf-8").strip() or None}
+
+
+@router.post("/{company}/linkedin-username")
+async def save_linkedin_username(company: str, req: LinkedInUsernameRequest):
+    """Write the LinkedIn username file for a client."""
+    from backend.src.db import vortex
+    username = req.username.strip().lstrip("@").strip("/").split("/")[-1]
+    if not username:
+        raise HTTPException(status_code=400, detail="Username must not be empty")
+    path = vortex.linkedin_username_path(company)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(username, encoding="utf-8")
+    return {"status": "saved", "username": username}
+
+
+# Manual feedback ingestion endpoint removed: feedback learning happens through
+# RuanMei observations (draft → client edits → final post → engagement).
+# No separate feedback ingestion pipeline needed.

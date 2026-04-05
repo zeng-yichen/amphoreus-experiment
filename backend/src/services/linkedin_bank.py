@@ -68,8 +68,19 @@ def ingest_client_profile(linkedin_url: str) -> dict[str, Any] | None:
         return None
 
 
-def embed_posts_to_pinecone(posts: list[dict[str, Any]], namespace: str = "posts") -> int:
-    """Embed posts into Pinecone for semantic search."""
+def embed_posts_to_pinecone(
+    posts: list[dict[str, Any]],
+    company: str = "",
+    namespace: str = "posts",
+) -> int:
+    """Embed posts into Pinecone for semantic search with rich metadata.
+
+    Uses stable IDs (``{company}-{content_hash}``) so re-runs are idempotent.
+    Each vector stores the full post text (truncated to 1000 chars for metadata),
+    company, engagement metrics, posted_at, and ICP reward when available.
+    """
+    import hashlib
+
     settings = get_settings()
     if not settings.pinecone_api_key:
         logger.debug("Pinecone not configured — skipping embedding")
@@ -84,23 +95,50 @@ def embed_posts_to_pinecone(posts: list[dict[str, Any]], namespace: str = "posts
         index = pc.Index(settings.pinecone_index)
 
         vectors = []
-        for i, post in enumerate(posts):
-            text = post.get("post_text", "")
+        for post in posts:
+            text = (
+                post.get("commentary") or post.get("post_text")
+                or post.get("text") or post.get("copy") or ""
+            ).strip()
             if not text:
                 continue
+
+            content_hash = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:16]
+            stable_id = f"{company}-{content_hash}" if company else f"post-{content_hash}"
+
             resp = oai.embeddings.create(model="text-embedding-3-small", input=text[:8000])
+
+            impressions = post.get("impressionCount") or post.get("impressions") or 0
+            reactions = post.get("likeCount") or post.get("reactions") or post.get("total_reactions") or 0
+            comments = post.get("commentCount") or post.get("comments") or post.get("total_comments") or 0
+            engagement = post.get("engagement_score") or (
+                (reactions + comments * 3) / impressions if impressions > 0 else 0
+            )
+            posted_at = (
+                post.get("publishedAt") or post.get("postedAt")
+                or post.get("published_at") or post.get("posted_at") or ""
+            )
+
             vectors.append({
-                "id": f"post-{i}-{hash(text) % 10**8}",
+                "id": stable_id,
                 "values": resp.data[0].embedding,
                 "metadata": {
                     "text": text[:1000],
-                    "engagement": post.get("engagement_score", 0),
+                    "company": company,
+                    "engagement": round(engagement, 4),
+                    "impressions": impressions,
+                    "reactions": reactions,
+                    "comments": comments,
+                    "posted_at": posted_at,
+                    "icp_reward": post.get("icp_reward", 0),
                 },
             })
 
         if vectors:
-            index.upsert(vectors=vectors, namespace=namespace)
-            logger.info("Embedded %d posts to Pinecone", len(vectors))
+            BATCH = 100
+            for i in range(0, len(vectors), BATCH):
+                index.upsert(vectors=vectors[i:i + BATCH], namespace=namespace)
+            logger.info("Embedded %d posts to Pinecone for %s", len(vectors), company or "global")
 
         return len(vectors)
 

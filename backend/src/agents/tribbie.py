@@ -42,7 +42,7 @@ SILENCE_GAP_SECONDS = 0.4      # consecutive silence → flush & transcribe buff
 MAX_BUFFER_SECONDS = 8.0       # force-flush after this many seconds regardless
 MIN_SEGMENT_WORDS = 2          # min words in a segment to qualify for a Haiku suggestion
 SUGGESTION_COOLDOWN_SECONDS = 15  # minimum gap between Haiku calls
-MAX_CONTEXT_CHARS = 12_000     # max chars of client context sent to Haiku
+MAX_CONTEXT_CHARS = 30_000     # max chars of client context sent to Haiku (Haiku has 200k ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -72,20 +72,49 @@ def _find_blackhole_device() -> int | None:
 
 def _load_context(company: str) -> str:
     """
-    Load client context for Haiku: Aglaea briefing + content strategy + sample posts.
+    Load client context for Haiku:
+      1. All existing interview transcripts (so the model knows what's already been captured)
+      2. Aglaea briefing (prepared questions and goals for this interview)
+      3. Content strategy snippet (ICP and post-type targets)
     Returns at most MAX_CONTEXT_CHARS characters.
     """
     parts: list[str] = []
     total = 0
 
-    # 1. Aglaea briefing (most valuable — generated specifically for this interview)
+    # 1. All existing interview transcripts — the primary source for knowing what's been covered.
+    #    Skip any live_interview_* files (those are from the current or past Tribbie sessions
+    #    and will already appear in transcript_so_far). Load named transcripts only.
+    trans_dir = P.transcripts_dir(company)
+    if trans_dir.exists():
+        transcript_budget = MAX_CONTEXT_CHARS // 2  # reserve half the budget for transcripts
+        transcript_parts: list[str] = []
+        transcript_total = 0
+        for f in sorted(trans_dir.iterdir()):
+            if f.suffix not in (".txt", ".md"):
+                continue
+            if f.name.startswith("live_interview_"):
+                continue  # already captured in transcript_so_far
+            try:
+                text = f.read_text(encoding="utf-8", errors="ignore")
+                chunk = text[:6_000]  # cap each file to keep variety
+                transcript_parts.append(f"### {f.name}\n{chunk}")
+                transcript_total += len(chunk)
+                if transcript_total >= transcript_budget:
+                    break
+            except Exception:
+                continue
+        if transcript_parts:
+            parts.append("## Existing Interview Transcripts\n" + "\n\n".join(transcript_parts))
+            total += transcript_total
+
+    # 2. Aglaea briefing (prepared questions and interview goals)
     brief_file = P.brief_dir(company) / f"{company}_briefing.md"
-    if brief_file.exists():
-        text = brief_file.read_text(encoding="utf-8", errors="ignore")
+    if brief_file.exists() and total < MAX_CONTEXT_CHARS:
+        text = brief_file.read_text(encoding="utf-8", errors="ignore")[:6_000]
         parts.append(f"## Interview Briefing\n{text}")
         total += len(text)
 
-    # 2. Content strategy
+    # 3. Content strategy (ICP profile, post-type targets — informs what material is useful)
     strat_dir = P.content_strategy_dir(company)
     if strat_dir.exists() and total < MAX_CONTEXT_CHARS:
         for f in sorted(strat_dir.iterdir()):
@@ -93,16 +122,7 @@ def _load_context(company: str) -> str:
                 text = f.read_text(encoding="utf-8", errors="ignore")[:3_000]
                 parts.append(f"## Content Strategy\n{text}")
                 total += len(text)
-                break  # one file is enough
-
-    # 3. Sample accepted posts (voice/style awareness)
-    acc_dir = P.accepted_dir(company)
-    if acc_dir.exists() and total < MAX_CONTEXT_CHARS:
-        for f in sorted(acc_dir.iterdir())[:2]:
-            if f.suffix in (".md", ".txt"):
-                text = f.read_text(encoding="utf-8", errors="ignore")[:1_500]
-                parts.append(f"## Sample Accepted Post\n{text}")
-                total += len(text)
+                break
 
     return "\n\n".join(parts)[:MAX_CONTEXT_CHARS]
 
@@ -115,27 +135,32 @@ def _suggest_followup(
 ) -> str | None:
     """Call Claude Haiku to suggest the single best follow-up question."""
     try:
-        snippet = transcript_so_far[-3_000:]
+        snippet = transcript_so_far[-4_000:]
         response = anthropic_client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=120,
+            model="claude-opus-4-6",
+            max_tokens=200,
             messages=[{
                 "role": "user",
                 "content": (
-                    "You are assisting a LinkedIn ghostwriter conducting a content interview. "
-                    "Your job: suggest the single best question to ask right now.\n\n"
-                    "Priority order:\n"
-                    "1. If the client just shared something specific and interesting, probe deeper — "
-                    "ask for the exact moment, the emotion, what happened next.\n"
-                    "2. Otherwise, navigate toward a briefing question that hasn't been covered yet. "
-                    "Check the transcript and avoid topics already discussed.\n"
-                    "3. Never ask generic industry or product questions. Every question should target "
-                    "a *specific personal story* — a failure, surprise, decision, or realization the "
-                    "client experienced firsthand that could anchor a standalone LinkedIn post.\n\n"
+                    "You are assisting a LinkedIn ghostwriter conducting a content interview.\n\n"
+                    "Read everything below: the existing transcripts (what has already been captured "
+                    "across all sessions), the briefing (what the interviewer planned to cover), the "
+                    "content strategy (what types of posts this client needs), and the current "
+                    "conversation so far. Then decide the single most useful question to ask right now.\n\n"
+                    "The goal is to collect raw material that can become LinkedIn posts. "
+                    "A question is useful if it surfaces something not already in the transcripts "
+                    "and would produce content the strategy calls for.\n\n"
+                    "Quality bar: the question must be specific enough that the client's answer "
+                    "would directly produce a LinkedIn post draft — a concrete claim, outcome, or "
+                    "decision with enough detail to write from. If the answer would require further "
+                    "follow-up to be usable, the question is too vague.\n\n"
                     f"<client_context>\n{context}\n</client_context>\n\n"
-                    f"<transcript_so_far>\n{snippet}\n</transcript_so_far>\n\n"
-                    f"<latest_utterance>\n{segment}\n</latest_utterance>\n\n"
-                    "Reply with ONLY the question. No preamble, no explanation, no label."
+                    f"<conversation_so_far>\n{snippet}\n</conversation_so_far>\n\n"
+                    f"<just_said>\n{segment}\n</just_said>\n\n"
+                    "Reply in exactly two lines:\n"
+                    "Line 1: one short italicised note explaining what gap or opportunity you're targeting "
+                    "(e.g. *This topic hasn't come up yet* or *Good moment to get the concrete outcome*)\n"
+                    "Line 2: the question itself — natural, conversational, specific."
                 ),
             }],
         )
@@ -330,7 +355,7 @@ def start_session(company: str, job_id: str, event_callback: Callable) -> None:
         logger.exception("[Tribbie] Fatal error in capture loop")
         event_callback("error", {"message": str(e)})
     finally:
-        # Drain remaining audio then shut down the transcription thread
+        # Drain remaining audio, shut down transcription thread, clean up session
         if work_buf:
             audio_array = np.concatenate(work_buf, axis=0).flatten()
             if len(audio_array) >= SAMPLE_RATE * 0.3:
@@ -340,7 +365,6 @@ def start_session(company: str, job_id: str, event_callback: Callable) -> None:
                     pass
         transcribe_q.put(None)  # poison pill
         transcribe_thread.join(timeout=30)
-    finally:
         _sessions.pop(job_id, None)
 
     # --- Save transcript ---

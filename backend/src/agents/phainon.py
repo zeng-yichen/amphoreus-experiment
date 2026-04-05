@@ -305,12 +305,27 @@ def _run_pi_agent(
     post_text: str,
     model: str = "claude-opus-4-6",
     event_callback: Any = None,
+    feedback_instruction: str = "",
+    reference_image_path: str | None = None,
 ) -> tuple[str | None, list[dict]]:
     """Run the image assembly agent via Pi CLI."""
     session_log: list[dict[str, Any]] = []
 
     _write_agents_md(workspace, post_text)
     _write_tool_scripts(workspace)
+
+    if reference_image_path:
+        ref = Path(reference_image_path)
+        if ref.is_file():
+            scratch = workspace / "scratch"
+            scratch.mkdir(parents=True, exist_ok=True)
+            dest = scratch / "reference_previous.png"
+            try:
+                shutil.copy2(ref, dest)
+                if event_callback:
+                    event_callback("status", {"message": f"Copied previous image to scratch/reference_previous.png"})
+            except Exception as e:
+                logger.warning("[Phainon] Could not copy reference image: %s", e)
 
     session_dir = workspace / ".pi-sessions"
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -326,6 +341,15 @@ def _run_pi_agent(
         "image using Python/Pillow. Save the result to output/final_image.png "
         "and metadata to output/image_metadata.json."
     )
+    if (feedback_instruction or "").strip():
+        user_prompt += (
+            "\n\n--- Human revision feedback (prioritize; iterate toward what works, not defaults) ---\n"
+            + feedback_instruction.strip()
+        )
+    if reference_image_path and Path(reference_image_path).is_file():
+        user_prompt += (
+            "\n\nA prior version is at scratch/reference_previous.png — revise it to satisfy the feedback above."
+        )
 
     pi_cmd = [
         "pi",
@@ -532,8 +556,12 @@ def generate_image(
     post_text: str,
     model: str = "claude-opus-4-6",
     event_callback: Any = None,
+    feedback_instruction: str = "",
+    reference_image_path: str | None = None,
 ) -> str | None:
     """Generate a composite image for a post.
+
+    ``feedback_instruction`` and ``reference_image_path`` support human-in-the-loop revision runs.
 
     Returns the path to the final image, or None if generation failed.
     """
@@ -550,7 +578,14 @@ def generate_image(
     if event_callback:
         event_callback("status", {"message": f"Setting up workspace for {company}..."})
 
-    image_path, session_log = _run_pi_agent(workspace, post_text, model, event_callback)
+    image_path, session_log = _run_pi_agent(
+        workspace,
+        post_text,
+        model,
+        event_callback,
+        feedback_instruction=feedback_instruction,
+        reference_image_path=reference_image_path,
+    )
 
     if image_path:
         # Copy to products directory

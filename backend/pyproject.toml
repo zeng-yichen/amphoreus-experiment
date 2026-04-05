@@ -23,7 +23,7 @@ dependencies = [
 
     # Data stores
     "supabase>=2.9.0",
-    "pinecone-client>=5.0.0",
+    "pinecone>=8.0.0",
 
     # Audio capture + transcription
     "faster-whisper>=1.0.0",
@@ -39,6 +39,7 @@ dependencies = [
     # Utilities
     "requests>=2.32.0",
     "python-dotenv>=1.0.0",
+    "apify-client>=2.5.0",
     "tiktoken>=0.7.0",
     "openpyxl>=3.1.0",
     "pyjwt[crypto]>=2.9.0",

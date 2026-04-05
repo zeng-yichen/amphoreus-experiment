@@ -1,4 +1,4 @@
-"""Screwllum adapter — wraps screwllum.py for the API layer."""
+"""Herta adapter — wraps herta.py for the API layer."""
 
 import logging
 
@@ -7,10 +7,10 @@ from backend.src.utils.langfuse_tracing import traced
 logger = logging.getLogger(__name__)
 
 
-@traced(name="screwllum.run_programmatic", kind="generation")
-def run_screwllum(company: str, prompt: str | None = None, job_id: str | None = None) -> str | None:
-    """Run Screwllum content strategy generation."""
-    from backend.src.agents.screwllum import run_programmatic
+@traced(name="herta.run_programmatic", kind="generation")
+def run_herta(company: str, prompt: str | None = None, job_id: str | None = None) -> str | None:
+    """Run Herta content strategy generation."""
+    from backend.src.agents.herta import run_programmatic
 
     if job_id:
         from backend.src.services.job_manager import emit_event

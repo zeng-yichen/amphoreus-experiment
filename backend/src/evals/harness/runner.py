@@ -119,9 +119,9 @@ def _execute_agent(case: EvalCase) -> str:
         castorice = Castorice()
         return castorice.fact_check_post(case.prompt, case.context.get("company", "test"))
 
-    elif agent_name == "screwllum":
-        from backend.src.agents.screwllum_adapter import run_screwllum
-        return run_screwllum(case.context.get("company", "test")) or ""
+    elif agent_name == "herta":
+        from backend.src.agents.herta_adapter import run_herta
+        return run_herta(case.context.get("company", "test")) or ""
 
     else:
         raise ValueError(f"Unknown agent: {case.agent}")

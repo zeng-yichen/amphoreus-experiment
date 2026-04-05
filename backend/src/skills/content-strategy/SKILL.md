@@ -1,6 +1,6 @@
 ---
 name: content-strategy
-description: Generate content strategies using Screwllum. Covers TOFU/MOFU/BOFU mix, content pillars, and cadence.
+description: Generate content strategies using Herta. Covers TOFU/MOFU/BOFU mix, content pillars, and cadence.
 tier: smart
 tools:
   - ordinal_profiles
