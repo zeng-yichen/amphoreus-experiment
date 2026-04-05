@@ -33,9 +33,13 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Haiku for bulk tagging — cheap and sufficient for category extraction.
-# Client is created lazily inside tag_post() so .env loading order doesn't matter.
-_TAGGER_MODEL = "claude-haiku-4-5"
+# Sonnet for bulk tagging. Haiku is cheaper but the tags it produced were
+# visibly lower-quality (over-granular topic labels, inconsistent format naming)
+# and quality at the tag layer cascades into every downstream learning step
+# (topic transitions, causal filter, strategy brief, segment model). Not the
+# place to save pennies. Client is created lazily inside tag_post() so .env
+# loading order doesn't matter.
+_TAGGER_MODEL = "claude-sonnet-4-6"
 
 _TAGGER_PROMPT_BASE = """\
 Analyze this LinkedIn post and return three tags.

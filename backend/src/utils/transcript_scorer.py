@@ -76,7 +76,12 @@ from backend.src.db import vortex
 
 logger = logging.getLogger(__name__)
 
-_DESCRIBER_MODEL = "claude-haiku-4-5"
+# Sonnet for segment descriptions. The description quality directly determines
+# the embedding, which directly determines the learned projection. Haiku's
+# descriptions were generic; Sonnet produces richer, more distinctive phrasing
+# that embeds into a more separable space — exactly what the ridge regression
+# needs to find structure at small n.
+_DESCRIBER_MODEL = "claude-sonnet-4-6"
 _EMBEDDING_MODEL = "text-embedding-3-small"  # OpenAI; 1536 dims; used by alignment_scorer
 _EMBEDDING_DIM = 1536
 _MIN_OBS_FOR_SEGMENT_MODEL = 15
