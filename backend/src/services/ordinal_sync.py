@@ -239,62 +239,7 @@ def sync_all_companies() -> None:
                                 except Exception:
                                     logger.debug("Segment model build skipped for %s", company, exc_info=True)
 
-                                # 2k. Topic transition model (A2): learn P(topic_next | topic_prev)
-                                #     and P(format_next | format_prev) from chronologically ordered
-                                #     tagged observations.
-                                try:
-                                    from backend.src.utils.topic_transitions import build_transition_model
-                                    _trans = build_transition_model(company)
-                                    if _trans:
-                                        logger.info(
-                                            "[ordinal_sync] Transition model built for %s: "
-                                            "%d topics, %d formats",
-                                            company,
-                                            _trans["topic"]["unique_count"],
-                                            _trans["format"]["unique_count"],
-                                        )
-                                except Exception:
-                                    logger.debug("Topic transitions skipped for %s", company, exc_info=True)
-
-                                # 2l. Causal dimension filter (B1): partial-correlation analysis
-                                #     to classify content state dimensions as causal / confounded /
-                                #     inert. Read by B3 (engagement predictor feature selection)
-                                #     and B2 (strategy brief causal section) — must run before both.
-                                try:
-                                    from backend.src.utils.causal_filter import compute_causal_dimensions
-                                    _causal = compute_causal_dimensions(company)
-                                    if _causal:
-                                        logger.info(
-                                            "[ordinal_sync] Causal filter for %s: %d causal, "
-                                            "%d confounded (n=%d)",
-                                            company,
-                                            sum(1 for d in _causal["dimensions"] if d["classification"] == "causal"),
-                                            sum(1 for d in _causal["dimensions"] if d["classification"] == "confounded"),
-                                            _causal["observation_count"],
-                                        )
-                                except Exception:
-                                    logger.debug("Causal filter skipped for %s", company, exc_info=True)
-
-                                # 2m. Engagement predictor: recompute the pre-publish engagement
-                                #     prediction model. Reads causal_dimensions.json from step 2l
-                                #     and applies B3 feature selection when it improves R².
-                                try:
-                                    from backend.src.utils.engagement_predictor import build_engagement_model
-                                    _eng_model = build_engagement_model(company)
-                                    if _eng_model:
-                                        logger.info(
-                                            "[ordinal_sync] Engagement model built for %s: "
-                                            "R²=%.4f, %d features, %d obs (%s)",
-                                            company,
-                                            _eng_model.get("r_squared", 0),
-                                            len(_eng_model.get("feature_names", [])),
-                                            _eng_model.get("observation_count", 0),
-                                            _eng_model.get("feature_selection", "full"),
-                                        )
-                                except Exception:
-                                    logger.debug("Engagement model build skipped for %s", company, exc_info=True)
-
-                                # 2n. Client profile: extract cross-client learning profile
+                                # 2k. Client profile: extract cross-client learning profile
                                 #     vector for similarity-based cold-start seeding.
                                 try:
                                     from backend.src.utils.cross_client import build_client_profile
@@ -308,59 +253,59 @@ def sync_all_companies() -> None:
                                 except Exception:
                                     logger.debug("Client profile build skipped for %s", company, exc_info=True)
 
-                                # 2o. Feedback distiller: extract writing directives from
-                                #     editorial feedback, accepted posts, and engagement
-                                #     patterns. Injected into Stelle's system prompt.
+                                # 2l. Analyst agent: hypothesis-driven engagement analysis.
+                                #     Replaces the fixed analysis pipeline (steps 2k-2p in the
+                                #     old architecture: topic transitions, causal filter,
+                                #     engagement predictor, feedback distiller, directive
+                                #     efficacy, strategy brief). The analyst has access to the
+                                #     same statistical primitives as tools and decides what to
+                                #     run based on what it finds.
+                                #
+                                #     Weekly-gated: only runs if no findings file exists or the
+                                #     existing one is >7 days old. At ~$2-3 per client per run,
+                                #     daily would cost ~$50/day for 22 clients.
                                 try:
-                                    from backend.src.utils.feedback_distiller import distill_directives
-                                    _directives = distill_directives(company)
-                                    if _directives:
-                                        logger.info(
-                                            "[ordinal_sync] Distilled %d writing directives for %s",
-                                            len(_directives), company,
-                                        )
+                                    _analyst_path = vortex.memory_dir(company) / "analyst_findings.json"
+                                    _run_analyst = True
+                                    if _analyst_path.exists():
+                                        try:
+                                            import json as _json_analyst
+                                            _af = _json_analyst.loads(_analyst_path.read_text(encoding="utf-8"))
+                                            _last_run = _af.get("runs", [{}])[-1] if _af.get("runs") else {}
+                                            _last_ts = _last_run.get("timestamp", "")
+                                            if _last_ts:
+                                                from datetime import datetime as _dt_analyst, timezone as _tz_analyst
+                                                _age = (_dt_analyst.now(_tz_analyst.utc) - _dt_analyst.fromisoformat(
+                                                    _last_ts.replace("Z", "+00:00")
+                                                )).total_seconds() / 86400
+                                                if _age < 7:
+                                                    _run_analyst = False
+                                                    logger.debug(
+                                                        "[ordinal_sync] Analyst skipped for %s (last run %.1f days ago)",
+                                                        company, _age,
+                                                    )
+                                        except Exception:
+                                            pass
+                                    if _run_analyst:
+                                        from backend.src.agents.analyst import run_analysis
+                                        _analyst_result = run_analysis(company)
+                                        if _analyst_result and not _analyst_result.get("error"):
+                                            logger.info(
+                                                "[ordinal_sync] Analyst for %s: %d tool calls, "
+                                                "%d findings, %d turns, %.1fs",
+                                                company,
+                                                _analyst_result.get("tool_calls", 0),
+                                                _analyst_result.get("findings_stored", 0),
+                                                _analyst_result.get("turns", 0),
+                                                _analyst_result.get("elapsed_seconds", 0),
+                                            )
+                                        elif _analyst_result and _analyst_result.get("error"):
+                                            logger.debug(
+                                                "[ordinal_sync] Analyst skipped for %s: %s",
+                                                company, _analyst_result["error"],
+                                            )
                                 except Exception:
-                                    logger.debug("Feedback distillation skipped for %s", company, exc_info=True)
-
-                                # 2o2. Directive efficacy attribution: retrospectively classify
-                                #      each learned directive as validated / neutral /
-                                #      counterproductive / untested based on engagement outcomes
-                                #      of posts generated while the directive was active.
-                                #      Counterproductive directives get stripped from Stelle's
-                                #      system prompt on the next generation.
-                                try:
-                                    from backend.src.utils.feedback_distiller import compute_directive_efficacy
-                                    _eff = compute_directive_efficacy(company)
-                                    if _eff and _eff.get("attributable_observations", 0) > 0:
-                                        cc = _eff.get("classifications", {})
-                                        logger.info(
-                                            "[ordinal_sync] Directive efficacy for %s: "
-                                            "%d validated, %d counterproductive, %d neutral "
-                                            "(n=%d attributable)",
-                                            company,
-                                            cc.get("validated", 0),
-                                            cc.get("counterproductive", 0),
-                                            cc.get("neutral", 0),
-                                            _eff.get("attributable_observations", 0),
-                                        )
-                                except Exception:
-                                    logger.debug("Directive efficacy skipped for %s", company, exc_info=True)
-
-                                # 2p. Strategy brief (A4): final, data-driven weekly brief for
-                                #     the human operator. Pulls everything together — performance
-                                #     summary, topic recommendations, format sequence, transcript
-                                #     segments, ABM targets, causal drivers, cross-client insights.
-                                #     Not used by Stelle; consumed by the human.
-                                try:
-                                    from backend.src.utils.strategy_brief import generate_strategy_brief
-                                    _brief = generate_strategy_brief(company)
-                                    if _brief:
-                                        logger.info(
-                                            "[ordinal_sync] Strategy brief generated for %s (%d chars)",
-                                            company, len(_brief),
-                                        )
-                                except Exception:
-                                    logger.debug("Strategy brief skipped for %s", company, exc_info=True)
+                                    logger.debug("Analyst skipped for %s", company, exc_info=True)
 
                                 # 3. ICP auto-generation — create definition if missing.
                                 try:
@@ -456,35 +401,6 @@ def sync_all_companies() -> None:
             )
     except Exception:
         logger.debug("Cross-client structural patterns skipped", exc_info=True)
-
-    # 9a2. Strategy brief impact tracker: measure whether posts generated
-    #      with strategy brief context outperform posts generated without.
-    #      Observation-only — does not change agent behavior. Activates once
-    #      both arms reach 20+ observations.
-    try:
-        from backend.src.utils.strategy_tracker import compute_strategy_brief_impact
-        _impact = compute_strategy_brief_impact()
-        if _impact:
-            if _impact.get("sufficient_data"):
-                logger.info(
-                    "[ordinal_sync] Strategy brief impact: "
-                    "informed n=%d mean=%.3f vs uninformed n=%d mean=%.3f "
-                    "(d=%s)",
-                    _impact["informed"]["count"],
-                    _impact["informed"]["mean_reward"],
-                    _impact["uninformed"]["count"],
-                    _impact["uninformed"]["mean_reward"],
-                    _impact.get("cohens_d"),
-                )
-            else:
-                logger.debug(
-                    "[ordinal_sync] Strategy brief impact: insufficient data "
-                    "(informed=%d, uninformed=%d)",
-                    _impact["informed"]["count"],
-                    _impact["uninformed"]["count"],
-                )
-    except Exception:
-        logger.debug("Strategy brief impact skipped", exc_info=True)
 
     # 9b. Feedback learning happens through RuanMei observations
     # (draft → final → engagement). No separate feedback file processing needed.

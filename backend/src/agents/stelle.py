@@ -4147,17 +4147,41 @@ def generate_one_shot(
     except Exception as _e:
         logger.debug("[Stelle] Scheduling context skipped: %s", _e)
 
-    # Strategy brief: compact topic/format recommendations + causal caveats.
-    # This is the only pipeline component that accounts for sequence (topic
-    # transitions, format repetition decay). The full brief is for the human;
-    # this injects a condensed version into Stelle's user message so the
-    # learned strategy signal actually reaches generation.
-    strategy_brief_context = ""
+    # Analyst findings: hypothesis-driven engagement analysis from the analyst
+    # agent. Replaces the old fixed strategy brief with findings the agent
+    # discovered by forming and testing its own hypotheses using statistical
+    # tools + LinkedIn-wide data. Injected as raw data with caveats — the
+    # LLM reads the findings and decides how to apply them.
+    analyst_context = ""
     try:
-        from backend.src.utils.strategy_brief import build_stelle_strategy_context
-        strategy_brief_context = build_stelle_strategy_context(company_keyword)
+        import json as _json_analyst_ctx
+        _findings_path = P.memory_dir(company_keyword) / "analyst_findings.json"
+        if _findings_path.exists():
+            _af = _json_analyst_ctx.loads(_findings_path.read_text(encoding="utf-8"))
+            _findings = _af.get("findings", [])
+            if _findings:
+                _lines = [
+                    "",
+                    "",
+                    "ENGAGEMENT ANALYSIS (from hypothesis-driven analyst agent):",
+                    "The following findings were discovered by testing statistical hypotheses "
+                    "against this client's engagement history and 200K+ LinkedIn posts. "
+                    "They are data-driven observations, not directives. Use them to inform "
+                    "topic selection and content approach when multiple valid angles exist. "
+                    "Respect the confidence levels — 'suggestive' means directional, not proven.",
+                    "",
+                ]
+                for _f in _findings:
+                    _conf = _f.get("confidence", "suggestive")
+                    _claim = _f.get("claim", "")
+                    _evidence = _f.get("evidence", "")
+                    _lines.append(f"[{_conf.upper()}] {_claim}")
+                    if _evidence:
+                        _lines.append(f"  Evidence: {_evidence[:200]}")
+                    _lines.append("")
+                analyst_context = "\n".join(_lines)
     except Exception as _e:
-        logger.debug("[Stelle] Strategy brief context skipped: %s", _e)
+        logger.debug("[Stelle] Analyst context skipped: %s", _e)
 
     # 360Brew alignment scorer: pre-generation semantic consistency check.
     alignment_context = ""
@@ -4203,8 +4227,8 @@ def generate_one_shot(
         user_prompt += market_context
     if hook_library_context:
         user_prompt += hook_library_context
-    if strategy_brief_context:
-        user_prompt += strategy_brief_context
+    if analyst_context:
+        user_prompt += analyst_context
 
     if _PI_AVAILABLE:
         print(f"[Stelle] Using Pi agent (context compaction enabled)...")

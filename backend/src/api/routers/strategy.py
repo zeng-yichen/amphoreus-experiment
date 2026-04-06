@@ -32,133 +32,95 @@ class StrategyRequest(BaseModel):
 # than treating those words as company slugs.
 
 
-@router.get("/brief/{company}")
-async def get_strategy_brief(company: str):
-    """Return the auto-generated strategy brief markdown for a client.
+@router.get("/findings/{company}")
+async def get_analyst_findings(company: str):
+    """Return the analyst agent's findings for a client.
 
-    404 if the brief doesn't exist or is stale (> 7 days old). The staleness
-    check keeps the frontend from displaying data that no longer reflects
-    current engagement patterns. Clients should call /refresh to regenerate.
+    The analyst runs hypothesis-driven engagement analysis using statistical
+    tools + LinkedIn-wide data. Its findings replace the old fixed pipeline's
+    strategy brief, topic transitions, and causal dimensions with a single
+    adaptive, open-ended analysis.
+
+    404 if no findings exist or the latest run is stale (> 7 days).
     """
     from backend.src.db import vortex
-    brief_path = vortex.memory_dir(company) / "strategy_brief.md"
-    if not brief_path.exists():
+    path = vortex.memory_dir(company) / "analyst_findings.json"
+    if not path.exists():
         raise HTTPException(
             status_code=404,
             detail=(
-                f"No strategy brief exists for {company}. Trigger an ordinal "
-                "sync or call /api/strategy/brief/{company}/refresh to generate one."
+                f"No analyst findings for {company}. Needs at least 10 "
+                "scored observations. Run ordinal sync to trigger the analyst."
             ),
         )
 
-    mtime = datetime.fromtimestamp(brief_path.stat().st_mtime, tz=timezone.utc)
-    age_days = (datetime.now(timezone.utc) - mtime).total_seconds() / 86400
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read findings: {e}")
+
+    runs = data.get("runs", [])
+    last_run = runs[-1] if runs else {}
+    last_ts = last_run.get("timestamp", "")
+    age_days = 0.0
+    if last_ts:
+        try:
+            dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+            age_days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400
+        except Exception:
+            pass
+
     if age_days > _BRIEF_STALENESS_DAYS:
         raise HTTPException(
             status_code=404,
             detail=(
-                f"Strategy brief for {company} is {age_days:.1f} days old "
-                f"(threshold: {_BRIEF_STALENESS_DAYS} days). Call "
-                "/api/strategy/brief/{company}/refresh to regenerate."
+                f"Analyst findings for {company} are {age_days:.1f} days old "
+                f"(threshold: {_BRIEF_STALENESS_DAYS} days). Run ordinal sync "
+                "to trigger a fresh analysis."
             ),
         )
 
-    try:
-        brief_md = brief_path.read_text(encoding="utf-8")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read brief: {e}")
-
     return {
         "company": company,
-        "brief": brief_md,
-        "generated_at": mtime.isoformat(),
+        "findings": data.get("findings", []),
+        "last_run": last_run,
         "age_days": round(age_days, 2),
+        "total_runs": len(runs),
     }
 
 
-@router.get("/brief/{company}/refresh")
-async def refresh_strategy_brief(company: str):
-    """Force a fresh strategy brief generation and return the result.
+@router.get("/findings/{company}/refresh")
+async def refresh_analyst_findings(company: str):
+    """Run a fresh analyst analysis for a client and return the findings.
 
-    Calls ``generate_strategy_brief(company, force=True)`` synchronously.
-    For clients with sparse data this may return 404 if the brief generator
-    has insufficient signal to produce anything useful.
+    Runs the full analyst agent synchronously (typically 2-4 minutes,
+    ~$2-3 in LLM cost). Use sparingly — the analyst is designed to run
+    weekly, not on-demand for every request.
     """
     try:
-        from backend.src.utils.strategy_brief import generate_strategy_brief
-        brief_md = generate_strategy_brief(company, force=True)
+        from backend.src.agents.analyst import run_analysis
+        result = run_analysis(company)
     except Exception as e:
-        logger.exception("[strategy] Refresh failed for %s", company)
-        raise HTTPException(status_code=500, detail=f"Brief generation failed: {e}")
+        logger.exception("[strategy] Analyst refresh failed for %s", company)
+        raise HTTPException(status_code=500, detail=f"Analyst failed: {e}")
 
-    if not brief_md:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"{company} has insufficient data to generate a meaningful "
-                "strategy brief (needs scored observations with tags and a "
-                "transition model). Run ordinal sync first."
-            ),
-        )
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
 
     from backend.src.db import vortex
-    brief_path = vortex.memory_dir(company) / "strategy_brief.md"
-    mtime = datetime.fromtimestamp(brief_path.stat().st_mtime, tz=timezone.utc) \
-        if brief_path.exists() else datetime.now(timezone.utc)
+    path = vortex.memory_dir(company) / "analyst_findings.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {"findings": [], "runs": []}
 
     return {
         "company": company,
-        "brief": brief_md,
-        "generated_at": mtime.isoformat(),
+        "findings": data.get("findings", []),
+        "last_run": result,
         "age_days": 0.0,
+        "total_runs": len(data.get("runs", [])),
     }
-
-
-@router.get("/topics/{company}")
-async def get_topic_transitions(company: str):
-    """Return the raw topic_transitions.json for a client.
-
-    Used by the frontend to render topic transition visualizations
-    (Markov graphs, sequence timelines, etc.).
-    """
-    from backend.src.db import vortex
-    path = vortex.memory_dir(company) / "topic_transitions.json"
-    if not path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"No topic transition model for {company}. Needs at least 15 "
-                "tagged scored observations. Run ordinal sync first."
-            ),
-        )
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read transitions: {e}")
-
-
-@router.get("/causal/{company}")
-async def get_causal_dimensions(company: str):
-    """Return the raw causal_dimensions.json for a client.
-
-    The partial-correlation analysis that classifies content state dimensions
-    as causal / confounded / uncertain / inert. Used by the frontend to show
-    which features genuinely predict engagement for a client.
-    """
-    from backend.src.db import vortex
-    path = vortex.memory_dir(company) / "causal_dimensions.json"
-    if not path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"No causal filter output for {company}. Needs at least 30 "
-                "tagged scored observations. Run ordinal sync first."
-            ),
-        )
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read causal data: {e}")
 
 
 # ---------------------------------------------------------------------------
