@@ -3953,16 +3953,20 @@ def _process_result(
             except Exception:
                 pass
 
-            # Strategy brief tracking — stamp the brief version active at
-            # generation time. The strategy brief is injected into the user
-            # prompt via build_stelle_strategy_context (the compact builder);
-            # if a brief exists, it was seen by the LLM. strategy_tracker uses
-            # this field to compare data-informed vs uninformed post performance.
+            # Analyst findings tracking — stamp whether analyst findings were
+            # available and injected into the user prompt at generation time.
+            # Used for future impact measurement: compare engagement of posts
+            # generated with analyst context vs without.
             try:
-                from backend.src.utils.strategy_brief import get_brief_version
-                _brief_version = get_brief_version(company_keyword)
-                if _brief_version:
-                    _extra_fields["strategy_brief_version"] = _brief_version
+                import json as _json_af_track
+                _af_path = P.memory_dir(company_keyword) / "analyst_findings.json"
+                if _af_path.exists():
+                    _af_data = _json_af_track.loads(_af_path.read_text(encoding="utf-8"))
+                    _af_runs = _af_data.get("runs", [])
+                    _af_findings = _af_data.get("findings", [])
+                    if _af_findings and _af_runs:
+                        _extra_fields["analyst_findings_version"] = _af_runs[-1].get("timestamp", "")
+                        _extra_fields["analyst_findings_count"] = len(_af_findings)
             except Exception:
                 pass
 

@@ -253,6 +253,25 @@ def sync_all_companies() -> None:
                                 except Exception:
                                     logger.debug("Client profile build skipped for %s", company, exc_info=True)
 
+                                # 2k2. Feedback distiller: extract writing directives from
+                                #      editorial feedback, accepted posts, and engagement
+                                #      patterns. Kept because the analyst produces analytical
+                                #      findings, not prescriptive writing rules. The distiller
+                                #      converts "client always adds ClinOps terms" into a rule
+                                #      Stelle must follow. The analyst says "customer voice
+                                #      hooks outperform" — descriptive, not directive. Both
+                                #      are needed.
+                                try:
+                                    from backend.src.utils.feedback_distiller import distill_directives
+                                    _directives = distill_directives(company)
+                                    if _directives:
+                                        logger.info(
+                                            "[ordinal_sync] Distilled %d writing directives for %s",
+                                            len(_directives), company,
+                                        )
+                                except Exception:
+                                    logger.debug("Feedback distillation skipped for %s", company, exc_info=True)
+
                                 # 2l. Analyst agent: hypothesis-driven engagement analysis.
                                 #     Replaces the fixed analysis pipeline (steps 2k-2p in the
                                 #     old architecture: topic transitions, causal filter,

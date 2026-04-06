@@ -1149,23 +1149,43 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
         "store_finding."
     )
 
-    # Also load the fixed pipeline's findings so the agent can compare
-    pipeline_context = ""
-    causal_path = vortex.memory_dir(company) / "causal_dimensions.json"
-    if causal_path.exists():
-        try:
-            causal = json.loads(causal_path.read_text(encoding="utf-8"))
-            pipeline_context += "\n\nFIXED PIPELINE OUTPUTS (for comparison):\n"
-            pipeline_context += f"Causal filter (n={causal.get('observation_count', '?')}): "
-            for d in causal.get("dimensions", []):
-                pipeline_context += (
-                    f"{d['dimension']}: marginal={d['marginal_correlation']:+.3f}, "
-                    f"partial={d['partial_correlation']:+.3f} → {d['classification']}\n"
-                )
-        except Exception:
-            pass
-    if pipeline_context:
-        user_message += pipeline_context
+    # Prior analyst findings (from the last run) are loaded so the agent can
+    # see what it found previously and test whether those findings still hold
+    # with any new data. This is the stability mechanism: findings that appear
+    # across multiple runs gain confidence; findings that contradict prior runs
+    # should be flagged.
+    prior_context = ""
+    try:
+        _prior_af = json.loads(findings_path.read_text(encoding="utf-8")) if findings_path.exists() else {}
+        _prior_runs = _prior_af.get("runs", [])
+        if len(_prior_runs) >= 2:
+            # Show the last run's finding count for context
+            _last = _prior_runs[-1]
+            prior_context = (
+                f"\n\nPRIOR ANALYSIS: The last analyst run ({_last.get('timestamp', '?')[:10]}) "
+                f"produced {_last.get('findings_stored', '?')} findings using "
+                f"{_last.get('tool_calls', '?')} tool calls. This is a fresh run — "
+                f"validate or update those findings with current data."
+            )
+    except Exception:
+        pass
+    if prior_context:
+        user_message += prior_context
+
+    # Clear prior findings before starting a new run. Each run produces a
+    # complete, self-contained set of findings that replaces the previous run's
+    # output. Without this, findings accumulate week over week and the prompt
+    # gets injected with stale/contradictory observations from months ago.
+    findings_path = vortex.memory_dir(company) / "analyst_findings.json"
+    findings_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _prior = json.loads(findings_path.read_text(encoding="utf-8")) if findings_path.exists() else {}
+    except Exception:
+        _prior = {}
+    _prior["findings"] = []  # clear findings; runs history preserved
+    _tmp = findings_path.with_suffix(".tmp")
+    _tmp.write_text(json.dumps(_prior, indent=2, ensure_ascii=False), encoding="utf-8")
+    _tmp.rename(findings_path)
 
     # Run the agentic loop
     client = anthropic.Anthropic()
@@ -1225,7 +1245,14 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
 
     elapsed = time.time() - start_time
 
-    # Record the run metadata in the findings file
+    # Record the run metadata and finalize findings.
+    #
+    # IMPORTANT: each run REPLACES the findings array, it does not APPEND to
+    # prior runs' findings. Without this, findings accumulate week over week
+    # and Stelle's prompt gets injected with 40+ findings after a month, many
+    # stale or contradictory. The runs history (metadata only, no findings
+    # text) is kept for audit. If stability comparison is needed, the caller
+    # should snapshot findings before clearing.
     findings_path = vortex.memory_dir(company) / "analyst_findings.json"
     try:
         data = json.loads(findings_path.read_text(encoding="utf-8")) if findings_path.exists() else {"findings": [], "runs": []}
@@ -1244,6 +1271,11 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
         "observation_count": len(scored),
     }
     data["runs"].append(run_meta)
+
+    # Cap runs history at 20 entries to prevent unbounded growth.
+    if len(data["runs"]) > 20:
+        data["runs"] = data["runs"][-20:]
+
     tmp = findings_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.rename(findings_path)

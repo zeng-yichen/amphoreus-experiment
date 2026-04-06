@@ -135,14 +135,13 @@ class Observation:
     # by compute_directive_efficacy() to retrospectively classify directives
     # as validated / neutral / counterproductive based on engagement outcomes.
     active_directives: list = field(default_factory=list)
-    # Strategy brief tracking — stamped at generation time if a brief existed
-    # for the client. The brief is injected into Stelle's user prompt via
-    # build_stelle_strategy_context; if the field is set, the compact strategy
-    # context was seen by the LLM at generation time. Used by
-    # strategy_tracker.compute_strategy_brief_impact() to compare data-informed
-    # vs uninformed post performance. Null for posts generated before any
-    # brief existed or for posts ingested from Ordinal analytics.
-    strategy_brief_version: Optional[str] = None
+    # Analyst findings tracking — stamped at generation time if analyst
+    # findings were available and injected into Stelle's user prompt. Used
+    # for impact measurement: compare engagement of analyst-informed posts
+    # vs uninformed posts. Null for posts generated before the analyst ran
+    # or for posts ingested from Ordinal analytics.
+    analyst_findings_version: Optional[str] = None
+    analyst_findings_count: int = 0
 
 
 # ------------------------------------------------------------------
