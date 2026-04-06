@@ -70,10 +70,17 @@ can't reach LOO R² > 0.3, come back with:
 
 ## Tools
 
-You have 11 tools spanning client data (n=30-50), cross-client data \
+You have 13 tools spanning client data (n=30-50), cross-client data \
 (22+ clients), and LinkedIn-wide data (200K+ posts). Use whatever you \
 need. Call tools in whatever order makes sense. There is no predetermined \
 analysis sequence.
+
+Two of the tools operate on continuous post embeddings instead of \
+categorical labels: `find_similar_posts` (embedding similarity search) \
+and `fit_embedding_regression` (ridge regression from post embeddings to \
+rewards). These capture format, topic, hook style, and writing quality \
+in a single 1536-dim vector — no category taxonomy needed. Try these \
+alongside the categorical tools and compare which captures more signal.
 
 You'll see how many turns you have left in each tool result. Budget your \
 time — if you have 10 turns left, stop exploring and validate your best \
@@ -363,6 +370,59 @@ _TOOLS = [
         },
     },
     {
+        "name": "find_similar_posts",
+        "description": (
+            "Find the most similar scored observations to a given post or text "
+            "using embedding cosine similarity. Operates in continuous vector "
+            "space — no category labels needed. Use this instead of "
+            "compute_effect_size when you want to ask 'do posts LIKE this one "
+            "outperform posts unlike it?' without predefined categories. "
+            "Returns the top-k most similar posts with their rewards, tags, "
+            "and similarity scores."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reference_text": {
+                    "type": "string",
+                    "description": "Text to find similar posts to (e.g., a post opening, a draft excerpt, or a description of a style).",
+                },
+                "reference_post_hash": {
+                    "type": "string",
+                    "description": "Alternatively, a post_hash from the client's observations. If provided, reference_text is ignored.",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of similar posts to return (default 5).",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "fit_embedding_regression",
+        "description": (
+            "Fit a ridge regression predicting engagement directly from post "
+            "body embeddings (1536-dim vectors). This bypasses ALL categorical "
+            "features (format_tag, topic_tag) — the embedding captures "
+            "format, topic, hook style, writing quality, everything, in a "
+            "single continuous vector. No taxonomy needed. "
+            "Returns LOO R², in-sample R², and predicted vs actual for each "
+            "post. Compare LOO R² against your categorical regression to see "
+            "if embeddings capture more signal."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ridge_alpha": {
+                    "type": "number",
+                    "description": "Ridge regularization strength. At 1536 dims and n~34, use 50-200. Higher = more regularization. Default 100.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "search_linkedin_posts",
         "description": (
             "Search a database of 200K+ real LinkedIn posts by keyword. Returns "
@@ -474,6 +534,10 @@ def _dispatch_tool(tool_name: str, tool_input: dict, company: str,
             return _tool_build_transition_matrix(tool_input, observations)
         elif tool_name == "embed_and_compare":
             return _tool_embed_and_compare(tool_input)
+        elif tool_name == "find_similar_posts":
+            return _tool_find_similar_posts(tool_input, company, observations)
+        elif tool_name == "fit_embedding_regression":
+            return _tool_fit_embedding_regression(tool_input, company, observations)
         elif tool_name == "store_finding":
             return _tool_store_finding(tool_input, company, run_id=run_id)
         elif tool_name == "search_linkedin_posts":
@@ -838,6 +902,185 @@ def _tool_store_finding(tool_input: dict, company: str, run_id: str = "") -> str
     label = "model" if entry_type == "model" else f"finding #{sum(1 for f in existing['findings'] if f.get('type') != 'model')}"
     return json.dumps({"status": "stored", "type": entry_type, "label": label,
                         "total_entries": len(existing["findings"])})
+
+
+# ------------------------------------------------------------------
+# Embedding-based tools (continuous, no category labels needed)
+# ------------------------------------------------------------------
+
+def _tool_find_similar_posts(tool_input: dict, company: str, observations: list[dict]) -> str:
+    """Find similar posts by embedding cosine similarity."""
+    from backend.src.utils.post_embeddings import get_post_embeddings, embed_text, find_similar
+
+    embeddings = get_post_embeddings(company)
+    if not embeddings:
+        return json.dumps({"error": "No post embeddings available. Need scored observations."})
+
+    top_k = tool_input.get("top_k", 5)
+    ref_hash = tool_input.get("reference_post_hash", "")
+    ref_text = tool_input.get("reference_text", "")
+
+    # Get the reference embedding
+    if ref_hash and ref_hash in embeddings:
+        ref_emb = embeddings[ref_hash]
+        exclude = {ref_hash}
+    elif ref_text:
+        ref_emb = embed_text(ref_text)
+        if ref_emb is None:
+            return json.dumps({"error": "Failed to embed reference text"})
+        exclude = set()
+    else:
+        return json.dumps({"error": "Provide either reference_text or reference_post_hash"})
+
+    # Find similar
+    similar = find_similar(ref_emb, embeddings, top_k=top_k, exclude_hashes=exclude)
+
+    # Enrich with observation data
+    obs_by_hash = {o.get("post_hash"): o for o in observations}
+    results = []
+    for h, sim in similar:
+        obs = obs_by_hash.get(h, {})
+        body = (obs.get("posted_body") or obs.get("post_body") or "")
+        results.append({
+            "post_hash": h,
+            "similarity": round(sim, 4),
+            "reward": obs.get("reward", {}).get("immediate"),
+            "topic_tag": obs.get("topic_tag"),
+            "format_tag": obs.get("format_tag"),
+            "opening": body[:200],
+        })
+
+    # Compute: do similar posts have similar rewards? (embedding coherence signal)
+    rewards = [r["reward"] for r in results if r["reward"] is not None]
+    import math
+    if len(rewards) >= 2:
+        mean_r = sum(rewards) / len(rewards)
+        std_r = math.sqrt(sum((r - mean_r) ** 2 for r in rewards) / max(len(rewards) - 1, 1))
+        reward_coherence = f"mean={mean_r:+.3f}, std={std_r:.3f}"
+    else:
+        reward_coherence = "insufficient data"
+
+    return json.dumps({
+        "similar_posts": results,
+        "neighbor_reward_stats": reward_coherence,
+        "embeddings_available": len(embeddings),
+    }, indent=2)
+
+
+def _tool_fit_embedding_regression(tool_input: dict, company: str, observations: list[dict]) -> str:
+    """Fit ridge regression from post embeddings directly to rewards.
+
+    Bypasses ALL categorical features. The 1536-dim embedding captures
+    format, topic, hook style, writing quality — everything — in a single
+    continuous vector.
+    """
+    import numpy as np
+    from backend.src.utils.post_embeddings import get_post_embeddings
+
+    alpha = tool_input.get("ridge_alpha", 100.0)
+
+    embeddings = get_post_embeddings(company)
+    if not embeddings:
+        return json.dumps({"error": "No post embeddings available"})
+
+    # Build X, y from observations that have embeddings
+    X_list = []
+    y_list = []
+    hashes = []
+    for obs in observations:
+        h = obs.get("post_hash", "")
+        r = obs.get("reward", {}).get("immediate")
+        if h and r is not None and h in embeddings:
+            X_list.append(embeddings[h])
+            y_list.append(r)
+            hashes.append(h)
+
+    if len(y_list) < 5:
+        return json.dumps({"error": f"Insufficient data: {len(y_list)} embedded observations (need ≥5)"})
+
+    X = np.array(X_list, dtype=np.float32)
+    y = np.array(y_list, dtype=np.float32)
+    n, d = X.shape
+
+    # Center
+    x_mean = X.mean(axis=0)
+    y_mean = float(y.mean())
+    X_c = X - x_mean
+    y_c = y - y_mean
+
+    # Ridge fit
+    try:
+        XtX = X_c.T @ X_c + alpha * np.eye(d, dtype=np.float32)
+        Xty = X_c.T @ y_c
+        w = np.linalg.solve(XtX, Xty)
+        b = y_mean - float(w @ x_mean)
+    except Exception:
+        return json.dumps({"error": "Ridge solve failed (singular matrix)"})
+
+    # In-sample predictions
+    preds = X @ w + b
+    ss_tot = float(np.sum((y - y_mean) ** 2))
+    ss_res = float(np.sum((y - preds) ** 2))
+    r2_train = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    # LOO R²
+    loo_ss_res = 0.0
+    for i in range(n):
+        X_loo = np.delete(X_c, i, axis=0)
+        y_loo = np.delete(y_c, i, axis=0)
+        try:
+            XtX_loo = X_loo.T @ X_loo + alpha * np.eye(d, dtype=np.float32)
+            Xty_loo = X_loo.T @ y_loo
+            w_loo = np.linalg.solve(XtX_loo, Xty_loo)
+            pred_i = float(X_c[i] @ w_loo) + y_mean
+            loo_ss_res += (y_list[i] - pred_i) ** 2
+        except Exception:
+            loo_ss_res += (y_list[i] - y_mean) ** 2
+    loo_r2 = 1.0 - loo_ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    # Spearman on LOO predictions
+    from backend.src.utils.correlation_analyzer import _spearman_correlation
+    loo_preds = []
+    for i in range(n):
+        X_loo = np.delete(X_c, i, axis=0)
+        y_loo = np.delete(y_c, i, axis=0)
+        try:
+            XtX_loo = X_loo.T @ X_loo + alpha * np.eye(d, dtype=np.float32)
+            Xty_loo = X_loo.T @ y_loo
+            w_loo = np.linalg.solve(XtX_loo, Xty_loo)
+            loo_preds.append(float(X_c[i] @ w_loo) + y_mean)
+        except Exception:
+            loo_preds.append(y_mean)
+    spearman = _spearman_correlation(loo_preds, y_list)
+
+    # Predicted vs actual ranking (top 5 and bottom 5)
+    pred_actual = sorted(
+        zip(hashes, [float(p) for p in preds], y_list),
+        key=lambda x: x[1], reverse=True,
+    )
+    obs_by_hash = {o.get("post_hash"): o for o in observations}
+    ranking = []
+    for h, pred, actual in pred_actual:
+        obs = obs_by_hash.get(h, {})
+        ranking.append({
+            "post_hash": h[:8],
+            "predicted": round(pred, 3),
+            "actual": round(actual, 3),
+            "format_tag": obs.get("format_tag", "?"),
+            "opening": (obs.get("posted_body") or obs.get("post_body") or "")[:100],
+        })
+
+    return json.dumps({
+        "approach": "embedding_ridge_regression",
+        "embedding_dim": d,
+        "n": n,
+        "ridge_alpha": alpha,
+        "r_squared_train": round(r2_train, 4),
+        "r_squared_loo": round(loo_r2, 4),
+        "spearman_loo": round(spearman, 4),
+        "top_5_predicted": ranking[:5],
+        "bottom_5_predicted": ranking[-5:],
+    }, indent=2)
 
 
 # ------------------------------------------------------------------

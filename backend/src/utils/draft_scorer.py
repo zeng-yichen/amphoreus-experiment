@@ -142,30 +142,111 @@ def _compute_training_stats(company: str) -> dict:
     }
 
 
+def _score_by_embedding_knn(
+    company: str,
+    text: str,
+    k: int = 5,
+) -> tuple[Optional[float], str]:
+    """Score a draft by k-NN similarity to the client's scored observations.
+
+    Embeds the draft, finds the k most similar scored posts by cosine
+    similarity, and returns a similarity-weighted average of their rewards.
+
+    This is the embedding-based scoring path — no format_tag, no topic_tag,
+    no categorical features. The embedding captures everything about the
+    post in a continuous vector. Works alongside the coefficient-based path.
+
+    Returns (predicted_score, explanation) or (None, explanation) on failure.
+    """
+    from backend.src.utils.post_embeddings import (
+        get_post_embeddings, embed_text, find_similar, cosine_similarity,
+    )
+
+    embeddings = get_post_embeddings(company)
+    if not embeddings:
+        return None, "No post embeddings available"
+
+    draft_emb = embed_text(text)
+    if draft_emb is None:
+        return None, "Failed to embed draft"
+
+    similar = find_similar(draft_emb, embeddings, top_k=k)
+    if not similar:
+        return None, "No similar posts found"
+
+    # Load observations to get rewards for the similar posts
+    try:
+        from backend.src.db.local import initialize_db, ruan_mei_load
+        initialize_db()
+        state = ruan_mei_load(company)
+    except Exception:
+        return None, "Failed to load observations"
+    if state is None:
+        return None, "No observation state"
+
+    obs_by_hash = {
+        o.get("post_hash"): o
+        for o in state.get("observations", [])
+        if o.get("status") == "scored"
+    }
+
+    # Similarity-weighted reward average
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    neighbor_details = []
+    for h, sim in similar:
+        obs = obs_by_hash.get(h)
+        if not obs:
+            continue
+        reward = obs.get("reward", {}).get("immediate")
+        if reward is None:
+            continue
+        weighted_sum += sim * reward
+        weight_sum += sim
+        body = (obs.get("posted_body") or obs.get("post_body") or "")
+        neighbor_details.append(
+            f"sim={sim:.2f}/reward={reward:+.2f} "
+            f"({obs.get('format_tag', '?')}) \"{body[:60].strip()}...\""
+        )
+
+    if weight_sum < 1e-6:
+        return None, "No similar posts with rewards"
+
+    pred = weighted_sum / weight_sum
+    explanation = (
+        f"k-NN score {pred:+.3f} from {len(neighbor_details)} neighbors: "
+        + "; ".join(neighbor_details[:3])
+    )
+
+    return pred, explanation
+
+
 def score_drafts(
     company: str,
     drafts: list[dict],
     default_hour: int = 9,
 ) -> list[ScoredDraft]:
-    """Score and rank a batch of draft posts using the analyst's model.
+    """Score and rank a batch of draft posts using BOTH scoring paths.
 
-    Applies the analyst's regression coefficients directly to each draft's
-    features, normalized using the client's actual observation statistics.
-    No hardcoded bands, no assumed distributions. The coefficients and the
-    normalization are both from real data.
+    Two independent predictions per draft:
 
-    Each draft dict should have:
-      - "text": the full post text (required)
-      - "scheduled_hour": posting hour in UTC (optional, defaults to default_hour)
+    1. **Coefficient-based** (from the analyst's regression model):
+       Applies learned coefficients to format_tag, char_count, posting_hour.
+       Uses the client's actual observation statistics for normalization.
+
+    2. **Embedding-based** (k-NN in continuous vector space):
+       Embeds the draft, finds the k most similar scored posts by cosine
+       similarity, returns their similarity-weighted reward average.
+       No category labels needed — operates in continuous space.
+
+    The final score is the average of both paths (when both are available).
+    If only one path produces a score, that score is used alone. The
+    explanation shows both scores so the operator sees agreement/disagreement.
     """
     if not drafts:
         return []
 
     model_spec, model_source = _load_model(company)
-
-    # Compute normalization stats from the client's real observations.
-    # This is how the regression was trained — target encoding for format_tag,
-    # z-normalization for numeric features. We replicate the same transform.
     training_stats = _compute_training_stats(company) if model_source == "analyst_model" else {}
 
     scored: list[ScoredDraft] = []
@@ -182,18 +263,49 @@ def score_drafts(
 
         hour = draft.get("scheduled_hour", default_hour)
         features = _extract_features(text, hour)
-        pred_score, explanation = _apply_model(
+
+        # Path 1: coefficient-based
+        coeff_score, coeff_explanation = _apply_model(
             features, model_spec, model_source,
             training_stats=training_stats,
         )
 
+        # Path 2: embedding k-NN
+        knn_score, knn_explanation = _score_by_embedding_knn(company, text)
+
+        # Combine: average both paths when available
+        if model_source != "no_model" and knn_score is not None:
+            combined = (coeff_score + knn_score) / 2
+            source = "analyst_model+embedding_knn"
+            explanation = (
+                f"Combined {combined:+.3f} = "
+                f"coeff {coeff_score:+.3f} + knn {knn_score:+.3f} / 2\n"
+                f"  Coeff: {coeff_explanation}\n"
+                f"  k-NN: {knn_explanation}"
+            )
+        elif model_source != "no_model":
+            combined = coeff_score
+            source = "analyst_model"
+            explanation = coeff_explanation
+        elif knn_score is not None:
+            combined = knn_score
+            source = "embedding_knn"
+            explanation = knn_explanation
+        else:
+            combined = 0.0
+            source = "no_model"
+            explanation = "No scoring model available."
+
+        features["knn_score"] = knn_score
+        features["coeff_score"] = coeff_score if model_source != "no_model" else None
+
         scored.append(ScoredDraft(
             rank=0,
             text=text,
-            predicted_score=round(pred_score, 4),
+            predicted_score=round(combined, 4),
             features=features,
             explanation=explanation,
-            model_source=model_source,
+            model_source=source,
         ))
 
     scored.sort(key=lambda s: s.predicted_score, reverse=True)
