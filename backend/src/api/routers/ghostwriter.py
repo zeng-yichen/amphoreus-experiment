@@ -35,6 +35,12 @@ class FeedbackRequest(BaseModel):
     revised: str
 
 
+class ClientFeedbackRequest(BaseModel):
+    company: str
+    text: str
+    post_id: str | None = None
+
+
 @router.post("/generate")
 async def generate(req: GenerateRequest):
     """Start a ghostwriter generation job."""
@@ -111,10 +117,74 @@ async def provision_workspace(req: GenerateRequest):
 
 @router.post("/feedback")
 async def submit_feedback(req: FeedbackRequest):
-    """Submit edit feedback — stored in workspace feedback/edits/."""
+    """Submit edit feedback (before/after pair) — stored in workspace feedback/edits/."""
     from backend.src.services.workspace_manager import save_feedback
     save_feedback(req.company, req.original, req.revised)
     return {"status": "saved"}
+
+
+@router.post("/client-feedback")
+async def submit_client_feedback(req: ClientFeedbackRequest):
+    """Submit raw client feedback (Slack messages, email notes, verbal instructions).
+
+    Stored in memory/{company}/feedback/ as a timestamped file. The feedback
+    distiller reads these and converts them into learned writing rules that
+    get injected into Stelle's system prompt.
+    """
+    import time as _t
+    from backend.src.db import vortex
+    feedback_dir = vortex.feedback_dir(req.company)
+    feedback_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = _t.strftime("%Y%m%d_%H%M%S")
+    prefix = f"post_{req.post_id[:8]}_" if req.post_id else ""
+    filename = f"{prefix}client_{timestamp}.txt"
+    filepath = feedback_dir / filename
+    filepath.write_text(req.text, encoding="utf-8")
+
+    return {"status": "saved", "file": filename}
+
+
+@router.get("/feedback/{company}")
+async def list_feedback(company: str):
+    """List all feedback files and learned directives for a client."""
+    import json
+    from backend.src.db import vortex
+
+    # Raw feedback files
+    feedback_dir = vortex.feedback_dir(company)
+    feedback_files = []
+    if feedback_dir.exists():
+        for f in sorted(feedback_dir.rglob("*"), key=lambda p: p.stat().st_mtime, reverse=True):
+            if f.is_file() and f.suffix in (".txt", ".md"):
+                try:
+                    text = f.read_text(encoding="utf-8", errors="replace")
+                    feedback_files.append({
+                        "name": f.name,
+                        "path": str(f.relative_to(feedback_dir)),
+                        "preview": text[:300],
+                        "full_text": text,
+                        "modified": f.stat().st_mtime,
+                    })
+                except Exception:
+                    pass
+
+    # Learned directives (what the distiller extracted from this feedback)
+    directives = []
+    directives_path = vortex.memory_dir(company) / "learned_directives.json"
+    if directives_path.exists():
+        try:
+            data = json.loads(directives_path.read_text(encoding="utf-8"))
+            directives = data.get("directives", [])
+        except Exception:
+            pass
+
+    return {
+        "feedback_files": feedback_files,
+        "feedback_count": len(feedback_files),
+        "directives": directives,
+        "directives_count": len(directives),
+    }
 
 
 @router.post("/inline-edit")

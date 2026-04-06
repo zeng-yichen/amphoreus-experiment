@@ -391,7 +391,7 @@ export default function GhostwriterIDE() {
               onAction={setActionInProgress}
               onRefresh={loadPosts}
             />
-            <FeedbackInput company={company} />
+            <FeedbackPanel company={company} />
           </div>
         )}
       </div>
@@ -1415,20 +1415,33 @@ function PostsManager({
 }
 
 
-function FeedbackInput({ company }: { company: string }) {
+function FeedbackPanel({ company }: { company: string }) {
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [feedbackData, setFeedbackData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [showHistory, setShowHistory] = useState(false);
+
+  useEffect(() => {
+    ghostwriterApi
+      .getFeedback(company)
+      .then(setFeedbackData)
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, [company]);
 
   async function handleSubmit() {
     if (!text.trim()) return;
     setSubmitting(true);
     setStatus(null);
     try {
-      await ghostwriterApi.submitFeedback(company, text.trim());
-      setStatus("Feedback ingested");
+      await ghostwriterApi.submitClientFeedback(company, text.trim());
+      setStatus("Feedback saved → will be distilled into writing rules on next sync");
       setText("");
-      setTimeout(() => setStatus(null), 3000);
+      // Refresh the feedback list
+      ghostwriterApi.getFeedback(company).then(setFeedbackData).catch(console.error);
+      setTimeout(() => setStatus(null), 5000);
     } catch (e) {
       setStatus("Failed to submit");
     } finally {
@@ -1436,33 +1449,110 @@ function FeedbackInput({ company }: { company: string }) {
     }
   }
 
+  const directives = feedbackData?.directives || [];
+  const feedbackFiles = feedbackData?.feedback_files || [];
+
   return (
-    <div className="mt-6 rounded-lg border border-stone-800 bg-stone-900 p-4">
-      <h3 className="text-sm font-medium text-stone-300">Client Feedback</h3>
-      <p className="mt-1 text-xs text-stone-500">
-        Paste Slack messages, email notes, or verbal instructions. Everything enters the learning system.
-      </p>
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        rows={4}
-        placeholder="e.g., 'More domain verbiage — clinical Gantt charts, KRI aggregation. Less generic framing.'"
-        className="mt-3 w-full rounded border border-stone-700 bg-stone-950 p-3 text-sm text-stone-200 placeholder-stone-600 focus:border-stone-500 focus:outline-none"
-      />
-      <div className="mt-2 flex items-center gap-3">
-        <button
-          onClick={handleSubmit}
-          disabled={submitting || !text.trim()}
-          className="rounded bg-stone-700 px-4 py-1.5 text-xs font-medium text-white hover:bg-stone-600 disabled:opacity-50"
-        >
-          {submitting ? "Processing..." : "Submit Feedback"}
-        </button>
-        {status && (
-          <span className={`text-xs ${status.includes("Failed") ? "text-red-400" : "text-emerald-400"}`}>
-            {status}
-          </span>
-        )}
+    <div className="mt-6 space-y-4">
+      {/* Learned Writing Rules — what the system extracted from feedback */}
+      {directives.length > 0 && (
+        <div className="rounded-lg border border-stone-800 bg-stone-900 p-4">
+          <h3 className="text-sm font-medium text-stone-300">
+            Learned Writing Rules
+            <span className="ml-2 text-xs text-stone-500">
+              ({directives.length} rules from feedback + engagement data)
+            </span>
+          </h3>
+          <p className="mt-1 text-xs text-stone-600">
+            These rules are injected into Stelle's system prompt. Posts generated
+            with these rules active are tracked for engagement impact.
+          </p>
+          <div className="mt-3 space-y-2">
+            {directives.map((d: any, i: number) => (
+              <div key={i} className="flex items-start gap-2 text-sm">
+                <span
+                  className={`mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${
+                    d.priority === "high"
+                      ? "bg-red-950 text-red-400"
+                      : "bg-stone-800 text-stone-400"
+                  }`}
+                >
+                  {d.priority}
+                </span>
+                <span className="text-stone-300">{d.directive}</span>
+                <span className="ml-auto shrink-0 text-[10px] text-stone-600">
+                  {d.source}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Submit new feedback */}
+      <div className="rounded-lg border border-stone-800 bg-stone-900 p-4">
+        <h3 className="text-sm font-medium text-stone-300">Client Feedback</h3>
+        <p className="mt-1 text-xs text-stone-500">
+          Paste Slack messages, email notes, or verbal instructions from the
+          client. The feedback distiller converts these into writing rules
+          Stelle follows.
+        </p>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={3}
+          placeholder='e.g., "Use the full term clinical operations, not ClinOps. Also, don\'t position us as competing with labs — we sell to them."'
+          className="mt-3 w-full rounded border border-stone-700 bg-stone-950 p-3 text-sm text-stone-200 placeholder-stone-600 focus:border-stone-500 focus:outline-none"
+        />
+        <div className="mt-2 flex items-center gap-3">
+          <button
+            onClick={handleSubmit}
+            disabled={submitting || !text.trim()}
+            className="rounded bg-stone-700 px-4 py-1.5 text-xs font-medium text-white hover:bg-stone-600 disabled:opacity-50"
+          >
+            {submitting ? "Saving..." : "Submit Feedback"}
+          </button>
+          {status && (
+            <span
+              className={`text-xs ${
+                status.includes("Failed") ? "text-red-400" : "text-emerald-400"
+              }`}
+            >
+              {status}
+            </span>
+          )}
+          {feedbackFiles.length > 0 && (
+            <button
+              onClick={() => setShowHistory(!showHistory)}
+              className="ml-auto text-xs text-stone-500 hover:text-stone-300"
+            >
+              {showHistory ? "Hide" : "Show"} history ({feedbackFiles.length})
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* Feedback history (collapsible) */}
+      {showHistory && feedbackFiles.length > 0 && (
+        <div className="rounded-lg border border-stone-800 bg-stone-900 p-4">
+          <h3 className="text-sm font-medium text-stone-300">Feedback History</h3>
+          <div className="mt-3 space-y-3">
+            {feedbackFiles.map((f: any, i: number) => (
+              <div key={i} className="border-l-2 border-stone-700 pl-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-stone-500">{f.name}</span>
+                  <span className="text-[10px] text-stone-600">
+                    {new Date(f.modified * 1000).toLocaleDateString()}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-stone-400 whitespace-pre-wrap">
+                  {f.preview}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

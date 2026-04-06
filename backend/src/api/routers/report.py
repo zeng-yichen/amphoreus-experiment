@@ -261,12 +261,12 @@ def _build_report(company: str, weeks: int = 2) -> dict:
             "avg_reward": round(sum(rewards) / len(rewards), 2),
             "best": {
                 "reward": round(best.get("reward", {}).get("immediate", 0), 2),
-                "impressions": best.get("reward", {}).get("raw_metrics") or {}).get("impressions", 0),
+                "impressions": (best.get("reward", {}).get("raw_metrics") or {}).get("impressions", 0),
                 "hook": (best.get("post_body") or best.get("posted_body") or "")[:120].split("\n")[0],
             },
             "worst": {
                 "reward": round(worst.get("reward", {}).get("immediate", 0), 2),
-                "impressions": worst.get("reward", {}).get("raw_metrics") or {}).get("impressions", 0),
+                "impressions": (worst.get("reward", {}).get("raw_metrics") or {}).get("impressions", 0),
                 "hook": (worst.get("post_body") or worst.get("posted_body") or "")[:120].split("\n")[0],
             },
         }
@@ -337,8 +337,8 @@ def _build_report(company: str, weeks: int = 2) -> dict:
     if all_scored:
         n = len(all_scored)
         rewards = [o.get("reward", {}).get("immediate", 0) for o in all_scored]
-        avg_imp = sum(o.get("reward", {}).get("raw_metrics") or {}).get("impressions", 0) for o in all_scored) / n
-        avg_react = sum(o.get("reward", {}).get("raw_metrics") or {}).get("reactions", 0) for o in all_scored) / n
+        avg_imp = sum((o.get("reward", {}).get("raw_metrics") or {}).get("impressions", 0) for o in all_scored) / n
+        avg_react = sum((o.get("reward", {}).get("raw_metrics") or {}).get("reactions", 0) for o in all_scored) / n
         all_time = {
             "total_tracked": len(observations),
             "total_scored": n,

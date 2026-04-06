@@ -157,9 +157,16 @@ export default function StrategyPage() {
               <p className="text-stone-500">Loading strategy...</p>
             ) : currentStrategy ? (
               currentStrategy.trimStart().startsWith("<!DOCTYPE") || currentStrategy.trimStart().startsWith("<html") ? (
-                <div
-                  className="strategy-embed"
-                  dangerouslySetInnerHTML={{ __html: currentStrategy }}
+                <iframe
+                  srcDoc={currentStrategy}
+                  className="w-full border-0"
+                  style={{ minHeight: "80vh" }}
+                  onLoad={(e) => {
+                    const f = e.target as HTMLIFrameElement;
+                    if (f.contentDocument?.body) {
+                      f.style.height = f.contentDocument.body.scrollHeight + 32 + "px";
+                    }
+                  }}
                 />
               ) : (
                 <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-stone-800">
@@ -213,9 +220,16 @@ export default function StrategyPage() {
                 Generating progress report...
               </div>
             ) : reportHtml ? (
-              <div
-                className="report-embed rounded-lg border border-stone-200 bg-white"
-                dangerouslySetInnerHTML={{ __html: reportHtml }}
+              <iframe
+                srcDoc={reportHtml}
+                className="w-full border-0"
+                style={{ minHeight: "80vh" }}
+                onLoad={(e) => {
+                  const f = e.target as HTMLIFrameElement;
+                  if (f.contentDocument?.body) {
+                    f.style.height = f.contentDocument.body.scrollHeight + 32 + "px";
+                  }
+                }}
               />
             ) : (
               <div className="rounded-lg border border-dashed border-stone-300 p-8 text-center">

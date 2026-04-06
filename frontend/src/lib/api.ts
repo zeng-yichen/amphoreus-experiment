@@ -69,11 +69,25 @@ export const ghostwriterApi = {
   getRuns: (company: string, limit = 20) =>
     apiFetch<{ runs: any[] }>(`/api/ghostwriter/${company}/runs?limit=${limit}`),
 
-  submitFeedback: (company: string, text: string, source = "operator", postId?: string) =>
+  submitClientFeedback: (company: string, text: string, postId?: string) =>
+    apiFetch<{ status: string; file: string }>("/api/ghostwriter/client-feedback", {
+      method: "POST",
+      body: JSON.stringify({ company, text, post_id: postId }),
+    }),
+
+  submitEditFeedback: (company: string, original: string, revised: string) =>
     apiFetch<{ status: string }>("/api/ghostwriter/feedback", {
       method: "POST",
-      body: JSON.stringify({ company, text, source, associated_post_id: postId }),
+      body: JSON.stringify({ company, original, revised }),
     }),
+
+  getFeedback: (company: string) =>
+    apiFetch<{
+      feedback_files: any[];
+      feedback_count: number;
+      directives: any[];
+      directives_count: number;
+    }>(`/api/ghostwriter/feedback/${company}`),
 
   getRunEvents: (runId: string) =>
     apiFetch<{ run: any; events: any[] }>(`/api/ghostwriter/runs/${runId}/events`),
@@ -83,12 +97,6 @@ export const ghostwriterApi = {
 
   getFiles: (company: string, path = "") =>
     apiFetch<{ files: any[] }>(`/api/ghostwriter/sandbox/${company}/files?path=${path}`),
-
-  submitFeedback: (company: string, original: string, revised: string) =>
-    apiFetch("/api/ghostwriter/feedback", {
-      method: "POST",
-      body: JSON.stringify({ company, original, revised }),
-    }),
 
   inlineEdit: (company: string, postText: string, instruction: string) =>
     apiFetch<{ result: string }>("/api/ghostwriter/inline-edit", {
