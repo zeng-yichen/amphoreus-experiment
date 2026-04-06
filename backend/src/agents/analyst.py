@@ -466,7 +466,7 @@ _TOOLS = [
 # ------------------------------------------------------------------
 
 def _dispatch_tool(tool_name: str, tool_input: dict, company: str,
-                   observations: list[dict]) -> str:
+                   observations: list[dict], run_id: str = "") -> str:
     """Route a tool call to the appropriate handler. Returns JSON string."""
     try:
         if tool_name == "query_observations":
@@ -484,7 +484,7 @@ def _dispatch_tool(tool_name: str, tool_input: dict, company: str,
         elif tool_name == "embed_and_compare":
             return _tool_embed_and_compare(tool_input)
         elif tool_name == "store_finding":
-            return _tool_store_finding(tool_input, company)
+            return _tool_store_finding(tool_input, company, run_id=run_id)
         elif tool_name == "search_linkedin_posts":
             return _tool_search_linkedin_posts(tool_input)
         elif tool_name == "search_linkedin_semantic":
@@ -812,7 +812,7 @@ def _tool_embed_and_compare(tool_input: dict) -> str:
     })
 
 
-def _tool_store_finding(tool_input: dict, company: str) -> str:
+def _tool_store_finding(tool_input: dict, company: str, run_id: str = "") -> str:
     findings_path = vortex.memory_dir(company) / "analyst_findings.json"
     findings_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -827,6 +827,7 @@ def _tool_store_finding(tool_input: dict, company: str) -> str:
         "confidence": tool_input.get("confidence", "suggestive"),
         "contradicts_pipeline": tool_input.get("contradicts_pipeline", False),
         "hypothesis_tested": tool_input.get("hypothesis_tested", ""),
+        "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1149,43 +1150,51 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
         "store_finding."
     )
 
-    # Prior analyst findings (from the last run) are loaded so the agent can
-    # see what it found previously and test whether those findings still hold
-    # with any new data. This is the stability mechanism: findings that appear
-    # across multiple runs gain confidence; findings that contradict prior runs
-    # should be flagged.
+    # Prior findings: show the analyst its own history so it can validate,
+    # update, or contradict prior discoveries. Findings that persist across
+    # runs gain confidence; findings that flip indicate instability in the
+    # signal. This is the stability mechanism — the full finding history IS
+    # the data the analyst needs to self-assess.
     prior_context = ""
     try:
         _prior_af = json.loads(findings_path.read_text(encoding="utf-8")) if findings_path.exists() else {}
+        _prior_findings = _prior_af.get("findings", [])
         _prior_runs = _prior_af.get("runs", [])
-        if len(_prior_runs) >= 2:
-            # Show the last run's finding count for context
-            _last = _prior_runs[-1]
-            prior_context = (
-                f"\n\nPRIOR ANALYSIS: The last analyst run ({_last.get('timestamp', '?')[:10]}) "
-                f"produced {_last.get('findings_stored', '?')} findings using "
-                f"{_last.get('tool_calls', '?')} tool calls. This is a fresh run — "
-                f"validate or update those findings with current data."
-            )
+        if _prior_findings:
+            # Get findings from the most recent run only (for the stability prompt)
+            _last_run_id = _prior_runs[-1].get("run_id", "") if _prior_runs else ""
+            _recent_findings = [
+                f for f in _prior_findings
+                if f.get("run_id") == _last_run_id
+            ] if _last_run_id else _prior_findings[-10:]
+
+            if _recent_findings:
+                prior_context = (
+                    f"\n\nPRIOR FINDINGS (from the last analyst run, "
+                    f"{_last_run_id[:10] if _last_run_id else '?'}):\n"
+                    "Review these prior findings. If the data still supports them, "
+                    "re-store them with the same or updated evidence. If new data "
+                    "contradicts a prior finding, store a corrected version and note "
+                    "the contradiction. Findings that appear across multiple runs "
+                    "should be marked with higher confidence.\n\n"
+                )
+                for _pf in _recent_findings:
+                    prior_context += (
+                        f"  [{_pf.get('confidence', '?').upper()}] "
+                        f"{_pf.get('claim', '')[:200]}\n"
+                    )
     except Exception:
         pass
     if prior_context:
         user_message += prior_context
 
-    # Clear prior findings before starting a new run. Each run produces a
-    # complete, self-contained set of findings that replaces the previous run's
-    # output. Without this, findings accumulate week over week and the prompt
-    # gets injected with stale/contradictory observations from months ago.
+    # Generate a run_id for this analysis. Each finding produced during this
+    # run is tagged with this ID so consumers can filter to "latest run only"
+    # (for prompt injection) or "all runs" (for stability analysis).
+    # Full finding history is preserved — nothing is cleared or capped.
+    _run_id = datetime.now(timezone.utc).isoformat()
     findings_path = vortex.memory_dir(company) / "analyst_findings.json"
     findings_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        _prior = json.loads(findings_path.read_text(encoding="utf-8")) if findings_path.exists() else {}
-    except Exception:
-        _prior = {}
-    _prior["findings"] = []  # clear findings; runs history preserved
-    _tmp = findings_path.with_suffix(".tmp")
-    _tmp.write_text(json.dumps(_prior, indent=2, ensure_ascii=False), encoding="utf-8")
-    _tmp.rename(findings_path)
 
     # Run the agentic loop
     client = anthropic.Anthropic()
@@ -1230,7 +1239,7 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
             tool_calls += 1
             if verbose:
                 print(f"  → {tu.name}({json.dumps(tu.input)[:120]})")
-            result = _dispatch_tool(tu.name, tu.input, company, scored)
+            result = _dispatch_tool(tu.name, tu.input, company, scored, run_id=_run_id)
             if tu.name == "store_finding":
                 findings_stored += 1
             if verbose:
@@ -1260,7 +1269,8 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
         data = {"findings": [], "runs": []}
 
     run_meta = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "run_id": _run_id,
+        "timestamp": _run_id,  # same value, kept for backward compat
         "model": _ANALYST_MODEL,
         "tool_calls": tool_calls,
         "findings_stored": findings_stored,
@@ -1272,9 +1282,10 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
     }
     data["runs"].append(run_meta)
 
-    # Cap runs history at 20 entries to prevent unbounded growth.
-    if len(data["runs"]) > 20:
-        data["runs"] = data["runs"][-20:]
+    # No cap on run history — each entry is ~200 bytes of metadata.
+    # At weekly runs that's 10KB/year. The history is valuable for
+    # tracking how the analyst's efficiency and finding count evolve
+    # as data grows. Destroying it saves nothing.
 
     tmp = findings_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")

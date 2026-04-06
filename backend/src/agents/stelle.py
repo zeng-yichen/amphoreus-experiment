@@ -4162,7 +4162,24 @@ def generate_one_shot(
         _findings_path = P.memory_dir(company_keyword) / "analyst_findings.json"
         if _findings_path.exists():
             _af = _json_analyst_ctx.loads(_findings_path.read_text(encoding="utf-8"))
-            _findings = _af.get("findings", [])
+            _all_findings = _af.get("findings", [])
+            _runs = _af.get("runs", [])
+
+            # Only inject findings from the LATEST run. The full history is
+            # preserved in the file for stability analysis and the analyst's
+            # own self-assessment, but Stelle should see a clean, current set
+            # of findings — not an accumulation of months of potentially
+            # contradictory observations.
+            if _runs and _all_findings:
+                _latest_run_id = _runs[-1].get("run_id", "")
+                if _latest_run_id:
+                    _findings = [f for f in _all_findings if f.get("run_id") == _latest_run_id]
+                else:
+                    # Fallback for findings without run_id (pre-migration)
+                    _findings = _all_findings[-10:]
+            else:
+                _findings = _all_findings
+
             if _findings:
                 _lines = [
                     "",
