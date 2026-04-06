@@ -1,28 +1,23 @@
-"""Analyst — hypothesis-driven engagement analysis via tool-use agent.
+"""Analyst — convergence-objective engagement predictor via tool-use agent.
 
-Replaces the fixed pipeline's predetermined analysis sequence with an
-open-ended agent that forms and tests its own hypotheses about what
-predicts engagement for a specific client.
+The analyst's job is to build a working model that predicts engagement for
+a specific client, or prove it can't yet. Not to report findings. Not to
+explore patterns. To build something that works.
 
-The agent has access to the same statistical primitives the pipeline uses
-(correlation, partial correlation, regression, effect size, transition
-matrices, embeddings) but decides what to run and in what order. It can
-pursue hypotheses the pipeline never encoded.
+It has 11 statistical tools spanning three data scales (client, cross-client,
+LinkedIn-wide) and decides what to run and in what order. No predetermined
+analysis sequence. The prompt defines the goal; the model figures out how.
 
-Design (bitter lesson compliance):
-  - No predetermined analysis sequence.
-  - The model decides which tools to call and in what order.
-  - Tools are composable statistical primitives, not pipeline steps.
-  - Findings are stored with evidence and confidence, not as assertions.
-  - The fixed pipeline continues to run in parallel. This agent is
-    additive — it discovers things the pipeline misses, but doesn't
-    replace the pipeline until its findings prove more useful.
+Each weekly run improves on the previous run's model. The convergence isn't
+just within a single run — it's across runs over weeks as observation count
+grows. The full finding and model history is preserved so the agent can
+assess its own progress.
 
 Usage:
     from backend.src.agents.analyst import run_analysis
 
-    findings = run_analysis("innovocommerce")
-    # → stored in memory/{company}/analyst_findings.json
+    result = run_analysis("innovocommerce")
+    # → model + findings stored in memory/{company}/analyst_findings.json
 """
 
 from __future__ import annotations
@@ -48,86 +43,106 @@ _MAX_TURNS = 40  # safety ceiling on tool-use turns
 # ------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are an engagement analyst for a LinkedIn ghostwriting agency. Your job is \
-to discover what predicts post performance for a specific client.
+You are a data scientist building a predictive model of LinkedIn post \
+engagement for a specific client.
 
-You have access to the client's scored observation history and a set of \
-statistical tools. Use them to form hypotheses, test them, and report findings.
+## Your mission
 
-## How to work
+Build a model that predicts which posts will perform well for this client. \
+Not "report interesting findings." Not "explore the data." Build something \
+that works — a model that, given a candidate post's attributes, produces a \
+predicted engagement score that correlates with actual outcomes.
 
-1. Start by exploring the data. Use `query_observations` to understand the \
-   client's history: how many posts, what topics, what formats, reward \
-   distribution, time range.
+The convergence criterion: achieve a Spearman rank correlation > 0.3 between \
+your model's predicted engagement and actual engagement on held-out data \
+(leave-one-out validation). Or, if you cannot reach that threshold with the \
+available data, produce a clear explanation of why — what data is missing, \
+how many more observations are needed, and what your best model achieves.
 
-2. Form hypotheses about what drives engagement. These might be about:
-   - Content attributes (topic, format, length, opening style)
-   - Temporal patterns (day of week, posting cadence, sequence effects)
-   - Interaction effects (does topic X work better in format Y?)
-   - Anything else the data suggests
+## When you are done
 
-3. Test each hypothesis with the appropriate tool. Use `compute_correlation` \
-   for continuous relationships, `compute_effect_size` for categorical \
-   comparisons, `compute_partial_correlation` to control for confounders, \
-   `fit_regression` for multivariate prediction.
+You are done when ONE of these is true:
 
-4. Report findings with evidence. Include effect sizes, sample sizes, and \
-   honest confidence assessments.
+1. You have a validated model that meets the convergence criterion. Store \
+   the model specification, its validation metrics, and its predictions for \
+   the client's actual posts using `store_finding` with type "model".
+
+2. You have exhausted your tool budget and report your best attempt with \
+   honest metrics. Store the best model you built and explain what prevented \
+   convergence.
+
+3. The client has fewer than 10 observations. Report that prediction is not \
+   yet possible and estimate how many observations are needed.
+
+In ALL cases, also store the key findings that explain your model's logic — \
+why it predicts what it predicts. The findings explain "why." The model says \
+"what to do." Both are needed.
+
+## How you work
+
+You decide. You have 11 tools spanning three data scales. You choose what \
+to run, in what order, based on what you find. There is no predetermined \
+analysis sequence.
+
+Some approaches that might work: start with simple correlations to identify \
+candidate features, check for confounders with partial correlations, try \
+different feature combinations in regression, validate against held-out data, \
+use LinkedIn-wide evidence to supplement the client's small sample. Or do \
+something completely different. The tools are yours.
+
+You'll see how many turns you have remaining in each tool result. Plan \
+accordingly — if you have 10 turns left, stop exploring and start validating \
+your best model.
 
 ## Statistical discipline
 
-- **Effect size over p-values.** At n<50, almost nothing reaches p<0.05. \
-  Report the effect size and let the reader decide if it matters.
-- **Multiple comparisons.** If you test 10 hypotheses, expect 1-2 to look \
-  significant by chance. Flag this explicitly.
-- **Confounders.** When you find a correlation, ask what else could explain it. \
-  Use `compute_partial_correlation` to check.
-- **Sample size honesty.** If n<15 for a subgroup, say so. Don't report a \
-  "finding" from 3 observations.
-- **Replication.** A finding that appears in one analysis is a hypothesis. \
-  A finding that appears consistently across multiple analyses is knowledge.
+These are constraints, not instructions:
 
-## What to report
+- **Effect size over p-values.** At n<50, report effect sizes honestly.
+- **Confounders.** When you find a correlation, check if something else \
+  explains it. Use `compute_partial_correlation`.
+- **Sample size honesty.** If n<15 for a subgroup, flag it. A "finding" \
+  from 3 observations is not a finding.
+- **Held-out validation is mandatory.** In-sample R² is meaningless at \
+  small n. Use LOO R² or Spearman on predictions vs actuals. If your model \
+  fits the training data but fails LOO, say so.
+- **Multiple comparisons.** If you test many hypotheses, expect some to \
+  look significant by chance.
 
-After your analysis, call `store_finding` for each discovery worth reporting. \
-A good finding has:
-- A clear, specific claim ("posts tagged 'hot take' after a 'case study' \
-  average +0.8 higher reward")
-- Evidence (effect size, sample size, correlation value)
-- Confidence level ("strong" / "suggestive" / "weak" / "insufficient data")
-- Whether it's consistent with or contradicts the fixed pipeline's outputs \
-  (which you'll see in the data)
+## Self-assessment
 
-Do NOT report findings that are trivially obvious (e.g., "posts with more \
-impressions have higher engagement") or findings with n<5.
+If you see prior run data in the user message, your job is to IMPROVE on it. \
+If the prior run achieved Spearman 0.2, try to beat 0.2. If you can't, \
+explain what you tried and why it didn't improve. Findings and models that \
+persist across runs gain confidence. Models that improve across runs \
+demonstrate learning.
 
 ## Data sources
 
-You have two levels of data:
+1. **Client data** (n=30-50): this client's scored observations. \
+   `query_observations`, `compute_correlation`, `compute_effect_size`, \
+   `compute_partial_correlation`, `fit_regression`, `build_transition_matrix`.
 
-1. **Client data** (n=30-50 typically): this client's own scored observations. \
-   Use `query_observations`, `compute_correlation`, `compute_effect_size`, \
-   `compute_partial_correlation`, `fit_regression`, `build_transition_matrix`. \
-   Small n means individual findings are suggestive, not definitive.
+2. **LinkedIn-wide** (200K+ posts, 22+ clients): `search_linkedin_posts`, \
+   `search_linkedin_semantic`, `query_cross_client_data`. Use to validate \
+   client-level hypotheses against large-sample evidence.
 
-2. **LinkedIn-wide data** (200K+ posts, 22+ clients): the broader ecosystem. \
-   Use `search_linkedin_posts` (keyword search), `search_linkedin_semantic` \
-   (concept search), and `query_cross_client_data` (aggregated patterns, hooks, \
-   and quality principles from all Amphoreus clients). Large n means findings \
-   here are statistically robust. **Use this to validate hypotheses from the \
-   client data** — if a pattern appears in both the client's 34 posts AND in \
-   200K LinkedIn posts, confidence is much higher than either alone.
+## Output
 
-The most valuable analyses combine both levels: "This client's storytelling \
-posts outperform (d=0.5, n=16 vs 18) AND across LinkedIn, storytelling hooks \
-with specific-scene openings average 2.3x more engagement than abstract hooks \
-(n=2400)." That's a finding worth acting on.
+Use `store_finding` for two types of output:
 
-## Tools available
+1. **type="model"**: Your best predictive model. Include the model spec \
+   (features, approach, coefficients), validation metrics (LOO R², Spearman, \
+   n), predicted vs actual rankings for the client's posts, and a readiness \
+   assessment — can this model be used to score candidate posts? (yes/no \
+   with explanation).
 
-You have 11 tools. Call them in whatever order makes sense for your analysis — \
-there is no predetermined sequence. You may call the same tool multiple times \
-with different inputs.
+2. **type="finding"**: Key analytical discoveries that explain the model's \
+   logic. Why does it predict what it predicts? What patterns drive \
+   engagement? These are the "why" behind the model's "what."
+
+Store the model LAST, after you've tested and validated it. Store findings \
+as you discover them.
 """
 
 
@@ -339,33 +354,45 @@ _TOOLS = [
     {
         "name": "store_finding",
         "description": (
-            "Store an analytical finding for this client. Findings are persisted "
-            "to memory and surfaced in the strategy brief. Only store findings "
-            "worth acting on — not every test result. Include the evidence "
-            "and an honest confidence assessment."
+            "Store an analytical finding OR a predictive model for this client. "
+            "Two types:\n\n"
+            "type='finding': An analytical discovery that explains what drives "
+            "engagement. Store as you discover them.\n\n"
+            "type='model': Your best predictive model specification with "
+            "validation metrics. Store LAST, after validation. Include: what "
+            "features, what approach, LOO R² or Spearman, predicted vs actual "
+            "rankings, and whether the model is ready to score candidate posts."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
+                "type": {
+                    "type": "string",
+                    "description": "'finding' (analytical discovery) or 'model' (predictive model specification).",
+                },
                 "claim": {
                     "type": "string",
-                    "description": "A clear, specific, actionable claim (e.g., 'posts under 1800 chars average +0.6 higher reward than posts over 2500 chars').",
+                    "description": "For findings: a clear, actionable claim. For models: a summary of the model (e.g., 'Ridge regression on format_tag + char_count achieves Spearman 0.25 on LOO predictions').",
                 },
                 "evidence": {
                     "type": "string",
-                    "description": "The statistical evidence supporting the claim (effect size, n, correlation, etc.).",
+                    "description": "For findings: statistical evidence. For models: validation metrics (LOO R², Spearman, n) and predicted vs actual post rankings.",
                 },
                 "confidence": {
                     "type": "string",
-                    "description": "'strong' (large effect, adequate n) / 'suggestive' (moderate effect or small n) / 'weak' (small effect or very small n).",
+                    "description": "'strong' / 'suggestive' / 'weak' / 'insufficient_data'.",
                 },
-                "contradicts_pipeline": {
+                "model_spec": {
+                    "type": "object",
+                    "description": "For type='model' only. The model specification: features used, approach (regression/heuristic/ensemble), coefficients if applicable, ridge_alpha, any other parameters needed to reproduce the model.",
+                },
+                "model_ready": {
                     "type": "boolean",
-                    "description": "True if this finding contradicts the fixed pipeline's output for this client.",
+                    "description": "For type='model' only. Can this model be used to score candidate posts? true if validation metrics meet minimum quality, false otherwise.",
                 },
-                "hypothesis_tested": {
+                "model_readiness_explanation": {
                     "type": "string",
-                    "description": "The hypothesis that was tested to produce this finding.",
+                    "description": "For type='model' only. Why the model is or isn't ready. What data would improve it.",
                 },
             },
             "required": ["claim", "evidence", "confidence"],
@@ -821,15 +848,22 @@ def _tool_store_finding(tool_input: dict, company: str, run_id: str = "") -> str
     except Exception:
         existing = {"findings": [], "runs": []}
 
+    entry_type = tool_input.get("type", "finding")
+
     finding = {
+        "type": entry_type,
         "claim": tool_input["claim"],
         "evidence": tool_input["evidence"],
         "confidence": tool_input.get("confidence", "suggestive"),
-        "contradicts_pipeline": tool_input.get("contradicts_pipeline", False),
-        "hypothesis_tested": tool_input.get("hypothesis_tested", ""),
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+    # Model-specific fields
+    if entry_type == "model":
+        finding["model_spec"] = tool_input.get("model_spec", {})
+        finding["model_ready"] = tool_input.get("model_ready", False)
+        finding["model_readiness_explanation"] = tool_input.get("model_readiness_explanation", "")
 
     existing["findings"].append(finding)
 
@@ -837,7 +871,9 @@ def _tool_store_finding(tool_input: dict, company: str, run_id: str = "") -> str
     tmp.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.rename(findings_path)
 
-    return json.dumps({"status": "stored", "total_findings": len(existing["findings"])})
+    label = "model" if entry_type == "model" else f"finding #{sum(1 for f in existing['findings'] if f.get('type') != 'model')}"
+    return json.dumps({"status": "stored", "type": entry_type, "label": label,
+                        "total_entries": len(existing["findings"])})
 
 
 # ------------------------------------------------------------------
@@ -1132,8 +1168,14 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
     mean_r = sum(rewards) / len(rewards)
     std_r = math.sqrt(sum((r - mean_r) ** 2 for r in rewards) / max(len(rewards) - 1, 1))
 
+    # Set up findings path FIRST (needed for prior-run context loading).
+    _run_id = datetime.now(timezone.utc).isoformat()
+    findings_path = vortex.memory_dir(company) / "analyst_findings.json"
+    findings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build user message with convergence framing.
     user_message = (
-        f"Analyze engagement patterns for client: {company}\n\n"
+        f"Build a predictive model of engagement for client: {company}\n\n"
         f"Data summary:\n"
         f"- {len(scored)} scored observations\n"
         f"- Reward: mean={mean_r:+.3f}, std={std_r:.3f}, "
@@ -1142,61 +1184,64 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
         f"- Formats: {dict(formats.most_common())}\n"
         f"- Date range: {scored[0].get('posted_at', '?')[:10]} to "
         f"{scored[-1].get('posted_at', '?')[:10]}\n\n"
-        "Start by exploring the client's data with query_observations. Then form "
-        "hypotheses and test them using both the client's own data AND the LinkedIn-wide "
-        "database (search_linkedin_posts, search_linkedin_semantic) and cross-client "
-        "patterns (query_cross_client_data). Validate client-level findings against "
-        "ecosystem-wide evidence when possible. Store each actionable finding with "
-        "store_finding."
+        f"You have {_MAX_TURNS} turns. Your goal: build a model that predicts "
+        f"engagement (Spearman > 0.3 on LOO validation, or explain why that's "
+        f"not achievable yet with {len(scored)} observations).\n\n"
+        f"Store findings as you discover them (type='finding'). Store your "
+        f"best model LAST (type='model') with validation metrics and "
+        f"predicted-vs-actual rankings."
     )
 
-    # Prior findings: show the analyst its own history so it can validate,
-    # update, or contradict prior discoveries. Findings that persist across
-    # runs gain confidence; findings that flip indicate instability in the
-    # signal. This is the stability mechanism — the full finding history IS
-    # the data the analyst needs to self-assess.
-    prior_context = ""
+    # Prior-run context: show the agent what it achieved before so it can
+    # improve. This is the cross-run learning mechanism.
     try:
         _prior_af = json.loads(findings_path.read_text(encoding="utf-8")) if findings_path.exists() else {}
         _prior_findings = _prior_af.get("findings", [])
         _prior_runs = _prior_af.get("runs", [])
-        if _prior_findings:
-            # Get findings from the most recent run only (for the stability prompt)
-            _last_run_id = _prior_runs[-1].get("run_id", "") if _prior_runs else ""
-            _recent_findings = [
-                f for f in _prior_findings
-                if f.get("run_id") == _last_run_id
-            ] if _last_run_id else _prior_findings[-10:]
 
-            if _recent_findings:
-                prior_context = (
-                    f"\n\nPRIOR FINDINGS (from the last analyst run, "
-                    f"{_last_run_id[:10] if _last_run_id else '?'}):\n"
-                    "Review these prior findings. If the data still supports them, "
-                    "re-store them with the same or updated evidence. If new data "
-                    "contradicts a prior finding, store a corrected version and note "
-                    "the contradiction. Findings that appear across multiple runs "
-                    "should be marked with higher confidence.\n\n"
+        if _prior_runs:
+            _last = _prior_runs[-1]
+            _last_rid = _last.get("run_id", "")
+
+            # Show prior model if one exists
+            _prior_models = [
+                f for f in _prior_findings
+                if f.get("type") == "model" and f.get("run_id") == _last_rid
+            ]
+            _prior_findings_only = [
+                f for f in _prior_findings
+                if f.get("type") != "model" and f.get("run_id") == _last_rid
+            ]
+
+            if _prior_models or _prior_findings_only:
+                user_message += (
+                    f"\n\nPRIOR RUN ({_last_rid[:10]}, "
+                    f"{_last.get('tool_calls', '?')} tools, "
+                    f"{_last.get('findings_stored', '?')} entries):\n"
                 )
-                for _pf in _recent_findings:
-                    prior_context += (
+
+            if _prior_models:
+                _pm = _prior_models[-1]
+                user_message += (
+                    f"\nPrior model: {_pm.get('claim', '')[:300]}\n"
+                    f"Metrics: {_pm.get('evidence', '')[:300]}\n"
+                    f"Ready: {_pm.get('model_ready', '?')} — "
+                    f"{_pm.get('model_readiness_explanation', '')[:200]}\n"
+                    f"\nYour job: IMPROVE on this model. If you can't beat it, "
+                    f"explain what you tried.\n"
+                )
+
+            if _prior_findings_only:
+                user_message += "\nPrior findings (validate or update):\n"
+                for _pf in _prior_findings_only[:8]:
+                    user_message += (
                         f"  [{_pf.get('confidence', '?').upper()}] "
-                        f"{_pf.get('claim', '')[:200]}\n"
+                        f"{_pf.get('claim', '')[:150]}\n"
                     )
     except Exception:
         pass
-    if prior_context:
-        user_message += prior_context
 
-    # Generate a run_id for this analysis. Each finding produced during this
-    # run is tagged with this ID so consumers can filter to "latest run only"
-    # (for prompt injection) or "all runs" (for stability analysis).
-    # Full finding history is preserved — nothing is cleared or capped.
-    _run_id = datetime.now(timezone.utc).isoformat()
-    findings_path = vortex.memory_dir(company) / "analyst_findings.json"
-    findings_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Run the agentic loop
+    # Run the agentic loop.
     client = anthropic.Anthropic()
     messages: list[dict] = [{"role": "user", "content": user_message}]
 
@@ -1222,18 +1267,17 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
 
         messages.append({"role": "assistant", "content": resp.content})
 
-        # Log text output if verbose
         if verbose:
             for block in resp.content:
                 if hasattr(block, "text"):
                     print(block.text)
 
-        # Check for tool calls
         tool_uses = [b for b in resp.content if b.type == "tool_use"]
         if resp.stop_reason == "end_turn" or not tool_uses:
             break
 
-        # Dispatch tools
+        # Dispatch tools — include turn budget so the agent can plan.
+        remaining_turns = _MAX_TURNS - turn - 1
         tool_results: list[dict] = []
         for tu in tool_uses:
             tool_calls += 1
@@ -1244,36 +1288,38 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
                 findings_stored += 1
             if verbose:
                 print(f"    ← {result[:200]}")
+
+            # Append turn budget to every tool result so the agent knows
+            # when to stop exploring and start validating.
+            result_with_budget = result.rstrip("}") + f', "turns_remaining": {remaining_turns}' + "}"
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": tu.id,
-                "content": result,
+                "content": result_with_budget,
             })
 
         messages.append({"role": "user", "content": tool_results})
 
     elapsed = time.time() - start_time
 
-    # Record the run metadata and finalize findings.
-    #
-    # IMPORTANT: each run REPLACES the findings array, it does not APPEND to
-    # prior runs' findings. Without this, findings accumulate week over week
-    # and Stelle's prompt gets injected with 40+ findings after a month, many
-    # stale or contradictory. The runs history (metadata only, no findings
-    # text) is kept for audit. If stability comparison is needed, the caller
-    # should snapshot findings before clearing.
-    findings_path = vortex.memory_dir(company) / "analyst_findings.json"
+    # Record run metadata. Finding history is preserved (nothing cleared).
     try:
         data = json.loads(findings_path.read_text(encoding="utf-8")) if findings_path.exists() else {"findings": [], "runs": []}
     except Exception:
         data = {"findings": [], "runs": []}
 
+    # Check if a model was stored this run
+    run_findings = [f for f in data.get("findings", []) if f.get("run_id") == _run_id]
+    model_entries = [f for f in run_findings if f.get("type") == "model"]
+
     run_meta = {
         "run_id": _run_id,
-        "timestamp": _run_id,  # same value, kept for backward compat
+        "timestamp": _run_id,
         "model": _ANALYST_MODEL,
         "tool_calls": tool_calls,
         "findings_stored": findings_stored,
+        "model_stored": len(model_entries) > 0,
+        "model_ready": model_entries[-1].get("model_ready", False) if model_entries else False,
         "turns": turn + 1,
         "input_tokens": total_input_tokens,
         "output_tokens": total_output_tokens,
@@ -1282,20 +1328,16 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
     }
     data["runs"].append(run_meta)
 
-    # No cap on run history — each entry is ~200 bytes of metadata.
-    # At weekly runs that's 10KB/year. The history is valuable for
-    # tracking how the analyst's efficiency and finding count evolve
-    # as data grows. Destroying it saves nothing.
-
     tmp = findings_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.rename(findings_path)
 
     logger.info(
-        "[analyst] %s: %d tool calls, %d findings, %d turns, %.1fs, "
-        "in=%d out=%d tokens",
-        company, tool_calls, findings_stored, turn + 1, elapsed,
-        total_input_tokens, total_output_tokens,
+        "[analyst] %s: %d tool calls, %d findings, model_stored=%s, "
+        "model_ready=%s, %d turns, %.1fs",
+        company, tool_calls, findings_stored,
+        run_meta["model_stored"], run_meta["model_ready"],
+        turn + 1, elapsed,
     )
 
     return run_meta
