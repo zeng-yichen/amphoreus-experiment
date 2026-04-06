@@ -101,11 +101,33 @@ A good finding has:
 Do NOT report findings that are trivially obvious (e.g., "posts with more \
 impressions have higher engagement") or findings with n<5.
 
+## Data sources
+
+You have two levels of data:
+
+1. **Client data** (n=30-50 typically): this client's own scored observations. \
+   Use `query_observations`, `compute_correlation`, `compute_effect_size`, \
+   `compute_partial_correlation`, `fit_regression`, `build_transition_matrix`. \
+   Small n means individual findings are suggestive, not definitive.
+
+2. **LinkedIn-wide data** (200K+ posts, 22+ clients): the broader ecosystem. \
+   Use `search_linkedin_posts` (keyword search), `search_linkedin_semantic` \
+   (concept search), and `query_cross_client_data` (aggregated patterns, hooks, \
+   and quality principles from all Amphoreus clients). Large n means findings \
+   here are statistically robust. **Use this to validate hypotheses from the \
+   client data** — if a pattern appears in both the client's 34 posts AND in \
+   200K LinkedIn posts, confidence is much higher than either alone.
+
+The most valuable analyses combine both levels: "This client's storytelling \
+posts outperform (d=0.5, n=16 vs 18) AND across LinkedIn, storytelling hooks \
+with specific-scene openings average 2.3x more engagement than abstract hooks \
+(n=2400)." That's a finding worth acting on.
+
 ## Tools available
 
-You have 8 tools. Each wraps a pure statistical function. Call them in \
-whatever order makes sense for your analysis — there is no predetermined \
-sequence. You may call the same tool multiple times with different inputs.
+You have 11 tools. Call them in whatever order makes sense for your analysis — \
+there is no predetermined sequence. You may call the same tool multiple times \
+with different inputs.
 """
 
 
@@ -349,6 +371,93 @@ _TOOLS = [
             "required": ["claim", "evidence", "confidence"],
         },
     },
+    {
+        "name": "search_linkedin_posts",
+        "description": (
+            "Search a database of 200K+ real LinkedIn posts by keyword. Returns "
+            "posts ranked by engagement score with metrics (reactions, comments, "
+            "reposts, engagement_score). Use this to benchmark the client's "
+            "performance against the broader LinkedIn ecosystem, discover what "
+            "topics/formats/hooks perform well industry-wide, and find patterns "
+            "across thousands of posts that the client's 30-50 observations "
+            "can't reveal. This is your most statistically powerful tool — "
+            "use it to validate hypotheses from the client data against "
+            "large-sample LinkedIn-wide evidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keyword search query. Use specific domain terms relevant to the client's industry (e.g., 'clinical trial protocol', 'ecommerce CAC', 'remote team culture'). More specific = better results.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max posts to return (default 15, max 30).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_linkedin_semantic",
+        "description": (
+            "Semantic search over 200K+ LinkedIn posts by meaning, not keywords. "
+            "Finds conceptually similar posts even when different words are used. "
+            "Use this for abstract queries: 'vulnerability-based leadership hooks', "
+            "'contrarian takes on industry trends', 'data-driven storytelling'. "
+            "Returns posts ranked by semantic similarity with engagement metrics. "
+            "Combine with search_linkedin_posts for comprehensive discovery."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "concept": {
+                    "type": "string",
+                    "description": "A natural-language description of the type of content to find. Be descriptive — 'posts that open with a specific failure story and pivot to a framework' works better than 'failure stories'.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max posts to return (default 10, max 20).",
+                },
+            },
+            "required": ["concept"],
+        },
+    },
+    {
+        "name": "query_cross_client_data",
+        "description": (
+            "Access aggregated learning data from all 22+ Amphoreus clients. "
+            "Three data sources:\n"
+            "  - 'patterns': universal engagement patterns that hold across 3+ clients "
+            "(e.g., 'opening with concrete numbers predicts +0.42 reward lift')\n"
+            "  - 'hooks': top-performing hooks across all clients with engagement scores "
+            "and style classifications (number_led, personal_story, contrarian, etc.)\n"
+            "  - 'principles': learned quality principles discovered from top vs bottom "
+            "performers across the full client portfolio\n\n"
+            "Use this to compare the current client's patterns against what works "
+            "across the portfolio. Findings from 22 clients × 30+ posts each "
+            "are far more statistically robust than any single client's data."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "data_source": {
+                    "type": "string",
+                    "description": "'patterns' (universal engagement patterns), 'hooks' (top-performing hooks with style tags), or 'principles' (quality principles). Pick one.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max items to return (default 15).",
+                },
+                "hook_style_filter": {
+                    "type": "string",
+                    "description": "For 'hooks' source only: filter by hook style. Options: 'number_led', 'personal_story', 'question', 'contrarian', 'icp_callout', 'story_climax', 'declarative'.",
+                },
+            },
+            "required": ["data_source"],
+        },
+    },
 ]
 
 
@@ -376,6 +485,12 @@ def _dispatch_tool(tool_name: str, tool_input: dict, company: str,
             return _tool_embed_and_compare(tool_input)
         elif tool_name == "store_finding":
             return _tool_store_finding(tool_input, company)
+        elif tool_name == "search_linkedin_posts":
+            return _tool_search_linkedin_posts(tool_input)
+        elif tool_name == "search_linkedin_semantic":
+            return _tool_search_linkedin_semantic(tool_input)
+        elif tool_name == "query_cross_client_data":
+            return _tool_query_cross_client_data(tool_input)
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
     except Exception as e:
@@ -725,6 +840,256 @@ def _tool_store_finding(tool_input: dict, company: str) -> str:
 
 
 # ------------------------------------------------------------------
+# LinkedIn-wide and cross-client tools
+# ------------------------------------------------------------------
+
+def _tool_search_linkedin_posts(tool_input: dict) -> str:
+    """Keyword search over 200K+ LinkedIn posts in Supabase."""
+    query = tool_input.get("query", "")
+    limit = min(tool_input.get("limit", 15), 30)
+    if not query:
+        return json.dumps({"error": "query is required"})
+
+    sb_url = os.environ.get("SUPABASE_URL", "")
+    sb_key = os.environ.get("SUPABASE_KEY", "")
+    if not sb_url or not sb_key:
+        return json.dumps({"error": "SUPABASE_URL / SUPABASE_KEY not configured"})
+
+    try:
+        import httpx
+        # Use the longest keyword for the primary ilike filter, then post-filter
+        keywords = [w.strip() for w in query.split() if len(w.strip()) >= 3]
+        if not keywords:
+            return json.dumps({"error": "Query too short — use 3+ character words"})
+        keywords.sort(key=len, reverse=True)
+        primary = keywords[0]
+
+        resp = httpx.get(
+            f"{sb_url}/rest/v1/linkedin_posts",
+            params={
+                "select": "hook,post_text,posted_at,creator_username,"
+                          "total_reactions,total_comments,total_reposts,"
+                          "engagement_score,is_outlier",
+                "post_text": f"ilike.*{primary}*",
+                "is_company_post": "eq.false",
+                "order": "engagement_score.desc",
+                "limit": str(limit * 5),  # overfetch for keyword filtering
+            },
+            headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+
+        # Post-filter: all keywords must match
+        results = []
+        for row in rows:
+            text = (row.get("post_text") or "").lower()
+            if all(kw.lower() in text for kw in keywords):
+                results.append(row)
+            if len(results) >= limit:
+                break
+
+        if not results:
+            return json.dumps({"query": query, "results": [], "count": 0,
+                               "note": "No posts matched all keywords"})
+
+        # Compact format for the model
+        compact = []
+        for r in results:
+            eng = r.get("engagement_score") or 0
+            compact.append({
+                "creator": r.get("creator_username", "?"),
+                "date": (r.get("posted_at") or "")[:10],
+                "reactions": r.get("total_reactions", 0),
+                "comments": r.get("total_comments", 0),
+                "reposts": r.get("total_reposts", 0),
+                "engagement": round(eng / 100, 2) if eng else 0,
+                "is_outlier": r.get("is_outlier", False),
+                "hook": (r.get("hook") or "")[:200],
+                "text": (r.get("post_text") or "")[:800],
+            })
+        return json.dumps({"query": query, "count": len(compact), "results": compact}, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": f"LinkedIn search failed: {str(e)[:200]}"})
+
+
+def _tool_search_linkedin_semantic(tool_input: dict) -> str:
+    """Semantic search over LinkedIn posts via Pinecone vector index."""
+    concept = tool_input.get("concept", "")
+    limit = min(tool_input.get("limit", 10), 20)
+    if not concept:
+        return json.dumps({"error": "concept is required"})
+
+    pc_key = os.environ.get("PINECONE_API_KEY", "")
+    oai_key = os.environ.get("OPENAI_API_KEY", "")
+    sb_url = os.environ.get("SUPABASE_URL", "")
+    sb_key = os.environ.get("SUPABASE_KEY", "")
+
+    if not pc_key or not oai_key:
+        return json.dumps({"error": "PINECONE_API_KEY / OPENAI_API_KEY not configured"})
+
+    try:
+        from openai import OpenAI
+        from pinecone import Pinecone
+
+        # Embed the query
+        oai = OpenAI()
+        pc = Pinecone(api_key=pc_key)
+        idx = pc.Index("linkedin-posts")
+        stats = idx.describe_index_stats()
+        dims = stats.get("dimension", 1536)
+
+        resp = oai.embeddings.create(input=[concept], model="text-embedding-3-small",
+                                      dimensions=dims)
+        vec = resp.data[0].embedding
+
+        # Query Pinecone
+        results = idx.query(vector=vec, top_k=limit, namespace="v2",
+                            include_metadata=True)
+        matches = results.get("matches", [])
+        if not matches:
+            return json.dumps({"concept": concept, "results": [], "count": 0})
+
+        # Hydrate from Supabase if possible
+        urns = [m["id"] for m in matches]
+        posts_by_urn = {}
+        if sb_url and sb_key:
+            import httpx
+            urn_filter = ",".join(f'"{u}"' for u in urns[:limit])
+            try:
+                r = httpx.get(
+                    f"{sb_url}/rest/v1/linkedin_posts",
+                    params={
+                        "select": "provider_urn,hook,post_text,posted_at,creator_username,"
+                                  "total_reactions,total_comments,total_reposts,"
+                                  "engagement_score,is_outlier",
+                        "provider_urn": f"in.({urn_filter})",
+                    },
+                    headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"},
+                    timeout=30.0,
+                )
+                r.raise_for_status()
+                for row in r.json():
+                    if row.get("provider_urn"):
+                        posts_by_urn[row["provider_urn"]] = row
+            except Exception:
+                pass
+
+        compact = []
+        for m in matches:
+            row = posts_by_urn.get(m["id"])
+            sim = m.get("score", 0)
+            if row:
+                eng = row.get("engagement_score") or 0
+                compact.append({
+                    "similarity": round(sim, 3),
+                    "creator": row.get("creator_username", "?"),
+                    "date": (row.get("posted_at") or "")[:10],
+                    "reactions": row.get("total_reactions", 0),
+                    "comments": row.get("total_comments", 0),
+                    "engagement": round(eng / 100, 2) if eng else 0,
+                    "hook": (row.get("hook") or "")[:200],
+                    "text": (row.get("post_text") or "")[:600],
+                })
+            else:
+                meta = m.get("metadata", {})
+                compact.append({
+                    "similarity": round(sim, 3),
+                    "text": str(meta.get("post_text", meta.get("text", "")))[:600],
+                })
+        return json.dumps({"concept": concept, "count": len(compact), "results": compact}, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": f"Semantic search failed: {str(e)[:200]}"})
+
+
+def _tool_query_cross_client_data(tool_input: dict) -> str:
+    """Access aggregated learning data from all Amphoreus clients."""
+    source = tool_input.get("data_source", "")
+    limit = min(tool_input.get("limit", 15), 50)
+
+    our_memory = vortex.our_memory_dir()
+
+    if source == "patterns":
+        path = our_memory / "universal_patterns.json"
+        if not path.exists():
+            return json.dumps({"error": "No universal patterns file found"})
+        try:
+            patterns = json.loads(path.read_text(encoding="utf-8"))
+            # Sort by confidence × evidence
+            patterns.sort(
+                key=lambda p: p.get("confidence", 0) * p.get("evidence_clients", 1),
+                reverse=True,
+            )
+            compact = []
+            for p in patterns[:limit]:
+                compact.append({
+                    "pattern": p.get("pattern", ""),
+                    "confidence": p.get("confidence", 0),
+                    "evidence_clients": p.get("evidence_clients", 0),
+                    "avg_reward_lift": p.get("avg_reward_lift", 0),
+                    "category": p.get("category", ""),
+                })
+            return json.dumps({"source": "patterns", "count": len(compact),
+                               "data": compact}, indent=2)
+        except Exception as e:
+            return json.dumps({"error": f"Failed to load patterns: {e}"})
+
+    elif source == "hooks":
+        path = our_memory / "hook_library.json"
+        if not path.exists():
+            return json.dumps({"error": "No hook library found"})
+        try:
+            hooks = json.loads(path.read_text(encoding="utf-8"))
+            style_filter = tool_input.get("hook_style_filter")
+            if style_filter:
+                hooks = [h for h in hooks if h.get("hook_style") == style_filter]
+            compact = []
+            for h in hooks[:limit]:
+                compact.append({
+                    "hook": h.get("hook", ""),
+                    "hook_style": h.get("hook_style", ""),
+                    "engagement_score": h.get("engagement_score", 0),
+                    "impressions": h.get("impressions", 0),
+                    "char_count": h.get("char_count", 0),
+                })
+            return json.dumps({"source": "hooks", "count": len(compact),
+                               "style_filter": style_filter, "data": compact}, indent=2)
+        except Exception as e:
+            return json.dumps({"error": f"Failed to load hooks: {e}"})
+
+    elif source == "principles":
+        path = our_memory / "learned_principles.json"
+        if not path.exists():
+            return json.dumps({"error": "No learned principles found"})
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            principles = data.get("principles", [])
+            compact = []
+            for p in principles[:limit]:
+                compact.append({
+                    "id": p.get("id", ""),
+                    "name": p.get("name", ""),
+                    "description": p.get("description", ""),
+                    "evidence_count": p.get("evidence_count", 0),
+                })
+            return json.dumps({
+                "source": "principles",
+                "count": len(compact),
+                "source_observations": data.get("source_observations", 0),
+                "source_clients": data.get("source_clients", 0),
+                "data": compact,
+            }, indent=2)
+        except Exception as e:
+            return json.dumps({"error": f"Failed to load principles: {e}"})
+
+    else:
+        return json.dumps({"error": f"Unknown data_source: {source}. Use 'patterns', 'hooks', or 'principles'."})
+
+
+# ------------------------------------------------------------------
 # Agent loop
 # ------------------------------------------------------------------
 
@@ -776,8 +1141,12 @@ def run_analysis(company: str, verbose: bool = False) -> dict:
         f"- Formats: {dict(formats.most_common())}\n"
         f"- Date range: {scored[0].get('posted_at', '?')[:10]} to "
         f"{scored[-1].get('posted_at', '?')[:10]}\n\n"
-        "Start by exploring the data with query_observations, then form and test "
-        "hypotheses. Store each actionable finding with store_finding."
+        "Start by exploring the client's data with query_observations. Then form "
+        "hypotheses and test them using both the client's own data AND the LinkedIn-wide "
+        "database (search_linkedin_posts, search_linkedin_semantic) and cross-client "
+        "patterns (query_cross_client_data). Validate client-level findings against "
+        "ecosystem-wide evidence when possible. Store each actionable finding with "
+        "store_finding."
     )
 
     # Also load the fixed pipeline's findings so the agent can compare
