@@ -25,7 +25,7 @@ export default function HomePage() {
     { title: "Ghostwriter", href: `/ghostwriter/${slug}`, description: "Generate LinkedIn posts via Stelle" },
     { title: "Interview Briefing", href: `/briefings/${slug}`, description: "Generate pre-call questions via Aglaea" },
     { title: "Interview Companion", href: `/interview/${slug}`, description: "Live transcript + follow-up suggestions via Tribbie" },
-    { title: "Content Strategy", href: `/strategy/${slug}`, description: "Generate or view content strategy via Screwllum" },
+    { title: "Content Strategy", href: `/strategy/${slug}`, description: "Generate or view content strategy via Herta" },
   ];
 
   async function launchClassicGui() {

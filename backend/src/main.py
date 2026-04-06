@@ -64,6 +64,7 @@ from backend.src.api.routers import (
     interview,
     learning,
     posts,
+    report,
     research,
     strategy,
 )
@@ -80,6 +81,7 @@ app.include_router(images.router)
 app.include_router(research.router)
 app.include_router(cs.router)
 app.include_router(learning.router)
+app.include_router(report.router)
 
 
 @app.get("/health")

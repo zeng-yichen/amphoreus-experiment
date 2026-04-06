@@ -160,6 +160,16 @@ export const strategyApi = {
     apiFetch<{ html: string | null }>(`/api/strategy/${company}/html`),
 };
 
+// --- Progress Report ---
+
+export const reportApi = {
+  getData: (company: string, weeks = 2) =>
+    apiFetch<any>(`/api/report/${company}?weeks=${weeks}`),
+
+  getHtml: (company: string, weeks = 2) =>
+    apiFetch<{ html: string }>(`/api/report/${company}/html?weeks=${weeks}`),
+};
+
 // --- Posts ---
 
 export const postsApi = {

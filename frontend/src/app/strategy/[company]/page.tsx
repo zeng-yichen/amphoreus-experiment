@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import { useState, useRef, useEffect, useCallback } from "react";
-import { strategyApi } from "@/lib/api";
+import { strategyApi, reportApi } from "@/lib/api";
 import Link from "next/link";
 
 interface TerminalLine {
@@ -19,7 +19,10 @@ export default function StrategyPage() {
   const [lines, setLines] = useState<TerminalLine[]>([]);
   const [currentStrategy, setCurrentStrategy] = useState<string | null>(null);
   const [loadingStrategy, setLoadingStrategy] = useState(true);
-  const [activeView, setActiveView] = useState<"strategy" | "terminal">("strategy");
+  const [reportHtml, setReportHtml] = useState<string | null>(null);
+  const [loadingReport, setLoadingReport] = useState(false);
+  const [reportWeeks, setReportWeeks] = useState(2);
+  const [activeView, setActiveView] = useState<"strategy" | "report" | "terminal">("strategy");
   const terminalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -31,8 +34,14 @@ export default function StrategyPage() {
   const loadCurrentStrategy = useCallback(async () => {
     setLoadingStrategy(true);
     try {
-      const res = await strategyApi.getCurrent(company);
-      setCurrentStrategy(res.strategy);
+      // Prefer HTML version for proper rendering; fall back to markdown
+      const htmlRes = await strategyApi.getHtml(company);
+      if (htmlRes.html) {
+        setCurrentStrategy(htmlRes.html);
+      } else {
+        const mdRes = await strategyApi.getCurrent(company);
+        setCurrentStrategy(mdRes.strategy);
+      }
     } catch {
       setCurrentStrategy(null);
     } finally {
@@ -43,6 +52,24 @@ export default function StrategyPage() {
   useEffect(() => {
     loadCurrentStrategy();
   }, [loadCurrentStrategy]);
+
+  const loadReport = useCallback(async (weeks: number) => {
+    setLoadingReport(true);
+    try {
+      const res = await reportApi.getHtml(company, weeks);
+      setReportHtml(res.html);
+    } catch {
+      setReportHtml(null);
+    } finally {
+      setLoadingReport(false);
+    }
+  }, [company]);
+
+  useEffect(() => {
+    if (activeView === "report" && !reportHtml && !loadingReport) {
+      loadReport(reportWeeks);
+    }
+  }, [activeView, reportHtml, loadingReport, loadReport, reportWeeks]);
 
   async function handleGenerate() {
     if (isGenerating) return;
@@ -108,7 +135,7 @@ export default function StrategyPage() {
       </header>
 
       <div className="flex border-b border-stone-200 bg-stone-50 px-6">
-        {(["strategy", "terminal"] as const).map((tab) => (
+        {(["strategy", "report", "terminal"] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveView(tab)}
@@ -118,7 +145,7 @@ export default function StrategyPage() {
                 : "border-transparent text-stone-500 hover:text-stone-700"
             }`}
           >
-            {tab === "strategy" ? "Current Strategy" : "Generation Progress"}
+            {tab === "strategy" ? "Current Strategy" : tab === "report" ? "Progress Report" : "Generation Progress"}
           </button>
         ))}
       </div>
@@ -129,14 +156,72 @@ export default function StrategyPage() {
             {loadingStrategy ? (
               <p className="text-stone-500">Loading strategy...</p>
             ) : currentStrategy ? (
-              <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-stone-800">
-                {currentStrategy}
-              </pre>
+              currentStrategy.trimStart().startsWith("<!DOCTYPE") || currentStrategy.trimStart().startsWith("<html") ? (
+                <div
+                  className="strategy-embed"
+                  dangerouslySetInnerHTML={{ __html: currentStrategy }}
+                />
+              ) : (
+                <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-stone-800">
+                  {currentStrategy}
+                </pre>
+              )
             ) : (
               <div className="rounded-lg border border-dashed border-stone-300 p-8 text-center">
                 <p className="text-stone-500">No content strategy found for {company}.</p>
                 <p className="mt-1 text-sm text-stone-400">
                   Click Generate Strategy to create one from interview transcripts and post data.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeView === "report" && (
+          <div className="mx-auto max-w-5xl p-8">
+            <div className="mb-4 flex items-center gap-3">
+              <label className="text-sm text-stone-500">Window:</label>
+              <select
+                value={reportWeeks}
+                onChange={(e) => {
+                  const w = Number(e.target.value);
+                  setReportWeeks(w);
+                  setReportHtml(null);
+                  loadReport(w);
+                }}
+                className="rounded border border-stone-200 px-2 py-1 text-sm"
+              >
+                <option value={1}>1 week</option>
+                <option value={2}>2 weeks</option>
+                <option value={3}>3 weeks</option>
+                <option value={4}>4 weeks</option>
+              </select>
+              <button
+                onClick={() => { setReportHtml(null); loadReport(reportWeeks); }}
+                disabled={loadingReport}
+                className="rounded-lg bg-stone-900 px-3 py-1 text-xs font-medium text-white hover:bg-stone-800 disabled:opacity-50"
+              >
+                {loadingReport ? "Generating..." : "Refresh"}
+              </button>
+            </div>
+            {loadingReport ? (
+              <div className="flex items-center gap-2 py-12 text-stone-500">
+                <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
+                  <path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="4" strokeLinecap="round" className="opacity-75" />
+                </svg>
+                Generating progress report...
+              </div>
+            ) : reportHtml ? (
+              <div
+                className="report-embed rounded-lg border border-stone-200 bg-white"
+                dangerouslySetInnerHTML={{ __html: reportHtml }}
+              />
+            ) : (
+              <div className="rounded-lg border border-dashed border-stone-300 p-8 text-center">
+                <p className="text-stone-500">No report data available for {company}.</p>
+                <p className="mt-1 text-sm text-stone-400">
+                  Click Refresh to generate a progress report from Ordinal analytics and learning data.
                 </p>
               </div>
             )}
