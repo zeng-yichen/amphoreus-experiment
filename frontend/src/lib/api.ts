@@ -129,6 +129,21 @@ export const briefingsApi = {
 
 // --- Strategy ---
 
+// --- Analyst Findings ---
+
+export const analystApi = {
+  getFindings: (company: string) =>
+    apiFetch<{ company: string; findings: any[]; last_run: any; age_days: number; total_runs: number }>(
+      `/api/strategy/findings/${company}`
+    ),
+  refresh: (company: string) =>
+    apiFetch<{ company: string; findings: any[]; last_run: any }>(
+      `/api/strategy/findings/${company}/refresh`
+    ),
+};
+
+// --- Strategy ---
+
 export const strategyApi = {
   generate: (company: string, prompt?: string) =>
     apiFetch<{ job_id: string }>("/api/strategy/generate", {

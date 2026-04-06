@@ -15,23 +15,28 @@ function StatCard({ label, value, sub }: { label: string; value: string | number
   );
 }
 
-function ReadinessBar({ label, current, target, active }: { label: string; current: number; target: number; active: boolean }) {
-  const pct = Math.min(100, (current / Math.max(target, 1)) * 100);
+function ReadinessIndicator({ label, active }: { label: string; active: boolean }) {
   return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between text-xs">
-        <span className="text-stone-400">{label}</span>
-        <span className={active ? "text-emerald-400" : "text-stone-500"}>
-          {active ? "ACTIVE" : `${current}/${target}`}
-        </span>
-      </div>
-      <div className="h-1.5 w-full rounded-full bg-stone-800">
-        <div
-          className={`h-1.5 rounded-full transition-all ${active ? "bg-emerald-500" : "bg-stone-600"}`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
+    <div className="flex items-center gap-2 rounded bg-stone-800/50 px-3 py-2">
+      <div className={`h-2 w-2 rounded-full ${active ? "bg-emerald-500" : "bg-stone-600"}`} />
+      <span className="text-xs text-stone-400">{label}</span>
+      <span className={`ml-auto text-xs font-medium ${active ? "text-emerald-400" : "text-stone-500"}`}>
+        {active ? "ACTIVE" : "WAITING"}
+      </span>
     </div>
+  );
+}
+
+function ConfidenceBadge({ confidence }: { confidence: string }) {
+  const colors: Record<string, string> = {
+    strong: "bg-emerald-950 text-emerald-400",
+    suggestive: "bg-amber-950 text-amber-400",
+    weak: "bg-stone-800 text-stone-400",
+  };
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${colors[confidence] || colors.weak}`}>
+      {confidence}
+    </span>
   );
 }
 
@@ -71,7 +76,9 @@ export default function ClientLearningDetail() {
   const cad = data.cadence || {};
   const lola = data.lola;
   const rd = data.readiness || {};
-  const temporal = data.temporal;
+  const tags = data.tags || {};
+  const analyst = data.analyst;
+  const directives = data.directives;
   const icp = data.icp;
 
   return (
@@ -108,73 +115,125 @@ export default function ClientLearningDetail() {
           </div>
         )}
 
-        {/* Adaptive readiness */}
+        {/* System readiness */}
         <div className="mt-6 rounded-lg border border-stone-800 bg-stone-900 p-5">
-          <p className="text-sm font-medium text-stone-300">Adaptive System Readiness</p>
-          <div className="mt-4 grid grid-cols-2 gap-4">
-            <ReadinessBar
-              label="Permansor Weights"
-              current={rd.permansor_dims}
-              target={10}
-              active={rd.permansor_weights_ready}
-            />
-            <ReadinessBar
-              label="Constitutional Learning"
-              current={rd.permansor_dims}
-              target={15}
-              active={rd.constitutional_ready}
-            />
-            <ReadinessBar
-              label="Freeform Critic"
-              current={obs.scored}
-              target={10}
-              active={rd.freeform_critic_active}
-            />
-            <ReadinessBar
-              label="Emergent Dimensions"
-              current={rd.permansor_dims}
-              target={40}
-              active={rd.emergent_dims_ready}
-            />
-            <ReadinessBar
-              label="Continuous LOLA"
-              current={lola?.content_points || 0}
-              target={10}
-              active={rd.continuous_lola_active}
-            />
-            <div className="flex items-center gap-2 rounded bg-stone-800/50 px-3 py-2">
-              <span className="text-xs text-stone-500">Dimension set:</span>
-              <span className={`text-xs font-medium ${rd.current_dimension_set === "fixed_v1" ? "text-stone-400" : "text-emerald-400"}`}>
-                {rd.current_dimension_set}
-              </span>
-            </div>
+          <p className="text-sm font-medium text-stone-300">System Readiness</p>
+          <div className="mt-4 grid grid-cols-3 gap-3">
+            <ReadinessIndicator label="Observation Tagger" active={rd.observation_tagger_active} />
+            <ReadinessIndicator label="Analyst Agent" active={rd.analyst_active} />
+            <ReadinessIndicator label="Learned Directives" active={rd.directives_active} />
+            <ReadinessIndicator label="Freeform Critic" active={rd.freeform_critic_active} />
+            <ReadinessIndicator label="Cyrene Weights" active={rd.cyrene_weights_ready} />
           </div>
         </div>
+
+        {/* Analyst Findings */}
+        {analyst && analyst.latest_findings?.length > 0 && (
+          <div className="mt-6 rounded-lg border border-stone-800 bg-stone-900 p-5">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium text-stone-300">Analyst Findings</p>
+              {analyst.last_run && (
+                <span className="text-[10px] text-stone-500">
+                  {analyst.last_run.timestamp?.slice(0, 10)} · {analyst.last_run.tool_calls} tools ·{" "}
+                  {Math.round(analyst.last_run.elapsed_seconds)}s · {analyst.total_runs} runs total
+                </span>
+              )}
+            </div>
+            <div className="mt-4 space-y-3">
+              {analyst.latest_findings.map((f: any, i: number) => (
+                <div key={i} className="border-l-2 border-stone-700 pl-3">
+                  <div className="flex items-start gap-2">
+                    <ConfidenceBadge confidence={f.confidence} />
+                    <p className="text-sm text-stone-200">{f.claim}</p>
+                  </div>
+                  {f.evidence && (
+                    <p className="mt-1 text-xs text-stone-500">{f.evidence}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Observation Tags */}
+        {tags.tagged_count > 0 && (
+          <div className="mt-6 rounded-lg border border-stone-800 bg-stone-900 p-5">
+            <p className="text-sm font-medium text-stone-300">Content Distribution</p>
+            <p className="mt-1 text-xs text-stone-500">{tags.tagged_count} posts tagged</p>
+            <div className="mt-4 grid grid-cols-2 gap-6">
+              <div>
+                <p className="text-xs text-stone-500">Topics</p>
+                <div className="mt-2 space-y-1">
+                  {Object.entries(tags.topics || {}).map(([topic, count]: [string, any]) => (
+                    <div key={topic} className="flex items-center justify-between text-sm">
+                      <span className="text-stone-300">{topic}</span>
+                      <span className="text-stone-500">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <p className="text-xs text-stone-500">Formats</p>
+                <div className="mt-2 space-y-1">
+                  {Object.entries(tags.formats || {}).map(([fmt, count]: [string, any]) => (
+                    <div key={fmt} className="flex items-center justify-between text-sm">
+                      <span className="text-stone-300">{fmt}</span>
+                      <span className="text-stone-500">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Learned Directives */}
+        {directives && directives.rules?.length > 0 && (
+          <div className="mt-6 rounded-lg border border-stone-800 bg-stone-900 p-5">
+            <p className="text-sm font-medium text-stone-300">Learned Writing Rules</p>
+            <p className="mt-1 text-xs text-stone-500">{directives.count} rules from {
+              [...new Set(directives.rules.map((r: any) => r.source))].join(", ")
+            }</p>
+            <div className="mt-4 space-y-2">
+              {directives.rules.map((r: any, i: number) => (
+                <div key={i} className="flex items-start gap-2 text-sm">
+                  <span className={`mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${
+                    r.priority === "high"
+                      ? "bg-red-950 text-red-400"
+                      : "bg-stone-800 text-stone-400"
+                  }`}>
+                    {r.priority}
+                  </span>
+                  <span className="text-stone-300">{r.directive}</span>
+                  {r.efficacy !== "untested" && (
+                    <span className={`shrink-0 text-[10px] ${
+                      r.efficacy === "validated" ? "text-emerald-400" :
+                      r.efficacy === "counterproductive" ? "text-red-400" : "text-stone-500"
+                    }`}>
+                      {r.efficacy}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* LOLA */}
         {lola && (
           <div className="mt-6 rounded-lg border border-stone-800 bg-stone-900 p-5">
             <div className="flex items-center justify-between">
-              <p className="text-sm font-medium text-stone-300">
-                Content Direction (LOLA)
-              </p>
-              <span className={`rounded px-2 py-0.5 text-[10px] font-medium ${lola.using_continuous ? "bg-emerald-950 text-emerald-400" : "bg-stone-800 text-stone-400"}`}>
+              <p className="text-sm font-medium text-stone-300">Content Direction (LOLA)</p>
+              <span className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+                lola.using_continuous ? "bg-emerald-950 text-emerald-400" : "bg-stone-800 text-stone-400"
+              }`}>
                 {lola.using_continuous ? "Continuous Field" : "Arm-Based"}
               </span>
             </div>
             <div className="mt-3 grid grid-cols-3 gap-3 text-sm">
-              <div>
-                <span className="text-stone-500">Pulls:</span>{" "}
-                <span className="text-stone-200">{lola.total_pulls}</span>
-              </div>
-              <div>
-                <span className="text-stone-500">Content Points:</span>{" "}
-                <span className="text-stone-200">{lola.content_points}</span>
-              </div>
-              <div>
-                <span className="text-stone-500">Exploration:</span>{" "}
-                <span className="text-stone-200">{(lola.exploration_rate * 100).toFixed(0)}%</span>
-              </div>
+              <div><span className="text-stone-500">Pulls:</span> <span className="text-stone-200">{lola.total_pulls}</span></div>
+              <div><span className="text-stone-500">Content Points:</span> <span className="text-stone-200">{lola.content_points}</span></div>
+              <div><span className="text-stone-500">Exploration:</span> <span className="text-stone-200">{(lola.exploration_rate * 100).toFixed(0)}%</span></div>
             </div>
             {lola.top_arms?.length > 0 && (
               <div className="mt-4">
@@ -194,29 +253,6 @@ export default function ClientLearningDetail() {
                 </div>
               </div>
             )}
-          </div>
-        )}
-
-        {/* Temporal */}
-        {temporal && (
-          <div className="mt-6 rounded-lg border border-stone-800 bg-stone-900 p-5">
-            <p className="text-sm font-medium text-stone-300">Scheduling Intelligence</p>
-            <div className="mt-3 flex flex-wrap gap-4 text-sm">
-              <div>
-                <span className="text-stone-500">Best days:</span>{" "}
-                <span className="text-stone-200">{temporal.best_days?.join(", ")}</span>
-              </div>
-              <div>
-                <span className="text-stone-500">Best hours:</span>{" "}
-                <span className="text-stone-200">{temporal.best_hours?.map((h: number) => `${h}:00`).join(", ")}</span>
-              </div>
-              {temporal.cooldown_hours && (
-                <div>
-                  <span className="text-stone-500">Cooldown:</span>{" "}
-                  <span className="text-stone-200">{Math.round(temporal.cooldown_hours)}h</span>
-                </div>
-              )}
-            </div>
           </div>
         )}
 

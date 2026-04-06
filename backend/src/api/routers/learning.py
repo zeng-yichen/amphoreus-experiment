@@ -38,7 +38,16 @@ def _collect_client(company: str) -> dict:
     data: dict = {"company": company}
 
     # --- RuanMei ---
-    rm_state = _load_json(P.memory_dir(company) / "ruan_mei_state.json")
+    # Use the SQLite load path (same as RuanMei, ordinal_sync, and all other
+    # consumers). The old JSON file at ruan_mei_state.json may be stale —
+    # after the SQLite migration, saves go to SQLite and the JSON isn't updated.
+    rm_state = None
+    try:
+        from backend.src.db.local import initialize_db, ruan_mei_load
+        initialize_db()
+        rm_state = ruan_mei_load(company)
+    except Exception:
+        rm_state = _load_json(P.memory_dir(company) / "ruan_mei_state.json")
     obs = rm_state.get("observations", []) if rm_state else []
     scored = [o for o in obs if o.get("status") == "scored"]
     pending = [o for o in obs if o.get("status") == "pending"]
@@ -111,49 +120,79 @@ def _collect_client(company: str) -> dict:
     else:
         data["lola"] = None
 
+    # --- Observation tags ---
+    from collections import Counter
+    topic_dist = Counter(o.get("topic_tag") for o in scored if o.get("topic_tag"))
+    format_dist = Counter(o.get("format_tag") for o in scored if o.get("format_tag"))
+    data["tags"] = {
+        "tagged_count": sum(1 for o in scored if o.get("topic_tag")),
+        "topics": dict(topic_dist.most_common()),
+        "formats": dict(format_dist.most_common()),
+    }
+
+    # --- Analyst findings ---
+    analyst = _load_json(P.memory_dir(company) / "analyst_findings.json")
+    if analyst:
+        findings = analyst.get("findings", [])
+        runs = analyst.get("runs", [])
+        last_run = runs[-1] if runs else {}
+        latest_run_id = last_run.get("run_id", "")
+
+        # Only surface latest run's findings
+        if latest_run_id:
+            latest_findings = [f for f in findings if f.get("run_id") == latest_run_id]
+        else:
+            latest_findings = findings[-10:]
+
+        data["analyst"] = {
+            "total_runs": len(runs),
+            "total_findings_all_time": len(findings),
+            "latest_findings": [
+                {
+                    "claim": f.get("claim", ""),
+                    "confidence": f.get("confidence", "?"),
+                    "evidence": f.get("evidence", "")[:200],
+                }
+                for f in latest_findings
+            ],
+            "last_run": {
+                "timestamp": last_run.get("timestamp", ""),
+                "tool_calls": last_run.get("tool_calls", 0),
+                "findings_stored": last_run.get("findings_stored", 0),
+                "elapsed_seconds": last_run.get("elapsed_seconds", 0),
+            } if last_run else None,
+        }
+    else:
+        data["analyst"] = None
+
+    # --- Learned directives ---
+    directives = _load_json(P.memory_dir(company) / "learned_directives.json")
+    if directives:
+        data["directives"] = {
+            "count": len(directives.get("directives", [])),
+            "rules": [
+                {
+                    "directive": d.get("directive", ""),
+                    "priority": d.get("priority", "medium"),
+                    "source": d.get("source", "?"),
+                    "efficacy": d.get("efficacy_classification", "untested"),
+                }
+                for d in directives.get("directives", [])
+            ],
+        }
+    else:
+        data["directives"] = None
+
     # --- Adaptive readiness ---
     obs_with_perm = sum(1 for o in obs if o.get("cyrene_dimensions"))
-    obs_with_const = sum(1 for o in obs if o.get("constitutional_results"))
     data["readiness"] = {
         "cyrene_dims": obs_with_perm,
         "cyrene_weights_ready": obs_with_perm >= 10,
-        "cyrene_weights_need": max(0, 10 - obs_with_perm),
-        "constitutional_ready": obs_with_const >= 15,
-        "constitutional_need": max(0, 15 - obs_with_const),
-        "emergent_dims_ready": obs_with_perm >= 40,
-        "emergent_dims_need": max(0, 40 - obs_with_perm),
         "freeform_critic_active": len(scored) >= 10,
-        "continuous_lola_active": len(lola.get("points", [])) >= 10 if lola else False,
+        "observation_tagger_active": data["tags"]["tagged_count"] > 0,
+        "analyst_active": data["analyst"] is not None and bool(data["analyst"].get("latest_findings")),
+        "directives_active": data["directives"] is not None and data["directives"]["count"] > 0,
     }
-
-    # Latest dimension set
-    for o in reversed(obs):
-        ds = o.get("cyrene_dimension_set")
-        if ds:
-            data["readiness"]["current_dimension_set"] = ds
-            break
-    else:
-        data["readiness"]["current_dimension_set"] = "fixed_v1"
-
-    # --- Temporal ---
-    temporal = _load_json(P.memory_dir(company) / "temporal_state.json")
-    if temporal:
-        days_map = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        data["temporal"] = {
-            "best_days": [days_map[d] for d in temporal.get("best_days", []) if 0 <= d <= 6],
-            "best_hours": temporal.get("best_hours", []),
-            "cooldown_hours": temporal.get("cooldown_hours"),
-            "adaptive_tier": temporal.get("adaptive_tier", "default"),
-        }
-    else:
-        data["temporal"] = None
-
-    # --- Series ---
-    series = _load_json(P.memory_dir(company) / "series_state.json")
-    data["series"] = series
-
-    # Style rules removed: feedback learning happens through RuanMei
-    # observations (draft → final → engagement), not categorical rules.
 
     # --- ICP ---
     icp = _load_json(P.icp_definition_path(company))
