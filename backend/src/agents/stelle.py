@@ -3909,6 +3909,12 @@ def _process_result(
                     _extra_fields["cyrene_dimensions"] = _dim_scores
                 _extra_fields["cyrene_composite"] = _refine_result.best_score
                 _extra_fields["cyrene_iterations"] = _refine_result.total_iterations
+                # Per-iteration composite scores — enables the adaptive config
+                # to learn the marginal value of each additional revision cycle
+                # and set the iteration ceiling per-client.
+                _extra_fields["cyrene_iteration_scores"] = [
+                    it.get("composite_score", 0) for it in _refine_result.iterations
+                ]
                 _extra_fields["cyrene_weights_tier"] = _refine_result.adaptive_tier
                 _extra_fields["cyrene_dimension_set"] = _refine_result.dimension_set
 

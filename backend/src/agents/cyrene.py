@@ -15,7 +15,8 @@ The critic scores each draft along 7 platform-native dimensions:
 
 Each dimension gets a 1-5 score with specific actionable feedback.
 The reviser only addresses dimensions scoring ≤3.
-After MAX_ITERATIONS, ships the best version by composite score.
+After the learned iteration ceiling (or pass threshold), ships the best version
+by composite score.
 
 Usage:
     from backend.src.agents.cyrene import refine_post, refine_batch
@@ -41,7 +42,12 @@ import anthropic
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 3
+# Safety ceiling for the critique-revise loop. NOT the typical iteration count —
+# most posts pass on iteration 1-2 via the learned pass_threshold. The ceiling is
+# a guard against infinite loops, not a target. Set high enough that the learned
+# early-exit conditions (pass_threshold, min_improvement) are what actually control
+# convergence, not this number.
+_DEFAULT_MAX_ITERATIONS = 8
 _DEFAULT_PASS_THRESHOLD = 3.5
 _DEFAULT_MIN_IMPROVEMENT = 0.15
 _MIN_OBS_FOR_FREEFORM = 5     # switch from dimension-based to freeform critic early
@@ -83,6 +89,7 @@ class CyreneAdaptiveConfig:
             "dimension_weights": dict(_DEFAULT_DIMENSION_WEIGHTS),
             "pass_threshold": _DEFAULT_PASS_THRESHOLD,
             "min_improvement": _DEFAULT_MIN_IMPROVEMENT,
+            "max_iterations": _DEFAULT_MAX_ITERATIONS,
         }
 
     def sufficient_data(self, company: str) -> bool:
@@ -312,10 +319,55 @@ class CyreneAdaptiveConfig:
         else:
             cache_ttl = 14
 
+        # Learned max_iterations: how many critique-revise cycles does this
+        # client typically need before the critic is satisfied?
+        #
+        # The ceiling is a safety net, not a target. The pass_threshold and
+        # min_improvement early-exit conditions are what actually drive
+        # convergence — the ceiling should be generous enough that they
+        # almost always fire before it binds. When data shows that extra
+        # iterations don't help (or hurt), the ceiling tightens.
+        learned_max = _DEFAULT_MAX_ITERATIONS
+        iter_data = [
+            (o.get("cyrene_iterations", 0), o.get("reward", {}).get("immediate", 0))
+            for o in observations
+            if o.get("cyrene_iterations") and o.get("reward", {}).get("immediate") is not None
+        ]
+        if len(iter_data) >= 10:
+            iters = [d[0] for d in iter_data]
+            iter_rewards = [d[1] for d in iter_data]
+            median_iter = sorted(iters)[len(iters) // 2]
+
+            # Check: do more iterations correlate with worse engagement?
+            # If yes, the critic is overpolishing — cap at the median.
+            try:
+                from backend.src.utils.correlation_analyzer import _spearman_correlation
+                iter_engagement_corr = _spearman_correlation(
+                    [float(i) for i in iters], iter_rewards,
+                )
+            except Exception:
+                iter_engagement_corr = 0.0
+
+            if iter_engagement_corr < -0.15:
+                # More iterations → worse posts. Cap tightly.
+                learned_max = max(2, median_iter)
+                logger.info(
+                    "[CyreneConfig] Overpolishing detected for this client "
+                    "(iter-reward corr=%.3f). Capping max_iterations at %d.",
+                    iter_engagement_corr, learned_max,
+                )
+            else:
+                # Normal: set ceiling at median + headroom, bounded by default.
+                learned_max = min(
+                    _DEFAULT_MAX_ITERATIONS,
+                    max(2, int(median_iter * 1.5) + 1),
+                )
+
         return {
             "dimension_weights": weights,
             "pass_threshold": round(threshold, 2),
             "min_improvement": min_imp,
+            "max_iterations": learned_max,
             "observation_count": len(observations),
             "emergent_min_obs": emergent_min,
             "dimension_cache_ttl_days": cache_ttl,
@@ -1265,18 +1317,27 @@ def refine_post(
     company: str,
     draft_text: str,
     transcript_excerpt: str = "",
-    max_iterations: int = MAX_ITERATIONS,
+    max_iterations: Optional[int] = None,
     event_callback: Callable | None = None,
 ) -> RefineResult:
     """Run the full SELF-REFINE loop on a single post.
 
     Returns the best version (by composite score), not necessarily the latest.
 
+    The iteration count is NOT hard-coded. The loop continues until:
+      1. The critic says the post passes (composite >= learned pass_threshold), OR
+      2. Improvement between iterations is below the learned min_improvement, OR
+      3. The safety ceiling is reached (learned per-client, default 8).
+
+    The critic decides when to stop. The ceiling is a safety net, not a target.
+    Same philosophy as Stelle's "write as many posts as the transcripts support"
+    — the LLM evaluates quality, the system just caps the worst case.
+
     Args:
         company: Client company keyword.
         draft_text: The initial draft from Stelle.
         transcript_excerpt: Source material for Magic Moment evaluation.
-        max_iterations: Maximum critique-revise cycles (default 3).
+        max_iterations: Override for the learned ceiling. None = use learned value.
         event_callback: Optional callback for progress events.
     """
     iterations: list[Iteration] = []
@@ -1292,9 +1353,14 @@ def refine_post(
     except Exception:
         pass
 
-    # Resolve adaptive min_improvement threshold
+    # Resolve adaptive thresholds — ALL three are learned from client data:
+    #   pass_threshold:   what composite score is "good enough to ship"
+    #   min_improvement:  when to stop iterating (diminishing returns)
+    #   max_iterations:   safety ceiling (overpolishing detection lowers it)
     adaptive = CyreneAdaptiveConfig().resolve(company)
     min_improvement = adaptive.get("min_improvement", _DEFAULT_MIN_IMPROVEMENT)
+    if max_iterations is None:
+        max_iterations = adaptive.get("max_iterations", _DEFAULT_MAX_ITERATIONS)
 
     for i in range(1, max_iterations + 1):
         if event_callback:
@@ -1445,7 +1511,7 @@ def refine_post(
 def refine_batch(
     company: str,
     drafts: list[dict],
-    max_iterations: int = MAX_ITERATIONS,
+    max_iterations: Optional[int] = None,
     event_callback: Callable | None = None,
 ) -> list[RefineResult]:
     """Refine multiple posts. Each dict must have 'text' key, optionally 'transcript_excerpt'.
