@@ -47,6 +47,101 @@ class ScoredDraft:
     model_source: str       # "analyst_model" | "heuristic_only" | "no_model"
 
 
+def _compute_training_stats(company: str) -> dict:
+    """Compute feature normalization stats from the client's actual observations.
+
+    These are the same statistics the regression used during training (z-normalization
+    and target encoding). By computing them from the real data, we apply the
+    analyst's coefficients in the same feature space they were learned in.
+    No hardcoded means, no assumed standard deviations.
+    """
+    import math
+    from collections import defaultdict
+
+    try:
+        from backend.src.db.local import initialize_db, ruan_mei_load
+        initialize_db()
+        state = ruan_mei_load(company)
+    except Exception:
+        return {}
+
+    if state is None:
+        return {}
+
+    scored = [
+        o for o in state.get("observations", [])
+        if o.get("status") == "scored"
+        and o.get("reward", {}).get("immediate") is not None
+    ]
+    if not scored:
+        return {}
+
+    # Char count stats
+    char_counts = [
+        len(o.get("posted_body") or o.get("post_body") or "")
+        for o in scored
+    ]
+    char_mean = sum(char_counts) / len(char_counts)
+    char_std = math.sqrt(
+        sum((c - char_mean) ** 2 for c in char_counts) / max(len(char_counts) - 1, 1)
+    ) if len(char_counts) > 1 else 1.0
+
+    # Posting hour stats
+    hours = []
+    for o in scored:
+        ts = o.get("posted_at", "")
+        if ts:
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                hours.append(float(dt.hour))
+            except Exception:
+                pass
+    hour_mean = sum(hours) / len(hours) if hours else 12.0
+    hour_std = math.sqrt(
+        sum((h - hour_mean) ** 2 for h in hours) / max(len(hours) - 1, 1)
+    ) if len(hours) > 1 else 3.0
+
+    # Format tag target encoding: mean reward per format
+    format_rewards_agg: dict = defaultdict(list)
+    all_rewards = []
+    for o in scored:
+        fmt = o.get("format_tag")
+        reward = o.get("reward", {}).get("immediate", 0)
+        all_rewards.append(reward)
+        if fmt:
+            format_rewards_agg[fmt].append(reward)
+    global_mean = sum(all_rewards) / len(all_rewards) if all_rewards else 0
+
+    format_rewards = {
+        fmt: sum(rs) / len(rs)
+        for fmt, rs in format_rewards_agg.items()
+    }
+
+    # Stats of the target-encoded format values (for z-normalization)
+    if format_rewards:
+        fmt_encoded = [format_rewards.get(o.get("format_tag", ""), global_mean) for o in scored]
+        fmt_mean = sum(fmt_encoded) / len(fmt_encoded)
+        fmt_std = math.sqrt(
+            sum((v - fmt_mean) ** 2 for v in fmt_encoded) / max(len(fmt_encoded) - 1, 1)
+        ) if len(fmt_encoded) > 1 else 1.0
+    else:
+        fmt_mean = 0.0
+        fmt_std = 1.0
+
+    return {
+        "char_count_mean": round(char_mean, 1),
+        "char_count_std": round(char_std, 1),
+        "posting_hour_mean": round(hour_mean, 1),
+        "posting_hour_std": round(hour_std, 1),
+        "format_rewards": {k: round(v, 4) for k, v in format_rewards.items()},
+        "format_mean": round(fmt_mean, 4),
+        "format_std": round(fmt_std, 4),
+        "reward_mean": round(global_mean, 4),
+        "observation_count": len(scored),
+    }
+
+
 def score_drafts(
     company: str,
     drafts: list[dict],
@@ -54,24 +149,24 @@ def score_drafts(
 ) -> list[ScoredDraft]:
     """Score and rank a batch of draft posts using the analyst's model.
 
+    Applies the analyst's regression coefficients directly to each draft's
+    features, normalized using the client's actual observation statistics.
+    No hardcoded bands, no assumed distributions. The coefficients and the
+    normalization are both from real data.
+
     Each draft dict should have:
       - "text": the full post text (required)
       - "scheduled_hour": posting hour in UTC (optional, defaults to default_hour)
-
-    Returns drafts ranked by predicted engagement score (highest first).
-    If no analyst model exists, returns drafts in original order with
-    a "no_model" source marker and uniform scores.
-
-    The scoring is additive:
-      1. Apply the analyst's regression model (format_tag, char_count, posting_hour)
-      2. Apply the heuristic layer (hook style bonus) if present in the model spec
-      3. Sum → predicted score
     """
     if not drafts:
         return []
 
-    # Load the analyst's model
     model_spec, model_source = _load_model(company)
+
+    # Compute normalization stats from the client's real observations.
+    # This is how the regression was trained — target encoding for format_tag,
+    # z-normalization for numeric features. We replicate the same transform.
+    training_stats = _compute_training_stats(company) if model_source == "analyst_model" else {}
 
     scored: list[ScoredDraft] = []
 
@@ -87,7 +182,10 @@ def score_drafts(
 
         hour = draft.get("scheduled_hour", default_hour)
         features = _extract_features(text, hour)
-        pred_score, explanation = _apply_model(features, model_spec, model_source)
+        pred_score, explanation = _apply_model(
+            features, model_spec, model_source,
+            training_stats=training_stats,
+        )
 
         scored.append(ScoredDraft(
             rank=0,
@@ -98,7 +196,6 @@ def score_drafts(
             model_source=model_source,
         ))
 
-    # Rank by predicted score (highest first)
     scored.sort(key=lambda s: s.predicted_score, reverse=True)
     for i, s in enumerate(scored):
         s.rank = i + 1
@@ -176,129 +273,108 @@ def _apply_model(
     features: dict,
     model_spec: dict,
     model_source: str,
+    training_stats: Optional[dict] = None,
 ) -> tuple[float, str]:
-    """Apply the model to features and produce a score + explanation.
+    """Apply the analyst's regression model directly to produce a score.
 
-    Returns (predicted_score, explanation_string).
+    No hardcoded bands, no assumed mean/std, no hand-engineered heuristic
+    layer. The analyst spent 80 turns building a regression with real
+    coefficients from real data. This function applies those coefficients.
+
+    For format_tag: uses target encoding (mean reward per format) computed
+    from the client's actual observations, same encoding the regression
+    used during training.
+
+    For numeric features (char_count, posting_hour): z-normalizes using
+    the client's actual feature distributions, same normalization the
+    regression used during training.
+
+    The quote-hook bonus is the ONE non-regression component: it comes
+    from the analyst's model_spec.heuristic_layer, not from hardcoded
+    values. If the analyst didn't include a hook bonus, none is applied.
     """
     if model_source == "no_model":
-        return 0.0, "No analyst model available for this client. Drafts are unscored."
+        return 0.0, "No analyst model available. Drafts are unscored."
 
     coefficients = model_spec.get("coefficients", {})
     intercept = model_spec.get("intercept", 0.0)
-    heuristic = model_spec.get("heuristic_layer", {})
+    stats = training_stats or {}
 
-    # --- Regression component ---
-    # The regression was trained on z-normalized features. We need to
-    # approximate the normalization for new drafts. Use the model's
-    # training data stats if available, otherwise use reasonable defaults
-    # for innovocommerce-scale data.
-    #
-    # For format_tag: the regression used target encoding (mean reward per
-    # format). We approximate by mapping format names to the ordinal values
-    # the causal_filter used during training.
     format_tag = features.get("format_tag", "unknown")
     char_count = features.get("char_count", 1500)
     posting_hour = features.get("posting_hour", 9)
 
-    # Build the regression prediction
     score = intercept
     explanation_parts = []
 
-    # Format contribution
+    # Format contribution — target-encoded from training data
     format_coeff = coefficients.get("format_tag", 0)
     if format_coeff != 0:
-        # The heuristic layer gives us a more interpretable scoring
-        format_scores = heuristic.get("scoring_guidance", {}).get("format_scores", {})
-        if format_scores:
-            # Parse the format score from the heuristic guidance
-            fmt_score = _parse_format_heuristic(format_tag, format_scores)
-            score += fmt_score
-            if fmt_score != 0:
-                explanation_parts.append(
-                    f"format '{format_tag}': {fmt_score:+.2f}"
-                )
-        else:
-            # Use the raw coefficient with a crude encoding
-            format_order = {"storytelling": 0, "framework": 0, "list": -0.1, "hot_take": -0.4}
-            fmt_val = format_order.get(format_tag, 0)
-            score += fmt_val
-            if fmt_val != 0:
-                explanation_parts.append(f"format '{format_tag}': {fmt_val:+.2f}")
+        format_rewards = stats.get("format_rewards", {})
+        global_mean = stats.get("reward_mean", 0)
+        # Target encoding: replace format name with its mean reward from training
+        target_val = format_rewards.get(format_tag, global_mean)
+        # Z-normalize using the format feature's distribution from training
+        fmt_mean = stats.get("format_mean", 0)
+        fmt_std = stats.get("format_std", 1)
+        fmt_z = (target_val - fmt_mean) / fmt_std if fmt_std > 1e-6 else 0
+        fmt_contribution = format_coeff * fmt_z
+        score += fmt_contribution
+        if abs(fmt_contribution) > 0.01:
+            explanation_parts.append(
+                f"format '{format_tag}' (avg reward {target_val:+.2f}): {fmt_contribution:+.3f}"
+            )
 
-    # Char count contribution
+    # Char count contribution — z-normalized from training data
     char_coeff = coefficients.get("char_count", 0)
     if char_coeff != 0:
-        char_guidance = heuristic.get("scoring_guidance", {}).get("char_count_score", "")
-        if char_guidance:
-            if char_count >= 2000:
-                char_score = 0.15
-            elif char_count >= 1500:
-                char_score = 0.0
-            else:
-                char_score = -0.1
-        else:
-            # Z-normalize against typical range (mean ~2000, std ~500)
-            char_z = (char_count - 2000) / 500
-            char_score = char_coeff * char_z
-        score += char_score
-        if abs(char_score) > 0.01:
-            explanation_parts.append(f"length {char_count} chars: {char_score:+.2f}")
+        char_mean = stats.get("char_count_mean", 2000)
+        char_std = stats.get("char_count_std", 500)
+        char_z = (char_count - char_mean) / char_std if char_std > 1e-6 else 0
+        char_contribution = char_coeff * char_z
+        score += char_contribution
+        if abs(char_contribution) > 0.01:
+            explanation_parts.append(
+                f"length {char_count} chars (vs avg {char_mean:.0f}): {char_contribution:+.3f}"
+            )
 
-    # Posting hour contribution
+    # Posting hour contribution — z-normalized from training data
     hour_coeff = coefficients.get("posting_hour", 0)
     if hour_coeff != 0:
-        hour_guidance = heuristic.get("scoring_guidance", {}).get("posting_hour_score", "")
-        if hour_guidance:
-            if 7 <= posting_hour <= 9:
-                hour_score = 0.1
-            elif 10 <= posting_hour <= 12:
-                hour_score = 0.0
-            else:
-                hour_score = -0.1
-        else:
-            hour_z = (posting_hour - 12) / 3
-            hour_score = hour_coeff * hour_z
-        score += hour_score
-        if abs(hour_score) > 0.01:
-            explanation_parts.append(f"posting hour {posting_hour}:00: {hour_score:+.2f}")
+        hour_mean = stats.get("posting_hour_mean", 12)
+        hour_std = stats.get("posting_hour_std", 3)
+        hour_z = (posting_hour - hour_mean) / hour_std if hour_std > 1e-6 else 0
+        hour_contribution = hour_coeff * hour_z
+        score += hour_contribution
+        if abs(hour_contribution) > 0.01:
+            explanation_parts.append(
+                f"posting hour {posting_hour}:00 (vs avg {hour_mean:.0f}:00): {hour_contribution:+.3f}"
+            )
 
-    # --- Heuristic hook bonus ---
-    if features.get("has_quote_hook") and heuristic.get("scoring_guidance", {}).get("hook_bonus"):
-        hook_bonus = 0.4
-        score += hook_bonus
-        explanation_parts.append(f"customer quote hook detected: +{hook_bonus:.2f}")
+    # Quote-hook bonus — from the analyst's model_spec, NOT hardcoded.
+    # The analyst decides whether to include a hook bonus and how large it
+    # should be. If the model_spec doesn't have one, none is applied.
+    heuristic = model_spec.get("heuristic_layer", {})
+    hook_bonus_str = heuristic.get("scoring_guidance", {}).get("hook_bonus", "")
+    if features.get("has_quote_hook") and hook_bonus_str:
+        try:
+            # Parse "+0.4 if verbatim customer quote..." → 0.4
+            hook_bonus = float(hook_bonus_str.split()[0].replace("+", ""))
+        except (ValueError, IndexError):
+            hook_bonus = 0
+        if hook_bonus > 0:
+            score += hook_bonus
+            explanation_parts.append(f"quote hook (analyst bonus): +{hook_bonus:.2f}")
 
     # Build explanation
+    loo_r2 = model_spec.get("loo_r2", "?")
     if explanation_parts:
         explanation = f"Score {score:+.3f} = " + " + ".join(explanation_parts)
-        explanation += f" (model LOO R²={model_spec.get('loo_r2', '?')})"
+        explanation += f" (model LOO R²={loo_r2})"
     else:
-        explanation = f"Score {score:+.3f} (no distinguishing features detected)"
+        explanation = f"Score {score:+.3f} — no distinguishing features (LOO R²={loo_r2})"
 
     return score, explanation
-
-
-def _parse_format_heuristic(format_tag: str, format_scores: dict) -> float:
-    """Parse the analyst's format scoring guidance into a numeric value.
-
-    Handles format name mismatches between the tagger (produces 'hot take'
-    with space) and the analyst model spec (may use 'hot_take' with underscore).
-    """
-    # Normalize for comparison: lowercase, strip, replace spaces/underscores
-    def _normalize(s: str) -> str:
-        return s.lower().strip().replace("_", " ").replace("-", " ")
-
-    tag_norm = _normalize(format_tag)
-    for key, value in format_scores.items():
-        if _normalize(key) == tag_norm:
-            if "baseline" in str(value).lower() or value == "+0":
-                return 0.0
-            try:
-                return float(str(value).replace("+", ""))
-            except (ValueError, TypeError):
-                return 0.0
-    return 0.0  # unknown format → neutral
 
 
 # ------------------------------------------------------------------

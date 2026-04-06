@@ -1501,7 +1501,7 @@ function FeedbackPanel({ company }: { company: string }) {
           value={text}
           onChange={(e) => setText(e.target.value)}
           rows={3}
-          placeholder='e.g., "Use the full term clinical operations, not ClinOps. Also, don\'t position us as competing with labs — we sell to them."'
+          placeholder={'e.g., "Use the full term clinical operations, not ClinOps. Also, don\'t position us as competing with labs \u2014 we sell to them."'}
           className="mt-3 w-full rounded border border-stone-700 bg-stone-950 p-3 text-sm text-stone-200 placeholder-stone-600 focus:border-stone-500 focus:outline-none"
         />
         <div className="mt-2 flex items-center gap-3">
