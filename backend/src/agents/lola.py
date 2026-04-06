@@ -36,54 +36,47 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------
-# Embedding helpers (lazy-loaded model, cached per-arm)
+# Embedding helpers — OpenAI text-embedding-3-small (1536 dims)
 # -----------------------------------------------------------------------
+#
+# Previously used sentence-transformers (all-MiniLM-L6-v2, 384 dims) loaded
+# locally. Migrated to OpenAI because:
+#   1. sentence-transformers pulls torch (~2GB, wants GPU) — overkill here
+#   2. text-embedding-3-small is higher quality than most local models
+#   3. One embedding provider = one failure mode to monitor
+#   4. Already proven working in alignment_scorer and transcript_scorer
+#
+# All callers of _embed_texts (LOLA, Cyrene, ordinal_sync, cross_client_learning,
+# market_intelligence) get the upgrade automatically. The model name change
+# is detected by LOLA's arm_embeddings_model check, which triggers automatic
+# re-embedding of all cached arm vectors on the next sync cycle.
 
-_EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-_EMBEDDING_DIM = 384
+_EMBEDDING_MODEL_NAME = "text-embedding-3-small"
+_EMBEDDING_DIM = 1536
 _ARM_MATCH_THRESHOLD = 0.30  # minimum cosine similarity to match an obs to an arm
-
-_embedding_model = None
-_embedding_lock = None
-_EMBEDDING_UNAVAILABLE = "UNAVAILABLE"
-
-
-def _get_embedding_model():
-    """Lazy-load the sentence transformer model (shared across all LOLA instances)."""
-    global _embedding_model, _embedding_lock
-    import threading
-    if _embedding_lock is None:
-        _embedding_lock = threading.Lock()
-    if _embedding_model is None:
-        with _embedding_lock:
-            if _embedding_model is None:
-                try:
-                    from sentence_transformers import SentenceTransformer
-                    _embedding_model = SentenceTransformer(_EMBEDDING_MODEL_NAME)
-                    logger.info("[LOLA] Loaded sentence-transformers model: %s", _EMBEDDING_MODEL_NAME)
-                except ImportError:
-                    logger.warning("[LOLA] sentence-transformers not installed — falling back to substring matching")
-                    _embedding_model = _EMBEDDING_UNAVAILABLE
-                    return None
-                except Exception as e:
-                    logger.warning("[LOLA] Failed to load embedding model: %s", e)
-                    _embedding_model = _EMBEDDING_UNAVAILABLE
-                    return None
-    if _embedding_model is _EMBEDDING_UNAVAILABLE:
-        return None
-    return _embedding_model
 
 
 def _embed_texts(texts: list[str]) -> list[list[float]]:
-    """Embed a batch of texts. Returns list of float lists (serializable to JSON)."""
-    model = _get_embedding_model()
-    if model is None:
+    """Embed a batch of texts via OpenAI. Returns list of float lists (JSON-serializable).
+
+    Returns [] on failure — callers must handle the empty case (typically by
+    falling back to substring matching or skipping the embedding-dependent path).
+    """
+    if not texts:
         return []
     try:
-        embeddings = model.encode(texts, show_progress_bar=False)
-        return [e.tolist() for e in embeddings]
+        from openai import OpenAI
+        client = OpenAI()
+        # token-safe truncation per text (8191 token limit for this model,
+        # ~32k chars is a safe approximation)
+        truncated = [t[:32000] for t in texts]
+        resp = client.embeddings.create(
+            input=truncated,
+            model=_EMBEDDING_MODEL_NAME,
+        )
+        return [d.embedding for d in resp.data]
     except Exception as e:
-        logger.warning("[LOLA] Embedding failed: %s", e)
+        logger.warning("[LOLA] OpenAI embedding failed: %s", e)
         return []
 
 
@@ -140,7 +133,7 @@ class Arm:
     icp_retired: bool = False     # retired specifically due to low ICP match rate
     icp_boosted: bool = False     # UCB bonus boosted due to high ICP match rate
     # Embedding for semantic arm matching (cached, computed once)
-    embedding: list = field(default_factory=list)  # 384-dim float list, or [] if not yet computed
+    embedding: list = field(default_factory=list)  # 1536-dim float list, or [] if not yet computed
 
     @property
     def mean_reward(self) -> float:
@@ -208,7 +201,7 @@ _DEFAULT_TIME_DECAY = 0.02       # per-day exponential decay
 @dataclass
 class ContentPoint:
     """A single point in the continuous content-reward field."""
-    embedding: list = field(default_factory=list)  # 384-dim position
+    embedding: list = field(default_factory=list)  # 1536-dim position
     reward: float = 0.0                            # z-scored engagement reward
     posted_at: str = ""
     post_hash: str = ""
@@ -810,11 +803,21 @@ class LOLA:
         return added
 
     def _get_points(self) -> list[ContentPoint]:
-        return [ContentPoint(**p) for p in self._state.points if p.get("embedding")]
+        """Return continuous reward field points with valid, correctly-dimensioned embeddings.
+
+        Filters out stale embeddings from a prior model (e.g., 384-dim vectors
+        from the old sentence-transformers era). This causes the continuous field
+        to rebuild from zero after an embedding model migration — the correct
+        behavior, since old and new embeddings live in incompatible spaces.
+        """
+        return [
+            ContentPoint(**p) for p in self._state.points
+            if p.get("embedding") and len(p.get("embedding", [])) == _EMBEDDING_DIM
+        ]
 
     def _use_continuous(self) -> bool:
-        """True if we have enough points to use continuous selection."""
-        return len(self._state.points) >= _MIN_POINTS_FOR_CONTINUOUS
+        """True if we have enough correctly-dimensioned points for continuous selection."""
+        return len(self._get_points()) >= _MIN_POINTS_FOR_CONTINUOUS
 
     def _update_field_params(self) -> None:
         """Recompute reward field parameters from data."""

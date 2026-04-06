@@ -21,9 +21,9 @@ Instead:
    observe-don't-prescribe pattern as LOLA's strategy descriptors and the
    observation tagger's free-text tags.
 
-2. **Embed the descriptions.** Uses ``lola._embed_texts`` (sentence-transformers,
-   384-dim, local, cheap). Same embedding infrastructure as Cyrene's quality
-   projection and LOLA's continuous reward field.
+2. **Embed the descriptions.** Uses OpenAI ``text-embedding-3-small`` (1536-dim).
+   Same embedding infrastructure as the alignment scorer, and now consistent
+   with LOLA, Cyrene, and all other embedding consumers in the pipeline.
 
 3. **Learn from data.** For clients with >= 15 scored+tagged observations,
    fits a ridge regression from (description_embedding, engagement_reward)

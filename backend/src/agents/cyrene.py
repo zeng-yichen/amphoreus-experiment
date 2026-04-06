@@ -710,7 +710,14 @@ class LinearProjection:
         return float(x @ self._W + self._b)
 
     def train_from_observations(self, company: str) -> bool:
-        """Train from RuanMei observations that have quality embeddings stored."""
+        """Train from RuanMei observations that have quality embeddings stored.
+
+        After the embedding model migration (sentence-transformers → OpenAI),
+        old 384-dim and new 1536-dim vectors may coexist in quality_embeddings.json.
+        We filter to the most recent dimension (last pair's dim) to avoid mixing
+        incompatible embedding spaces. Old pairs are effectively discarded for
+        training purposes — they'll be re-embedded when ordinal_sync runs again.
+        """
         from backend.src.db import vortex as P
         cache_path = P.memory_dir(company) / "quality_embeddings.json"
         if not cache_path.exists():
@@ -718,6 +725,11 @@ class LinearProjection:
         try:
             data = json.loads(cache_path.read_text(encoding="utf-8"))
             pairs = data.get("pairs", [])
+            if not pairs:
+                return False
+            # Determine target dimension from the most recent embedding
+            target_dim = len(pairs[-1].get("embedding", []))
+            pairs = [p for p in pairs if len(p.get("embedding", [])) == target_dim]
             if len(pairs) < _MIN_OBS_FOR_PROJECTION:
                 return False
             embeddings = [p["embedding"] for p in pairs]
