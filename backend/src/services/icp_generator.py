@@ -234,7 +234,7 @@ def generate_icp_definition(company: str, force: bool = False) -> dict | None:
     try:
         client = anthropic.Anthropic()
         resp = client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=400,
             messages=[{"role": "user", "content": prompt}],
         )

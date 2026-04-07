@@ -197,7 +197,7 @@ def detect_verticals() -> dict[str, list[str]]:
 
     try:
         resp = _client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=500,
             messages=[{"role": "user", "content": (
                 "Group these B2B LinkedIn clients into verticals based on their ICP industry.\n\n"
@@ -289,7 +289,7 @@ def seed_creator_registry(company: str) -> dict:
 
     try:
         resp = _client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=3000,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -564,7 +564,7 @@ def _replenish_pool(vertical: str, registry: dict) -> None:
 
     try:
         resp = _client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=1500,
             messages=[{"role": "user", "content": (
                 f"List 10 MORE LinkedIn creators for the '{vertical}' vertical.\n\n"
@@ -896,7 +896,7 @@ def _detect_whitespace(company: str, trending_topics: list[dict]) -> list[dict]:
         try:
             ws_text = "\n".join(f"- {w['topic']} ({w['external_post_count']} posts, {w['velocity']})" for w in whitespace[:5])
             resp = _client.messages.create(
-                model="claude-opus-4-6",
+                model="claude-sonnet-4-6",
                 max_tokens=300,
                 messages=[{"role": "user", "content": (
                     f"These topics are trending in {company}'s vertical but they haven't posted about them:\n\n"

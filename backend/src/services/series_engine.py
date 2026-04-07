@@ -283,7 +283,7 @@ def _extract_arc_pattern(windows: list[list[dict]], num_posts: int, source_label
         import anthropic
         client = anthropic.Anthropic()
         resp = client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=600,
             messages=[{"role": "user", "content": (
                 f"These are {source_label} top-performing consecutive post sequences:\n"
@@ -377,7 +377,7 @@ def plan_series(
 
     try:
         resp = _client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=2000,
             system=planner_system,
             messages=[{"role": "user", "content": user_msg}],

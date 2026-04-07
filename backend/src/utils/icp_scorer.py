@@ -196,7 +196,7 @@ def score_engagers_segmented(company: str, headlines: list[str]) -> dict:
         import anthropic
         client = anthropic.Anthropic()
         resp = client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=250,
             messages=[{"role": "user", "content": prompt}],
         )

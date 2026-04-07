@@ -529,7 +529,7 @@ def _score_llm_fallback(company: str, text: str) -> dict:
         import anthropic
         client = anthropic.Anthropic()
         resp = client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )

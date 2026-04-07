@@ -171,7 +171,7 @@ def refresh_universal_patterns() -> list[dict]:
 
     try:
         resp = _client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -556,7 +556,7 @@ def auto_seed_lola(company: str) -> int:
 
     try:
         resp = _client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )

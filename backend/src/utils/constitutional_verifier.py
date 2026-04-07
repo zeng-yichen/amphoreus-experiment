@@ -253,7 +253,7 @@ def _discover_principles() -> list[dict] | None:
         import anthropic
         client = anthropic.Anthropic()
         resp = client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=2000,
             messages=[{"role": "user", "content": (
                 f"You are analyzing LinkedIn post quality across multiple B2B authors.\n\n"
@@ -492,7 +492,7 @@ def _evaluate_with_claude(post_text: str, use_continuous: bool = False, principl
         template = _VERIFIER_PROMPT_CONTINUOUS if use_continuous else _VERIFIER_PROMPT_BINARY
         prompt = template.format(principles_text=_format_principles(principle_set), post_text=post_text)
         resp = client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-sonnet-4-6",
             max_tokens=1000,
             messages=[{"role": "user", "content": prompt}],
         )

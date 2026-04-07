@@ -33,7 +33,7 @@ from backend.src.db import vortex
 
 logger = logging.getLogger(__name__)
 
-_ANALYST_MODEL = "claude-opus-4-6"
+_ANALYST_MODEL = "claude-sonnet-4-6"
 _MAX_TOKENS = 16384
 _MAX_TURNS = 80  # generous ceiling — the prompt says "as many as needed"
 

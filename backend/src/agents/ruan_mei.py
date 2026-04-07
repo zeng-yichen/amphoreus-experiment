@@ -195,7 +195,7 @@ class RuanMei:
         try:
             client = anthropic.Anthropic()
             resp = client.messages.create(
-                model="claude-opus-4-6",
+                model="claude-sonnet-4-6",
                 max_tokens=300,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -510,7 +510,7 @@ class RuanMei:
         try:
             client = anthropic.Anthropic()
             resp = client.messages.create(
-                model="claude-opus-4-6",
+                model="claude-sonnet-4-6",
                 max_tokens=700,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -582,7 +582,7 @@ class RuanMei:
         try:
             client = anthropic.Anthropic()
             resp = client.messages.create(
-                model="claude-opus-4-6",
+                model="claude-sonnet-4-6",
                 max_tokens=400,
                 messages=[{"role": "user", "content": prompt}],
             )
