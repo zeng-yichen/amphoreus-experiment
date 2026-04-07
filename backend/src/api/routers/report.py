@@ -292,16 +292,26 @@ def _build_report(company: str, weeks: int = 2) -> dict:
             if d.get("priority") in ("high", "medium"):
                 active_directives.append(d.get("directive", ""))
 
-    # --- Analyst findings ---
+    # --- Analyst findings (latest run only) ---
     findings_strong = []
     findings_moderate = []
     if analyst and analyst.get("findings"):
-        for f in analyst["findings"]:
+        # Filter to latest run's findings — don't accumulate stale findings
+        # from prior runs into the report.
+        _runs = analyst.get("runs", [])
+        _latest_rid = _runs[-1].get("run_id", "") if _runs else ""
+        _all_findings = analyst["findings"]
+        if _latest_rid:
+            _filtered = [f for f in _all_findings if f.get("run_id") == _latest_rid]
+        else:
+            _filtered = _all_findings[-10:]  # fallback for pre-run_id findings
+
+        for f in _filtered:
             conf = f.get("confidence", "")
             entry = {"claim": f.get("claim", ""), "evidence": f.get("evidence", "")[:200]}
             if conf in ("strong", "high"):
                 findings_strong.append(entry)
-            elif conf in ("moderate", "medium"):
+            elif conf in ("moderate", "medium", "suggestive"):
                 findings_moderate.append(entry)
 
     # --- Recommendations ---
