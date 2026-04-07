@@ -655,7 +655,7 @@ def _generate_report_html(report_data: dict) -> str | None:
         )
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=8192,
+            max_tokens=16384,
             system=_REPORT_HTML_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
         )
