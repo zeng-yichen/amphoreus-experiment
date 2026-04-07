@@ -284,6 +284,9 @@ class RuanMei:
         for obs in self._state["observations"]:
             if obs.get("post_hash") == post_hash and obs.get("status") in ("pending", "scored"):
                 reward = self._compute_reward(metrics)
+                # Append timestamped snapshot before overwriting. The trajectory
+                # shows how engagement evolved — early velocity vs slow burn.
+                _append_metrics_snapshot(obs, metrics)
                 obs["reward"] = reward
                 obs["status"] = "scored"
                 obs["scored_at"] = _now()
@@ -313,6 +316,7 @@ class RuanMei:
         for obs in self._state["observations"]:
             if obs.get("ordinal_post_id") == oid and obs.get("status") in ("pending", "scored"):
                 reward = self._compute_reward(metrics)
+                _append_metrics_snapshot(obs, metrics)
                 obs["reward"] = reward
                 obs["status"] = "scored"
                 obs["scored_at"] = _now()
@@ -1375,6 +1379,45 @@ def _hash(text: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _append_metrics_snapshot(obs: dict, metrics: dict) -> None:
+    """Append a timestamped engagement snapshot to the observation's history.
+
+    Each sync cycle calls this before overwriting obs["reward"]. Over time,
+    the history shows how engagement evolved: early velocity (first hours),
+    growth curve (days 1-3), and plateau (week+). This data enables future
+    analysis of which content types have fast initial velocity (favored by
+    LinkedIn's algorithm) vs slow burns.
+
+    Capped at 50 snapshots per observation to bound storage (~5KB each).
+    """
+    if "metrics_history" not in obs:
+        obs["metrics_history"] = []
+
+    snapshot = {
+        "t": _now(),
+        "impressions": metrics.get("impressions", 0),
+        "reactions": metrics.get("reactions", 0),
+        "comments": metrics.get("comments", 0),
+        "reposts": metrics.get("reposts", 0),
+    }
+
+    # Deduplicate: skip if the metrics are identical to the last snapshot
+    # (no new engagement since last sync — don't store a redundant point)
+    history = obs["metrics_history"]
+    if history:
+        last = history[-1]
+        if (last.get("impressions") == snapshot["impressions"]
+                and last.get("reactions") == snapshot["reactions"]
+                and last.get("comments") == snapshot["comments"]):
+            return
+
+    history.append(snapshot)
+
+    # Cap at 50 snapshots (50 × ~100 bytes = ~5KB per observation)
+    if len(history) > 50:
+        obs["metrics_history"] = history[-50:]
 
 
 def _compute_edit_similarity(draft: str, live: str) -> float:
