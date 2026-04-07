@@ -52,7 +52,8 @@ def update_prediction_accuracy(company: str) -> Optional[dict]:
     pairs = []
     for obs in state.get("observations", []):
         pred = obs.get("predicted_engagement")
-        actual = obs.get("reward", {}).get("immediate")
+        reward = obs.get("reward")
+        actual = reward.get("immediate") if isinstance(reward, dict) else None
         if pred is not None and actual is not None and obs.get("status") == "scored":
             pairs.append({
                 "post_hash": obs.get("post_hash", "")[:8],

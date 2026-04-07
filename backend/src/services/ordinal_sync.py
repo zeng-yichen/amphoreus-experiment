@@ -802,6 +802,10 @@ def _run_icp_scoring(rm, company: str) -> None:
                 continue
             consecutive_empty = 0
             segmented = score_engagers_segmented(company, engager_profiles)
+            # Don't write icp=0.0 when the scorer failed (empty scores means
+            # the LLM call failed, not that the score is actually zero)
+            if not segmented.get("scores"):
+                continue
             icp_score = segmented["score"]
             # Map to legacy [-1, 1] range for RuanMei composite
             legacy_score = icp_score if icp_score >= 0 else icp_score * 2
