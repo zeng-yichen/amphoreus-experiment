@@ -141,8 +141,12 @@ def backfill_client_tags(company: str, limit: int = 100) -> int:
     for obs in rm._state.get("observations", []):
         if obs.get("status") != "scored":
             continue
-        if obs.get("topic_tag"):
-            continue  # already tagged
+        # Idempotent: skip observations that already have ALL THREE tag fields.
+        # The tagger always sets all three together in one LLM call, so if
+        # topic_tag is set, the others should be too. But we check all three
+        # explicitly to handle any partial-tag edge cases.
+        if obs.get("topic_tag") and obs.get("format_tag") and obs.get("source_segment_type"):
+            continue  # already fully tagged
         body = (obs.get("posted_body") or obs.get("post_body") or "").strip()
         if len(body) < 50:
             continue

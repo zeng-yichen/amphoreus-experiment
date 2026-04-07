@@ -85,7 +85,10 @@ class AlignmentAdaptiveConfig:
                     if computed:
                         dt = datetime.fromisoformat(computed.replace("Z", "+00:00"))
                         age_s = (datetime.now(timezone.utc) - dt).total_seconds()
-                        if age_s < 3600:
+                        # Weekly TTL: alignment thresholds change slowly
+                        # (driven by (alignment_score, reward) correlations).
+                        # Hourly recompute was wasted compute.
+                        if age_s < 604800:  # 7 days
                             return entry
         except Exception:
             pass

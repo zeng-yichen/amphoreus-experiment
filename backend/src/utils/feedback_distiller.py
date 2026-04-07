@@ -453,6 +453,66 @@ def distill_directives(company: str, force: bool = False) -> Optional[list[dict]
 # Stelle integration: build the directives section
 # ------------------------------------------------------------------
 
+def backfill_active_directives(company: str, rm_state: dict, directives: list[dict]) -> int:
+    """Backfill active_directives on historical observations.
+
+    For each observation missing active_directives, checks if the directive
+    cache existed at the time the observation was scored. If yes, assigns
+    the directive IDs to the observation (those directives COULD have been
+    active when the post was generated).
+
+    Uses the cache-level computed_at as the earliest timestamp directives
+    could have existed (individual directives don't have created_at).
+    Idempotent: skips observations that already have active_directives set.
+
+    Returns the count of observations updated.
+    """
+    if not directives:
+        return 0
+
+    # Get the earliest directive timestamp from the cache
+    cache_path = vortex.memory_dir(company) / "learned_directives.json"
+    cache_computed_at = None
+    if cache_path.exists():
+        try:
+            cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
+            cache_computed_at = cache_data.get("computed_at")
+        except Exception:
+            pass
+
+    if not cache_computed_at:
+        return 0  # conservatively skip — we don't know when directives were created
+
+    directive_ids = [d.get("id") for d in directives if d.get("id")]
+    if not directive_ids:
+        return 0
+
+    updated = 0
+    for obs in rm_state.get("observations", []):
+        # Skip if already has active_directives populated
+        if isinstance(obs.get("active_directives"), list) and obs["active_directives"]:
+            continue
+        if obs.get("status") != "scored":
+            continue
+
+        # Check if the observation was scored after the directives existed
+        scored_at = obs.get("scored_at") or obs.get("recorded_at", "")
+        if not scored_at:
+            continue
+
+        try:
+            from datetime import datetime as _dt_bf, timezone as _tz_bf
+            obs_ts = _dt_bf.fromisoformat(scored_at.replace("Z", "+00:00"))
+            cache_ts = _dt_bf.fromisoformat(cache_computed_at.replace("Z", "+00:00"))
+            if obs_ts >= cache_ts:
+                obs["active_directives"] = list(directive_ids)
+                updated += 1
+        except Exception:
+            continue
+
+    return updated
+
+
 def get_active_directive_ids(company: str) -> list[str]:
     """Return the IDs of directives currently active for a client.
 

@@ -185,6 +185,43 @@ def sync_all_companies() -> None:
                                 except Exception:
                                     logger.debug("Constitutional config recompute skipped for %s", company, exc_info=True)
 
+                                # 2f2. Constitutional verification backfill: score observations
+                                #      that don't have constitutional_score yet. Single-model
+                                #      (Claude only) to keep cost bounded. Capped at 5 per
+                                #      cycle — the backfill completes over multiple sync cycles.
+                                try:
+                                    _const_backfilled = 0
+                                    _const_limit = 5
+                                    for _obs in rm._state.get("observations", []):
+                                        if _const_backfilled >= _const_limit:
+                                            break
+                                        if _obs.get("constitutional_score") is not None:
+                                            continue
+                                        if _obs.get("status") != "scored":
+                                            continue
+                                        _body = (_obs.get("posted_body") or _obs.get("post_body") or "").strip()
+                                        if not _body or len(_body) < 100:
+                                            continue
+                                        try:
+                                            from backend.src.utils.constitutional_verifier import verify_post as _cv_verify
+                                            _cv = _cv_verify(_body, company=company, models=["claude"])
+                                            if _cv and _cv.get("constitutional_score") is not None:
+                                                rm.update_constitutional(
+                                                    _obs.get("post_hash", ""),
+                                                    _cv["constitutional_score"],
+                                                    {p["id"]: p.get("passed", True) for p in _cv.get("principles", []) if p.get("id")},
+                                                )
+                                                _const_backfilled += 1
+                                        except Exception:
+                                            pass
+                                    if _const_backfilled:
+                                        logger.info(
+                                            "[ordinal_sync] Constitutional backfill: %d observations scored for %s",
+                                            _const_backfilled, company,
+                                        )
+                                except Exception:
+                                    logger.debug("Constitutional backfill skipped for %s", company, exc_info=True)
+
                                 # 2g. Reward component weights: recompute from lagged
                                 #     engagement correlations.
                                 try:
@@ -288,6 +325,19 @@ def sync_all_companies() -> None:
                                             "[ordinal_sync] Distilled %d writing directives for %s",
                                             len(_directives), company,
                                         )
+                                    # Backfill active_directives on historical observations
+                                    if _directives:
+                                        try:
+                                            from backend.src.utils.feedback_distiller import backfill_active_directives
+                                            _bf_count = backfill_active_directives(company, rm._state, _directives)
+                                            if _bf_count:
+                                                rm._save()
+                                                logger.info(
+                                                    "[ordinal_sync] Backfilled active_directives on %d observations for %s",
+                                                    _bf_count, company,
+                                                )
+                                        except Exception:
+                                            logger.debug("Directive backfill skipped for %s", company, exc_info=True)
                                 except Exception:
                                     logger.debug("Feedback distillation skipped for %s", company, exc_info=True)
 
@@ -670,7 +720,10 @@ def _backfill_generation_metadata(rm) -> int:
 # Posts with fewer engagers produce noisy scores (sample too small).
 # 47 of 262 posts (18%) have <10 reactions — skipping saves ~18% of Apify cost
 # with zero quality loss (3-8 headlines can't reliably represent an audience).
-_MIN_REACTIONS_FOR_ICP = 10
+# Lower threshold captures niche, high-alignment audiences that never go
+# viral but have exactly the right ICP profile. At 5 reactions, we get
+# ~3-4 engager profiles — enough for a directional ICP signal.
+_MIN_REACTIONS_FOR_ICP = 5
 
 # ICP scoring is now gated by _ACTIVE_CLIENT_ALLOWLIST (per-client loop gate).
 # No separate allowlist needed.

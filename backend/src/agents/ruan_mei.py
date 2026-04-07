@@ -147,6 +147,11 @@ class Observation:
     # prediction_error = predicted - actual. This closes the validation
     # loop: does the model actually get better over time?
     predicted_engagement: Optional[float] = None
+    # Constitutional verification — populated post-hoc by ordinal_sync or
+    # at generation time by Stelle. Tracks per-principle pass/fail and the
+    # weighted constitutional score.
+    constitutional_score: Optional[float] = None
+    constitutional_results: Optional[dict] = None
 
 
 # ------------------------------------------------------------------
@@ -973,6 +978,19 @@ class RuanMei:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return {}
+
+    def update_constitutional(self, post_hash: str, score: float, results: dict) -> bool:
+        """Store constitutional verification results on an observation.
+
+        Returns True if the observation was found and updated.
+        """
+        for obs in self._state.get("observations", []):
+            if obs.get("post_hash") == post_hash:
+                obs["constitutional_score"] = round(score, 4)
+                obs["constitutional_results"] = results
+                self._save()
+                return True
+        return False
 
     def observation_count(self) -> int:
         """Total observations (pending + scored)."""

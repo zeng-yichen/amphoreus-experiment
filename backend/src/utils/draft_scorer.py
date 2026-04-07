@@ -46,6 +46,18 @@ class ScoredDraft:
     features: dict             # extracted feature values
     explanation: str           # human-readable "why this score"
     model_source: str          # "analyst_model+embedding_knn" | "embedding_knn" | "no_model"
+    model_ready: bool = False  # True when coefficient model is validated (LOO R² > 0.1, n >= 15)
+
+
+def _model_is_ready(model_spec: dict, n_observations: int) -> bool:
+    """Check if the analyst's model is validated enough to trust its coefficients.
+
+    LOO R² > 0.1 means the model explains at least 10% of out-of-sample variance.
+    n >= 15 means the model has enough data to be non-trivial.
+    Below these thresholds, the coefficient path is noise — fall back to k-NN.
+    """
+    loo_r2 = model_spec.get("loo_r2", -999)
+    return loo_r2 > 0.1 and n_observations >= 15
 
 
 def _compute_training_stats(company: str) -> dict:
@@ -248,7 +260,21 @@ def score_drafts(
         return []
 
     model_spec, model_source = _load_model(company)
-    training_stats = _compute_training_stats(company) if model_source == "analyst_model" else {}
+
+    # Model readiness gate: if the coefficient model isn't validated
+    # (LOO R² < 0.1 or n < 15), skip the coefficient path entirely
+    # and fall back to k-NN only. Coefficients from a noise model
+    # produce misleading scores.
+    training_stats = {}
+    coeff_ready = False
+    if model_source == "analyst_model":
+        n_obs = _compute_training_stats(company).get("observation_count", 0) if model_source == "analyst_model" else 0
+        training_stats_full = _compute_training_stats(company)
+        coeff_ready = _model_is_ready(model_spec, training_stats_full.get("observation_count", 0))
+        if coeff_ready:
+            training_stats = training_stats_full
+        else:
+            model_source = "embedding_knn"  # downgrade to k-NN only
 
     scored: list[ScoredDraft] = []
 
@@ -259,7 +285,7 @@ def score_drafts(
                 rank=0, text=text, predicted_score=0.0,
                 exploration_value=0.0,
                 features={}, explanation="Empty draft",
-                model_source="no_model",
+                model_source="no_model", model_ready=False,
             ))
             continue
 
@@ -316,6 +342,7 @@ def score_drafts(
             features=features,
             explanation=explanation,
             model_source=source,
+            model_ready=coeff_ready,
         ))
 
     # Rank by predicted engagement (highest first).
