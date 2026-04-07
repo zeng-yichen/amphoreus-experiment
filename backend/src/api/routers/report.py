@@ -366,6 +366,60 @@ def _build_report(company: str, weeks: int = 2) -> dict:
             "reward_mean": round(sum(rewards) / n, 2),
         }
 
+    # --- System learning status ---
+    # Proves the system gets smarter over time. This is the core thesis:
+    # "Virio ships posts. We ship a system that gets smarter with every post."
+    learning_status = {}
+
+    # Prediction accuracy
+    pred_acc = _load_json(vortex.memory_dir(company) / "prediction_accuracy.json")
+    if pred_acc and pred_acc.get("n_predictions", 0) > 0:
+        learning_status["prediction_accuracy"] = {
+            "n_predictions": pred_acc.get("n_predictions", 0),
+            "spearman": pred_acc.get("spearman", 0),
+            "mean_abs_error": pred_acc.get("mean_abs_error", 0),
+            "trend": pred_acc.get("trend", "insufficient_data"),
+            "interpretation": pred_acc.get("interpretation", ""),
+        }
+
+    # Model readiness (from analyst)
+    if analyst:
+        _all_findings_lr = analyst.get("findings", [])
+        model_entry = None
+        for _f in reversed(_all_findings_lr):
+            if _f.get("type") == "model":
+                model_entry = _f
+                break
+        if model_entry:
+            spec = model_entry.get("model_spec", {})
+            learning_status["model"] = {
+                "ready": model_entry.get("model_ready", False),
+                "loo_r2": spec.get("loo_r2"),
+                "features": spec.get("regression_features", []),
+                "explanation": model_entry.get("model_readiness_explanation", "")[:300],
+            }
+
+        # Learning trajectory across analyst runs
+        _runs = analyst.get("runs", [])
+        if _runs:
+            learning_status["analyst_runs"] = {
+                "total_runs": len(_runs),
+                "first_run": _runs[0].get("timestamp", "")[:10] if _runs else None,
+                "latest_run": _runs[-1].get("timestamp", "")[:10] if _runs else None,
+                "latest_tool_calls": _runs[-1].get("tool_calls", 0) if _runs else 0,
+                "latest_findings": _runs[-1].get("findings_stored", 0) if _runs else 0,
+            }
+
+    # Observation coverage
+    if all_scored:
+        tagged_count = sum(1 for o in all_scored if o.get("topic_tag"))
+        posts_with_predictions = sum(1 for o in all_scored if o.get("predicted_engagement") is not None)
+        learning_status["coverage"] = {
+            "total_scored": len(all_scored),
+            "tagged": tagged_count,
+            "with_predictions": posts_with_predictions,
+        }
+
     return {
         "company": company,
         "profile_name": profile_name,
@@ -396,6 +450,7 @@ def _build_report(company: str, weeks: int = 2) -> dict:
             "recommendations_down": recommendations_down[:3],
             "trend": trend,
         },
+        "learning_status": learning_status,
         "all_time": all_time,
     }
 
@@ -424,7 +479,20 @@ CONTENT RULES
        - High-confidence insights (bullet list with claim + evidence snippet)
        - Data-driven recommendations: "Double down on" (green) and "Reduce" (red)
        - Engagement trend indicator (improving/stable/declining with numbers)
-    6. All-Time Context: small stat cards (total posts, avg impressions, avg reactions, reward range)
+    6. System Learning Status (NEW — the core value prop):
+       - Prediction accuracy: if available, show Spearman correlation between
+         our predictions and actual outcomes, with a plain-English interpretation
+         ("our model predicted 12 posts and ranked them with 0.25 correlation
+         to actual outcomes — the system is learning what works for you")
+       - Model readiness: show whether the system can reliably rank draft ideas.
+         If not ready, show what's needed ("15 more posts to reach reliable prediction")
+       - Observation coverage: how many posts the system has learned from, how diverse
+         the content is. Frame as "the more we publish, the smarter the system gets"
+       - Learning trajectory: is accuracy improving? "When we started 6 weeks ago,
+         predictions were random. Now they rank posts at 0.25 correlation."
+       - If no prediction data exists yet, show: "Prediction tracking activates with
+         the next batch of posts. Each post teaches the system what works for your audience."
+    7. All-Time Context: small stat cards (total posts, avg impressions, avg reactions, reward range)
 
   Exclude:
     - No raw JSON, no technical jargon about z-scores or bandits for the client

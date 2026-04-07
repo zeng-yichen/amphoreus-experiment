@@ -133,6 +133,13 @@ def generate_strategy_brief(company: str, force: bool = False) -> Optional[str]:
         sections.append(xclient)
         sections.append("")
 
+    # 8. System learning status — proves the system gets smarter over time
+    learning = _build_learning_status(company)
+    if learning:
+        sections.append("## System Learning Status")
+        sections.append(learning)
+        sections.append("")
+
     if len(sections) <= 4:  # only header, no substantive sections
         logger.debug("[strategy_brief] %s has insufficient data for a brief", company)
         return None
@@ -671,6 +678,148 @@ def _build_cross_client_section(company: str) -> str:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+def _build_learning_status(company: str) -> str:
+    """System learning status — prediction accuracy, model readiness, exploration coverage.
+
+    This section proves the system gets smarter over time. It shows:
+    1. Prediction accuracy: how well the model's predictions match actual outcomes
+    2. Model readiness: can the model reliably rank draft ideas?
+    3. Observation coverage: how much of the content space has been explored?
+    4. Learning trajectory: is accuracy improving, stable, or degrading?
+    """
+    lines: list[str] = []
+
+    # 1. Prediction accuracy
+    pred_path = vortex.memory_dir(company) / "prediction_accuracy.json"
+    if pred_path.exists():
+        try:
+            pred = json.loads(pred_path.read_text(encoding="utf-8"))
+            n = pred.get("n_predictions", 0)
+            if n > 0:
+                spearman = pred.get("spearman", 0)
+                mae = pred.get("mean_abs_error", 0)
+                trend = pred.get("trend", "?")
+                lines.append("### Prediction Accuracy")
+                lines.append(
+                    f"The system predicted engagement for **{n} posts** before publication. "
+                    f"Comparing predictions to actual outcomes:"
+                )
+                lines.append(f"- Spearman rank correlation: **{spearman:+.3f}** "
+                             f"({'predictions rank posts correctly' if spearman > 0.2 else 'weak signal — model needs more data' if spearman > 0 else 'not yet predictive'})")
+                lines.append(f"- Mean absolute error: **{mae:.3f}**")
+                lines.append(f"- Trend: **{trend}**")
+                lines.append("")
+        except Exception:
+            pass
+
+    if not lines:
+        lines.append("### Prediction Accuracy")
+        lines.append(
+            "_No posts have been generated with prediction tracking active yet. "
+            "Predictions begin tracking once posts are generated through the system._"
+        )
+        lines.append("")
+
+    # 2. Model readiness (from analyst findings)
+    analyst_path = vortex.memory_dir(company) / "analyst_findings.json"
+    if analyst_path.exists():
+        try:
+            af = json.loads(analyst_path.read_text(encoding="utf-8"))
+            runs = af.get("runs", [])
+            findings = af.get("findings", [])
+
+            # Find the latest model entry
+            model_entry = None
+            for f in reversed(findings):
+                if f.get("type") == "model":
+                    model_entry = f
+                    break
+
+            lines.append("### Model Readiness")
+            if model_entry:
+                ready = model_entry.get("model_ready", False)
+                explanation = model_entry.get("model_readiness_explanation", "")
+                spec = model_entry.get("model_spec", {})
+                loo_r2 = spec.get("loo_r2", "?")
+                features = spec.get("regression_features", [])
+
+                if ready:
+                    lines.append(f"✅ **Model is ready** to rank candidate posts (LOO R²={loo_r2})")
+                else:
+                    lines.append(f"⚠️ **Model is not yet reliable** for ranking (LOO R²={loo_r2})")
+                if features:
+                    lines.append(f"- Features used: {', '.join(features)}")
+                if explanation:
+                    lines.append(f"- {explanation[:300]}")
+            else:
+                n_findings = len(findings)
+                lines.append(f"The analyst has produced **{n_findings} findings** across **{len(runs)} runs** "
+                             f"but has not yet built a validated predictive model.")
+
+            # Learning trajectory across runs
+            if len(runs) >= 2:
+                lines.append("")
+                lines.append("### Learning Trajectory")
+                first_run = runs[0]
+                last_run = runs[-1]
+                lines.append(
+                    f"- First analysis: {first_run.get('timestamp', '?')[:10]}, "
+                    f"{first_run.get('tool_calls', '?')} tool calls, "
+                    f"{first_run.get('findings_stored', '?')} findings"
+                )
+                lines.append(
+                    f"- Latest analysis: {last_run.get('timestamp', '?')[:10]}, "
+                    f"{last_run.get('tool_calls', '?')} tool calls, "
+                    f"{last_run.get('findings_stored', '?')} findings"
+                )
+                lines.append(f"- Total runs: **{len(runs)}**")
+            lines.append("")
+        except Exception:
+            pass
+
+    # 3. Observation coverage
+    state = _load_ruan_mei_state(company)
+    if state:
+        scored = [o for o in state.get("observations", []) if o.get("status") == "scored"]
+        tagged = sum(1 for o in scored if o.get("topic_tag"))
+
+        lines.append("### Observation Coverage")
+        lines.append(f"- Total scored observations: **{len(scored)}**")
+        lines.append(f"- Tagged with topic/format: **{tagged}**")
+
+        # Coverage estimate from post embeddings
+        try:
+            from backend.src.utils.post_embeddings import get_post_embeddings
+            embs = get_post_embeddings(company)
+            if embs:
+                # Compute average pairwise similarity as a proxy for coverage
+                # Low avg similarity = diverse coverage, high = concentrated
+                from backend.src.utils.post_embeddings import cosine_similarity
+                import random
+                sample_keys = list(embs.keys())
+                if len(sample_keys) > 20:
+                    sample_keys = random.sample(sample_keys, 20)
+                sims = []
+                for i in range(len(sample_keys)):
+                    for j in range(i + 1, min(i + 5, len(sample_keys))):
+                        sims.append(cosine_similarity(embs[sample_keys[i]], embs[sample_keys[j]]))
+                if sims:
+                    avg_sim = sum(sims) / len(sims)
+                    if avg_sim > 0.7:
+                        coverage_label = "concentrated (posts are similar to each other — opportunity to diversify)"
+                    elif avg_sim > 0.5:
+                        coverage_label = "moderate (reasonable topic diversity)"
+                    else:
+                        coverage_label = "broad (posts cover diverse territory)"
+                    lines.append(f"- Content diversity: **{coverage_label}** (avg similarity {avg_sim:.2f})")
+        except Exception:
+            pass
+
+        lines.append("")
+
+    return "\n".join(lines) if lines else ""
+
 
 def _load_ruan_mei_state(company: str) -> Optional[dict]:
     try:
