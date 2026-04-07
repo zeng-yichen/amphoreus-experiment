@@ -339,8 +339,13 @@ function ContentBriefSection({ company }: { company: string }) {
           Live Content Brief
         </h2>
         <span className="text-xs text-stone-400">
-          auto-updated from {brief.observation_count || 0} scored posts ·
-          {brief.analyst_runs || 0} analyst runs
+          {brief.data_tier === "cross_client" ? (
+            "based on cross-client patterns (no client-specific data yet)"
+          ) : brief.data_tier === "early_signal" ? (
+            `early signal from ${brief.observation_count} posts · evolving`
+          ) : (
+            `from ${brief.observation_count} scored posts · ${brief.analyst_runs} analyst runs`
+          )}
         </span>
       </div>
 
@@ -410,7 +415,7 @@ function ContentBriefSection({ company }: { company: string }) {
 
       {/* Key findings */}
       {findings.length > 0 && (
-        <div>
+        <div className="mb-4">
           <h3 className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-2">
             Analyst Findings ({findings.length})
           </h3>
@@ -424,6 +429,27 @@ function ContentBriefSection({ company }: { company: string }) {
                   [{f.confidence}]
                 </span>
                 {f.finding}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Cross-client patterns (shown prominently when no client-specific data) */}
+      {(brief.cross_client_patterns || []).length > 0 && (
+        <div>
+          <h3 className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-2">
+            {brief.data_tier === "cross_client"
+              ? "Cross-Client Patterns (primary signal)"
+              : "Cross-Client Patterns (supplementary)"}
+          </h3>
+          <div className="space-y-1.5">
+            {(brief.cross_client_patterns || []).slice(0, 4).map((p: any, i: number) => (
+              <div key={i} className="text-sm text-stone-600">
+                <span className="text-xs text-stone-400 mr-1">
+                  ({Math.round(p.confidence * 100)}% conf, {p.clients} clients)
+                </span>
+                {p.pattern}
               </div>
             ))}
           </div>
