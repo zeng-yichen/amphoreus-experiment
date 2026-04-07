@@ -121,16 +121,16 @@ export default function StrategyPage() {
         <input
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Optional focus prompt..."
+          placeholder="ICP focus, competitive angle, or onboarding notes..."
           className="w-80 rounded-lg border border-stone-200 px-3 py-1.5 text-sm focus:border-stone-400 focus:outline-none"
           onKeyDown={(e) => e.key === "Enter" && handleGenerate()}
         />
         <button
           onClick={handleGenerate}
           disabled={isGenerating}
-          className="rounded-lg bg-stone-900 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-stone-800 disabled:opacity-50"
+          className="rounded-lg bg-stone-100 border border-stone-200 px-4 py-1.5 text-sm font-medium text-stone-600 transition-colors hover:bg-stone-200 disabled:opacity-50"
         >
-          {isGenerating ? "Generating..." : "Generate Strategy"}
+          {isGenerating ? "Researching..." : "Research & Onboard"}
         </button>
       </header>
 
@@ -145,7 +145,7 @@ export default function StrategyPage() {
                 : "border-transparent text-stone-500 hover:text-stone-700"
             }`}
           >
-            {tab === "strategy" ? "Current Strategy" : tab === "report" ? "Progress Report" : "Generation Progress"}
+            {tab === "strategy" ? "Live Strategy" : tab === "report" ? "Progress Report" : "Research Log"}
           </button>
         ))}
       </div>
@@ -156,11 +156,11 @@ export default function StrategyPage() {
             {/* Live content brief — auto-updated from analyst data */}
             <ContentBriefSection company={company} />
 
-            {/* Herta-generated static strategy (reference / onboarding) */}
+            {/* Herta-generated onboarding research (reference) */}
             <div>
               <h2 className="text-sm font-medium text-stone-400 mb-3">
-                Generated Strategy Document
-                <span className="ml-2 text-xs text-stone-300">(manual — click Generate Strategy to update)</span>
+                Onboarding Research
+                <span className="ml-2 text-xs text-stone-300">(one-time — ICP research, competitive landscape, voice fingerprint)</span>
               </h2>
               {loadingStrategy ? (
                 <p className="text-stone-500">Loading strategy...</p>
@@ -184,10 +184,11 @@ export default function StrategyPage() {
                 )
               ) : (
                 <div className="rounded-lg border border-dashed border-stone-300 p-8 text-center">
-                  <p className="text-stone-500">No content strategy document yet.</p>
+                  <p className="text-stone-500">No onboarding research yet.</p>
                   <p className="mt-1 text-sm text-stone-400">
-                    Click Generate Strategy for an initial strategy from interview transcripts.
-                    Once the analyst has enough data, the live brief above replaces this.
+                    Click "Research & Onboard" to generate an initial ICP analysis, competitive
+                    landscape, and voice fingerprint from transcripts and web research.
+                    The live content brief above is the working strategy — it updates automatically.
                   </p>
                 </div>
               )}
