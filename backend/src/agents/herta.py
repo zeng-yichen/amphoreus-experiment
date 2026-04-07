@@ -601,8 +601,11 @@ def _build_user_message(
             _runs = _af.get("runs", [])
             # Latest run's findings only
             if _runs and _all_findings:
-                _rid = _runs[-1].get("run_id", "")
-                _findings = [f for f in _all_findings if f.get("run_id") == _rid] if _rid else _all_findings[-10:]
+                _rid = _runs[-1].get("run_id")  # None for pre-migration
+                if _rid:
+                    _findings = [f for f in _all_findings if f.get("run_id") == _rid]
+                else:
+                    _findings = [f for f in _all_findings if f.get("run_id") is None] or _all_findings[-10:]
             else:
                 _findings = _all_findings
             if _findings:

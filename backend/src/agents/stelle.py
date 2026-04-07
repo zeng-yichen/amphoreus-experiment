@@ -4181,12 +4181,13 @@ def generate_one_shot(
             # of findings — not an accumulation of months of potentially
             # contradictory observations.
             if _runs and _all_findings:
-                _latest_run_id = _runs[-1].get("run_id", "")
+                _latest_run_id = _runs[-1].get("run_id")  # None for pre-migration
                 if _latest_run_id:
                     _findings = [f for f in _all_findings if f.get("run_id") == _latest_run_id]
                 else:
-                    # Fallback for findings without run_id (pre-migration)
-                    _findings = _all_findings[-10:]
+                    _findings = [f for f in _all_findings if f.get("run_id") is None]
+                    if not _findings:
+                        _findings = _all_findings[-10:]
             else:
                 _findings = _all_findings
 

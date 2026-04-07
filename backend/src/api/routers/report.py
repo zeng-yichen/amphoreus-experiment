@@ -296,15 +296,22 @@ def _build_report(company: str, weeks: int = 2) -> dict:
     findings_strong = []
     findings_moderate = []
     if analyst and analyst.get("findings"):
-        # Filter to latest run's findings — don't accumulate stale findings
-        # from prior runs into the report.
         _runs = analyst.get("runs", [])
-        _latest_rid = _runs[-1].get("run_id", "") if _runs else ""
         _all_findings = analyst["findings"]
-        if _latest_rid:
-            _filtered = [f for f in _all_findings if f.get("run_id") == _latest_rid]
+
+        if _runs:
+            _latest_rid = _runs[-1].get("run_id")  # None for pre-migration runs
+            if _latest_rid:
+                # New-style run with run_id tag: exact match
+                _filtered = [f for f in _all_findings if f.get("run_id") == _latest_rid]
+            else:
+                # Pre-migration run (no run_id): show findings that also lack run_id
+                # (they're from the same era). Fall back to last N if that's empty.
+                _filtered = [f for f in _all_findings if f.get("run_id") is None]
+                if not _filtered:
+                    _filtered = _all_findings[-10:]
         else:
-            _filtered = _all_findings[-10:]  # fallback for pre-run_id findings
+            _filtered = _all_findings[-10:]
 
         for f in _filtered:
             conf = f.get("confidence", "")
