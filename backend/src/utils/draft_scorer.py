@@ -268,7 +268,6 @@ def score_drafts(
     training_stats = {}
     coeff_ready = False
     if model_source == "analyst_model":
-        n_obs = _compute_training_stats(company).get("observation_count", 0) if model_source == "analyst_model" else 0
         training_stats_full = _compute_training_stats(company)
         coeff_ready = _model_is_ready(model_spec, training_stats_full.get("observation_count", 0))
         if coeff_ready:
