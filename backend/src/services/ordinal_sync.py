@@ -117,7 +117,7 @@ def sync_all_companies() -> None:
                                             _backfilled, company,
                                         )
                                 except Exception:
-                                    logger.debug("Edit similarity backfill skipped for %s", company, exc_info=True)
+                                    logger.warning("Edit similarity backfill skipped for %s", company, exc_info=True)
 
                                 # 2b. Quality embedding persistence: store (embedding, reward)
                                 #     pairs for Cyrene's linear projection training.
@@ -152,7 +152,7 @@ def sync_all_companies() -> None:
                                                 obs["post_hash"],
                                             )
                                 except Exception:
-                                    logger.debug("Quality embedding persistence skipped for %s", company, exc_info=True)
+                                    logger.warning("Quality embedding persistence skipped for %s", company, exc_info=True)
 
                                 # 2c. Cyrene adaptive config: recompute dimension weights
                                 #     from newly scored observations with cyrene_dimensions.
@@ -160,14 +160,14 @@ def sync_all_companies() -> None:
                                     from backend.src.agents.cyrene import CyreneAdaptiveConfig
                                     CyreneAdaptiveConfig().recompute(company)
                                 except Exception:
-                                    logger.debug("Cyrene adaptive config skipped for %s", company, exc_info=True)
+                                    logger.warning("Cyrene adaptive config skipped for %s", company, exc_info=True)
 
                                 # 2d. Depth weights: recompute learned depth component
                                 #     weights from engagement correlations.
                                 try:
                                     rm.recompute_depth_weights()
                                 except Exception:
-                                    logger.debug("Depth weight recompute skipped for %s", company, exc_info=True)
+                                    logger.warning("Depth weight recompute skipped for %s", company, exc_info=True)
 
                                 # 2e. Alignment thresholds: recompute learned strong/drift
                                 #     thresholds from (alignment_score, reward) pairs.
@@ -175,7 +175,7 @@ def sync_all_companies() -> None:
                                     from backend.src.utils.alignment_scorer import AlignmentAdaptiveConfig
                                     AlignmentAdaptiveConfig().recompute(company)
                                 except Exception:
-                                    logger.debug("Alignment threshold recompute skipped for %s", company, exc_info=True)
+                                    logger.warning("Alignment threshold recompute skipped for %s", company, exc_info=True)
 
                                 # 2f. Constitutional adaptive config: recompute principle
                                 #     weights from (constitutional_results, reward) pairs.
@@ -183,7 +183,7 @@ def sync_all_companies() -> None:
                                     from backend.src.utils.constitutional_verifier import ConstitutionalAdaptiveConfig
                                     ConstitutionalAdaptiveConfig().recompute(company)
                                 except Exception:
-                                    logger.debug("Constitutional config recompute skipped for %s", company, exc_info=True)
+                                    logger.warning("Constitutional config recompute skipped for %s", company, exc_info=True)
 
                                 # 2f2. Constitutional verification backfill: score observations
                                 #      that don't have constitutional_score yet. Single-model
@@ -220,14 +220,14 @@ def sync_all_companies() -> None:
                                             _const_backfilled, company,
                                         )
                                 except Exception:
-                                    logger.debug("Constitutional backfill skipped for %s", company, exc_info=True)
+                                    logger.warning("Constitutional backfill skipped for %s", company, exc_info=True)
 
                                 # 2g. Reward component weights: recompute from lagged
                                 #     engagement correlations.
                                 try:
                                     rm._get_reward_weights()  # forces recompute if obs grew
                                 except Exception:
-                                    logger.debug("Reward weights recompute skipped for %s", company, exc_info=True)
+                                    logger.warning("Reward weights recompute skipped for %s", company, exc_info=True)
 
                                 # 2h. ICP segment thresholds: recompute from engager score
                                 #     distribution percentiles.
@@ -235,7 +235,7 @@ def sync_all_companies() -> None:
                                     from backend.src.utils.icp_scorer import _get_segment_thresholds
                                     _get_segment_thresholds(company)  # recomputes + caches
                                 except Exception:
-                                    logger.debug("ICP threshold recompute skipped for %s", company, exc_info=True)
+                                    logger.warning("ICP threshold recompute skipped for %s", company, exc_info=True)
 
                                 # 2i. CV thresholds: recompute constitutional verification
                                 #     gating thresholds from cyrene_composite vs engagement.
@@ -243,7 +243,7 @@ def sync_all_companies() -> None:
                                     from backend.src.agents.stelle import _compute_cv_thresholds
                                     _compute_cv_thresholds(company)
                                 except Exception:
-                                    logger.debug("CV threshold recompute skipped for %s", company, exc_info=True)
+                                    logger.warning("CV threshold recompute skipped for %s", company, exc_info=True)
 
                                 # 2j. Observation tagger (A1): extract topic_tag, source_segment_type,
                                 #     format_tag from post bodies via Haiku. Foundational for
@@ -257,7 +257,7 @@ def sync_all_companies() -> None:
                                             _tagged, company,
                                         )
                                 except Exception:
-                                    logger.debug("Observation tagging skipped for %s", company, exc_info=True)
+                                    logger.warning("Observation tagging skipped for %s", company, exc_info=True)
 
                                 # 2j2. Segment model: train embedding→predicted-reward projection
                                 #      from tagged observations. Replaces the old 5-feature scorer
@@ -274,7 +274,7 @@ def sync_all_companies() -> None:
                                             _seg_model.get("loo_r_squared", 0),
                                         )
                                 except Exception:
-                                    logger.debug("Segment model build skipped for %s", company, exc_info=True)
+                                    logger.warning("Segment model build skipped for %s", company, exc_info=True)
 
                                 # 2k. Client profile: extract cross-client learning profile
                                 #     vector for similarity-based cold-start seeding.
@@ -288,7 +288,7 @@ def sync_all_companies() -> None:
                                             _profile.get("observation_count", 0),
                                         )
                                 except Exception:
-                                    logger.debug("Client profile build skipped for %s", company, exc_info=True)
+                                    logger.warning("Client profile build skipped for %s", company, exc_info=True)
 
                                 # 2k2. Prediction accuracy: compare draft scorer predictions
                                 #      against actual engagement outcomes for posts that have
@@ -307,7 +307,7 @@ def sync_all_companies() -> None:
                                             _pred_acc.get("trend", "?"),
                                         )
                                 except Exception:
-                                    logger.debug("Prediction accuracy skipped for %s", company, exc_info=True)
+                                    logger.warning("Prediction accuracy skipped for %s", company, exc_info=True)
 
                                 # 2k3. Feedback distiller: extract writing directives from
                                 #      editorial feedback, accepted posts, and engagement
@@ -337,9 +337,9 @@ def sync_all_companies() -> None:
                                                     _bf_count, company,
                                                 )
                                         except Exception:
-                                            logger.debug("Directive backfill skipped for %s", company, exc_info=True)
+                                            logger.warning("Directive backfill skipped for %s", company, exc_info=True)
                                 except Exception:
-                                    logger.debug("Feedback distillation skipped for %s", company, exc_info=True)
+                                    logger.warning("Feedback distillation skipped for %s", company, exc_info=True)
 
                                 # 2l. Analyst agent: hypothesis-driven engagement analysis.
                                 #     Replaces the fixed analysis pipeline (steps 2k-2p in the
@@ -393,7 +393,7 @@ def sync_all_companies() -> None:
                                                 company, _analyst_result["error"],
                                             )
                                 except Exception:
-                                    logger.debug("Analyst skipped for %s", company, exc_info=True)
+                                    logger.warning("Analyst skipped for %s", company, exc_info=True)
 
                                 # 2m. Content brief: auto-generate the live content strategy
                                 #     from the analyst's latest findings. This replaces the
@@ -423,7 +423,7 @@ def sync_all_companies() -> None:
                                             len(_brief.get("analyst_findings", [])),
                                         )
                                 except Exception:
-                                    logger.debug("Content brief skipped for %s", company, exc_info=True)
+                                    logger.warning("Content brief skipped for %s", company, exc_info=True)
 
                                 # 3. ICP auto-generation — create definition if missing.
                                 try:
@@ -463,7 +463,7 @@ def sync_all_companies() -> None:
                                             _lola_updated, company,
                                         )
                                 except Exception:
-                                    logger.debug("LOLA update skipped for %s", company, exc_info=True)
+                                    logger.warning("LOLA update skipped for %s", company, exc_info=True)
 
                                 # 8. Series Engine: update series post scores from RuanMei,
                                 #    then check series health for wrap/extend signals.
@@ -486,7 +486,7 @@ def sync_all_companies() -> None:
                                             sc["trend"], company,
                                         )
                                 except Exception:
-                                    logger.debug("Series engine update skipped for %s", company, exc_info=True)
+                                    logger.warning("Series engine update skipped for %s", company, exc_info=True)
                             except Exception:
                                 logger.exception("RuanMei sync failed for %s", company)
     except Exception:
