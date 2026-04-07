@@ -253,7 +253,26 @@ def sync_all_companies() -> None:
                                 except Exception:
                                     logger.debug("Client profile build skipped for %s", company, exc_info=True)
 
-                                # 2k2. Feedback distiller: extract writing directives from
+                                # 2k2. Prediction accuracy: compare draft scorer predictions
+                                #      against actual engagement outcomes for posts that have
+                                #      both predicted_engagement and scored reward.
+                                try:
+                                    from backend.src.utils.prediction_tracker import update_prediction_accuracy
+                                    _pred_acc = update_prediction_accuracy(company)
+                                    if _pred_acc and _pred_acc.get("n_predictions", 0) > 0:
+                                        logger.info(
+                                            "[ordinal_sync] Prediction accuracy for %s: "
+                                            "Spearman=%.3f, MAE=%.3f, n=%d (%s)",
+                                            company,
+                                            _pred_acc.get("spearman", 0),
+                                            _pred_acc.get("mean_abs_error", 0),
+                                            _pred_acc.get("n_predictions", 0),
+                                            _pred_acc.get("trend", "?"),
+                                        )
+                                except Exception:
+                                    logger.debug("Prediction accuracy skipped for %s", company, exc_info=True)
+
+                                # 2k3. Feedback distiller: extract writing directives from
                                 #      editorial feedback, accepted posts, and engagement
                                 #      patterns. Kept because the analyst produces analytical
                                 #      findings, not prescriptive writing rules. The distiller

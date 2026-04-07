@@ -142,6 +142,11 @@ class Observation:
     # or for posts ingested from Ordinal analytics.
     analyst_findings_version: Optional[str] = None
     analyst_findings_count: int = 0
+    # Prediction tracking — the draft scorer's predicted engagement score
+    # at generation time. After the post is scored with actual engagement,
+    # prediction_error = predicted - actual. This closes the validation
+    # loop: does the model actually get better over time?
+    predicted_engagement: Optional[float] = None
 
 
 # ------------------------------------------------------------------

@@ -3955,8 +3955,6 @@ def _process_result(
 
             # Analyst findings tracking — stamp whether analyst findings were
             # available and injected into the user prompt at generation time.
-            # Used for future impact measurement: compare engagement of posts
-            # generated with analyst context vs without.
             try:
                 import json as _json_af_track
                 _af_path = P.memory_dir(company_keyword) / "analyst_findings.json"
@@ -3967,6 +3965,18 @@ def _process_result(
                     if _af_findings and _af_runs:
                         _extra_fields["analyst_findings_version"] = _af_runs[-1].get("timestamp", "")
                         _extra_fields["analyst_findings_count"] = len(_af_findings)
+            except Exception:
+                pass
+
+            # Prediction tracking — score this post with the draft scorer
+            # BEFORE it's published so we can compare predicted vs actual
+            # engagement after the post is scored. This closes the validation
+            # loop: does the model actually get better over time?
+            try:
+                from backend.src.utils.draft_scorer import score_drafts
+                _draft_scores = score_drafts(company_keyword, [{"text": corrected}])
+                if _draft_scores and _draft_scores[0].model_source != "no_model":
+                    _extra_fields["predicted_engagement"] = _draft_scores[0].predicted_score
             except Exception:
                 pass
 

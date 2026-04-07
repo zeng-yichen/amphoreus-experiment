@@ -38,13 +38,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ScoredDraft:
-    """A draft post with predicted engagement score and explanation."""
+    """A draft post with predicted engagement score, exploration value, and explanation."""
     rank: int
     text: str
     predicted_score: float
-    features: dict          # extracted feature values
-    explanation: str        # human-readable "why this score"
-    model_source: str       # "analyst_model" | "heuristic_only" | "no_model"
+    exploration_value: float   # 0-1: how much the system would learn from this post
+    features: dict             # extracted feature values
+    explanation: str           # human-readable "why this score"
+    model_source: str          # "analyst_model+embedding_knn" | "embedding_knn" | "no_model"
 
 
 def _compute_training_stats(company: str) -> dict:
@@ -256,6 +257,7 @@ def score_drafts(
         if not text.strip():
             scored.append(ScoredDraft(
                 rank=0, text=text, predicted_score=0.0,
+                exploration_value=0.0,
                 features={}, explanation="Empty draft",
                 model_source="no_model",
             ))
@@ -299,20 +301,61 @@ def score_drafts(
         features["knn_score"] = knn_score
         features["coeff_score"] = coeff_score if model_source != "no_model" else None
 
+        # Exploration value: how much would the system learn from publishing
+        # this post? Measured as 1 - max_similarity to any scored post.
+        # A draft identical to a historical post (sim=0.95) teaches nothing
+        # (exploration=0.05). A genuinely novel draft (sim=0.4) is highly
+        # informative (exploration=0.6).
+        exploration = _compute_exploration_value(company, text)
+
         scored.append(ScoredDraft(
             rank=0,
             text=text,
             predicted_score=round(combined, 4),
+            exploration_value=round(exploration, 4),
             features=features,
             explanation=explanation,
             model_source=source,
         ))
 
+    # Rank by predicted engagement (highest first).
+    # Exploration value is shown but does NOT affect ranking —
+    # the operator decides the engagement/exploration tradeoff.
     scored.sort(key=lambda s: s.predicted_score, reverse=True)
     for i, s in enumerate(scored):
         s.rank = i + 1
 
     return scored
+
+
+def _compute_exploration_value(company: str, text: str) -> float:
+    """How much the system would learn from publishing this draft.
+
+    Measured as 1.0 - max_cosine_similarity to any scored observation.
+    A draft that's 0.95 similar to a historical post teaches nothing new
+    (exploration_value = 0.05). A draft that's only 0.40 similar to the
+    nearest scored post is genuinely novel (exploration_value = 0.60).
+
+    Returns 0.0 if embeddings are unavailable (can't assess novelty).
+    """
+    try:
+        from backend.src.utils.post_embeddings import (
+            get_post_embeddings, embed_text, find_similar,
+        )
+        embeddings = get_post_embeddings(company)
+        if not embeddings:
+            return 0.0
+        draft_emb = embed_text(text)
+        if draft_emb is None:
+            return 0.0
+        # Find the single most similar observation
+        nearest = find_similar(draft_emb, embeddings, top_k=1)
+        if not nearest:
+            return 1.0  # no observations at all → maximally novel
+        max_sim = nearest[0][1]
+        return max(0.0, 1.0 - max_sim)
+    except Exception:
+        return 0.0
 
 
 def _load_model(company: str) -> tuple[dict, str]:
@@ -523,8 +566,14 @@ def score_and_explain_batch(company: str, posts: list[dict]) -> str:
 
     for s in scored:
         hook = s.text[:80].replace("\n", " ").strip()
+        explore_label = ""
+        if s.exploration_value > 0.5:
+            explore_label = " 🔬 HIGH EXPLORATION"
+        elif s.exploration_value > 0.3:
+            explore_label = " 🔬 moderate exploration"
         lines.append(
             f"**#{s.rank}** | `{s.predicted_score:+.3f}` | "
+            f"exploration `{s.exploration_value:.2f}`{explore_label} | "
             f"*{s.features.get('format_tag', '?')}*, "
             f"{s.features.get('char_count', '?')} chars"
         )
@@ -541,5 +590,15 @@ def score_and_explain_batch(company: str, posts: list[dict]) -> str:
         f"(#{best.rank} '{best.features.get('format_tag')}' vs "
         f"#{worst.rank} '{worst.features.get('format_tag')}')"
     )
+
+    # Exploration recommendation
+    most_novel = max(scored, key=lambda s: s.exploration_value)
+    if most_novel.exploration_value > 0.3 and most_novel.rank > 1:
+        lines.append(
+            f"\n**Exploration opportunity:** Draft #{most_novel.rank} "
+            f"(exploration={most_novel.exploration_value:.2f}) is the most novel — "
+            f"no similar posts in history. Publishing it would teach the model "
+            f"more than the higher-ranked drafts."
+        )
 
     return "\n".join(lines)
