@@ -52,6 +52,26 @@ def _load_ordinal_keys() -> dict[str, tuple[str, str]]:
     return keys
 
 
+def _clean_ordinal_markup(text: str) -> str:
+    """Strip Ordinal's LinkedIn mention markup: @[Name](urn:li:...) → Name."""
+    import re
+    return re.sub(r"@\[([^\]]+)\]\([^)]+\)", r"\1", text)
+
+
+def _reward_label(reward: float) -> str:
+    """Translate z-scored reward into client-friendly performance label."""
+    if reward > 1.0:
+        return "well above average"
+    elif reward > 0.3:
+        return "above average"
+    elif reward > -0.3:
+        return "near average"
+    elif reward > -1.0:
+        return "below average"
+    else:
+        return "well below average"
+
+
 def _ordinal_get(endpoint: str, api_key: str) -> dict | list | None:
     url = f"{_API_BASE}{endpoint}"
     req = urllib.request.Request(url, headers={
@@ -198,19 +218,22 @@ def _build_report(company: str, weeks: int = 2) -> dict:
         if ts and ts >= cutoff:
             pid = p.get("id", "")
             a = analytics_by_id.get(pid, {})
+            # Skip posts without analytics (just published, data not in yet)
+            if not a.get("impressionCount"):
+                continue
             copy_text = (p.get("linkedIn") or {}).get("copy") or ""
             hook = copy_text.split("\n")[0][:120] if copy_text else ""
+            eng_rate = a.get("engagement")
             published.append({
                 "date": ts.isoformat(),
                 "date_display": ts.strftime("%a %b %d"),
-                "title": p.get("title") or "(untitled)",
-                "hook": hook,
+                "title": _clean_ordinal_markup(p.get("title") or "(untitled)"),
+                "hook": _clean_ordinal_markup(hook),
                 "impressions": a.get("impressionCount", 0),
                 "likes": a.get("likeCount", 0),
                 "comments": a.get("commentCount", 0),
                 "reposts": a.get("shareCount", 0),
-                "engagement_rate": a.get("engagement"),
-                "has_analytics": bool(a.get("impressionCount")),
+                "engagement_rate_pct": f"{eng_rate * 100:.1f}%" if eng_rate else "—",
             })
     published.sort(key=lambda x: x["date"])
 
@@ -218,6 +241,41 @@ def _build_report(company: str, weeks: int = 2) -> dict:
     total_likes = sum(p["likes"] for p in published)
     total_comments = sum(p["comments"] for p in published)
     n_published = len(published)
+
+    # --- Period-over-period comparison ---
+    prior_cutoff = cutoff - timedelta(weeks=weeks)
+    prior_published = []
+    for p in posts:
+        if p.get("status") != "Posted":
+            continue
+        pub = p.get("publishedAt") or p.get("publishAt") or ""
+        ts = _parse_ts(pub)
+        if ts and prior_cutoff <= ts < cutoff:
+            a = analytics_by_id.get(p.get("id", ""), {})
+            if a.get("impressionCount"):
+                prior_published.append({
+                    "impressions": a.get("impressionCount", 0),
+                    "likes": a.get("likeCount", 0),
+                    "comments": a.get("commentCount", 0),
+                })
+    prior_imp = sum(p["impressions"] for p in prior_published)
+    prior_likes = sum(p["likes"] for p in prior_published)
+    prior_comments = sum(p["comments"] for p in prior_published)
+    prior_count = len(prior_published)
+
+    period_comparison = None
+    if prior_count > 0 and n_published > 0:
+        imp_change = ((total_imp - prior_imp) / prior_imp * 100) if prior_imp > 0 else 0
+        period_comparison = {
+            "prior_period": f"{prior_cutoff.strftime('%b %d')} – {cutoff.strftime('%b %d')}",
+            "prior_posts": prior_count,
+            "prior_impressions": prior_imp,
+            "prior_avg_impressions": prior_imp // max(prior_count, 1),
+            "prior_reactions": prior_likes,
+            "prior_comments": prior_comments,
+            "impressions_change_pct": f"{imp_change:+.0f}%",
+            "posts_change": n_published - prior_count,
+        }
 
     # --- Upcoming posts ---
     future_cutoff = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
@@ -231,7 +289,7 @@ def _build_report(company: str, weeks: int = 2) -> dict:
             upcoming.append({
                 "date": ts.isoformat(),
                 "date_display": ts.strftime("%a %b %d"),
-                "title": p.get("title") or "(untitled)",
+                "title": _clean_ordinal_markup(p.get("title") or "(untitled)"),
                 "status": p.get("status", "?"),
             })
     upcoming.sort(key=lambda x: x["date"])
@@ -251,46 +309,69 @@ def _build_report(company: str, weeks: int = 2) -> dict:
         if f:
             formats[f] = formats.get(f, 0) + 1
 
-    # Window performance
+    # Window performance — translated to client-friendly language
     window_performance = None
     if scored_recent:
         rewards = [o.get("reward", {}).get("immediate", 0) for o in scored_recent]
+        avg_r = sum(rewards) / len(rewards)
         best = max(scored_recent, key=lambda o: o.get("reward", {}).get("immediate", 0))
         worst = min(scored_recent, key=lambda o: o.get("reward", {}).get("immediate", 0))
         window_performance = {
-            "avg_reward": round(sum(rewards) / len(rewards), 2),
+            "summary": (
+                f"This period's posts performed {'above' if avg_r > 0.1 else 'near' if avg_r > -0.1 else 'below'} "
+                f"your historical average."
+            ),
             "best": {
-                "reward": round(best.get("reward", {}).get("immediate", 0), 2),
+                "performance": _reward_label(best.get("reward", {}).get("immediate", 0)),
                 "impressions": (best.get("reward", {}).get("raw_metrics") or {}).get("impressions", 0),
                 "hook": (best.get("post_body") or best.get("posted_body") or "")[:120].split("\n")[0],
             },
             "worst": {
-                "reward": round(worst.get("reward", {}).get("immediate", 0), 2),
+                "performance": _reward_label(worst.get("reward", {}).get("immediate", 0)),
                 "impressions": (worst.get("reward", {}).get("raw_metrics") or {}).get("impressions", 0),
                 "hook": (worst.get("post_body") or worst.get("posted_body") or "")[:120].split("\n")[0],
             },
         }
 
-    # --- LOLA arms ---
-    lola_arms = []
+    # --- Content strategy testing (LOLA arms, translated for client) ---
+    strategy_testing = []
     if lola:
         for a in lola.get("arms", []):
             pulls = a.get("n_pulls", 0)
             if pulls > 0:
                 avg = a.get("sum_reward", 0) / max(pulls, 1)
-                lola_arms.append({
-                    "label": a.get("label", "?"),
-                    "pulls": pulls,
-                    "avg_reward": round(avg, 2),
+                # Use description (client-friendly) instead of label (internal)
+                desc = a.get("description") or a.get("label", "?").replace("_", " ").title()
+                strategy_testing.append({
+                    "strategy": desc,
+                    "times_tested": pulls,
+                    "performance": _reward_label(avg),
                 })
-        lola_arms.sort(key=lambda x: x["avg_reward"], reverse=True)
+        strategy_testing.sort(key=lambda x: x["performance"], reverse=True)
 
-    # --- Learned directives ---
-    active_directives = []
+    # --- Learned writing rules (translated for client) ---
+    # Show what the system learned, not internal directives. Strip "DO"/"DON'T"
+    # prefixes and technical framing.
+    writing_rules = []
     if directives and directives.get("directives"):
         for d in directives["directives"]:
             if d.get("priority") in ("high", "medium"):
-                active_directives.append(d.get("directive", ""))
+                rule = d.get("directive", "")
+                # Strip internal prefixes
+                for prefix in ("DO ", "DON'T ", "DONT ", "Always ", "Never "):
+                    if rule.startswith(prefix):
+                        rule = rule[len(prefix):]
+                        break
+                source = d.get("source", "")
+                source_label = {
+                    "editorial": "from your feedback",
+                    "accepted": "from your approved posts",
+                    "engagement": "from engagement data",
+                }.get(source, "")
+                writing_rules.append({
+                    "rule": rule[0].upper() + rule[1:] if rule else "",
+                    "source": source_label,
+                })
 
     # --- Analyst findings (latest run only) ---
     findings_strong = []
@@ -315,21 +396,29 @@ def _build_report(company: str, weeks: int = 2) -> dict:
 
         for f in _filtered:
             conf = f.get("confidence", "")
-            entry = {"claim": f.get("claim", ""), "evidence": f.get("evidence", "")[:200]}
+            # Client-friendly: use the claim but strip technical jargon from evidence
+            claim = f.get("claim", "")
+            # Remove Cohen's d, Spearman, partial correlation references from the claim
+            # These are valuable for the operator but confusing for the client
+            import re
+            clean_claim = re.sub(r"\s*[\(\[—–-]\s*Cohen's d\s*=\s*[^)\]]*[\)\]]?", "", claim)
+            clean_claim = re.sub(r"\s*[\(\[—–-]\s*partial correlation[^)\]]*[\)\]]?", "", clean_claim)
+            clean_claim = re.sub(r"\s*[\(\[—–-]\s*Spearman[^)\]]*[\)\]]?", "", clean_claim)
+            entry = {"claim": clean_claim.strip(), "evidence": f.get("evidence", "")[:200]}
             if conf in ("strong", "high"):
                 findings_strong.append(entry)
             elif conf in ("moderate", "medium", "suggestive"):
                 findings_moderate.append(entry)
 
-    # --- Recommendations ---
+    # --- Recommendations (client-friendly) ---
     recommendations_up = []
     recommendations_down = []
-    if lola_arms:
-        for a in lola_arms:
-            if a["avg_reward"] > 0.15 and a["pulls"] >= 2:
-                recommendations_up.append(a)
-            elif a["avg_reward"] < -0.3 and a["pulls"] >= 2:
-                recommendations_down.append(a)
+    if strategy_testing:
+        for a in strategy_testing:
+            if "above average" in a["performance"] or "well above" in a["performance"]:
+                recommendations_up.append(a["strategy"])
+            elif "below average" in a["performance"] or "well below" in a["performance"]:
+                recommendations_down.append(a["strategy"])
 
     # --- Engagement trend ---
     all_scored = [o for o in observations if o.get("status") == "scored"]
@@ -436,18 +525,19 @@ def _build_report(company: str, weeks: int = 2) -> dict:
             "comments": total_comments,
         },
         "upcoming": upcoming,
+        "period_comparison": period_comparison,
         "strategy_applied": {
             "topics": topics,
             "formats": formats,
             "window_performance": window_performance,
-            "lola_arms": lola_arms[:8],
-            "active_directives": active_directives[:5],
+            "strategy_testing": strategy_testing[:8],
+            "writing_rules": writing_rules[:5],
         },
         "strategy_shifts": {
             "findings_strong": findings_strong[:5],
             "findings_moderate": findings_moderate[:3],
-            "recommendations_up": recommendations_up[:3],
-            "recommendations_down": recommendations_down[:3],
+            "recommendations_increase": recommendations_up[:3],
+            "recommendations_decrease": recommendations_down[:3],
             "trend": trend,
         },
         "learning_status": learning_status,
@@ -471,13 +561,18 @@ CONTENT RULES
     2. Posts Published: table or card list with date, title, impressions, likes, comments, engagement rate.
        Period totals below: total posts, total impressions, avg impressions/post, total reactions.
     3. Upcoming Posts: compact list with date, title, status badge (color-coded)
-    4. Content Strategy Applied:
-       - Window performance summary (avg reward, best/worst post)
-       - Strategy levers table (LOLA arms: strategy name, times used, avg reward, trend indicator)
-       - Active writing directives (bullet list, max 5)
-    5. Strategy Shifts:
-       - High-confidence insights (bullet list with claim + evidence snippet)
-       - Data-driven recommendations: "Double down on" (green) and "Reduce" (red)
+    4. Period Comparison (if available):
+       - Compare this period vs prior period: posts published, total impressions,
+         impressions change %, reactions, comments. Show as a compact before/after
+         with green/red arrows for increases/decreases.
+    5. Content Strategy Applied:
+       - Window performance summary (plain-English: "above/near/below your average")
+       - Strategy testing table (strategy name, times tested, performance label)
+       - Writing rules learned from feedback (bullet list with source labels)
+    6. Strategy Shifts:
+       - High-confidence insights (bullet list with claim — already cleaned of
+         statistical jargon, ready for client display)
+       - Data-driven recommendations: "Increase" (green) and "Decrease" (red)
        - Engagement trend indicator (improving/stable/declining with numbers)
     6. System Learning Status (NEW — the core value prop):
        - Prediction accuracy: if available, show Spearman correlation between
