@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import { useState, useRef, useEffect, useCallback } from "react";
-import { strategyApi, reportApi } from "@/lib/api";
+import { strategyApi, reportApi, analystApi } from "@/lib/api";
 import Link from "next/link";
 
 interface TerminalLine {
@@ -152,35 +152,46 @@ export default function StrategyPage() {
 
       <div className="flex-1 overflow-auto" ref={terminalRef}>
         {activeView === "strategy" && (
-          <div className="mx-auto max-w-4xl p-8">
-            {loadingStrategy ? (
-              <p className="text-stone-500">Loading strategy...</p>
-            ) : currentStrategy ? (
-              currentStrategy.trimStart().startsWith("<!DOCTYPE") || currentStrategy.trimStart().startsWith("<html") ? (
-                <iframe
-                  srcDoc={currentStrategy}
-                  className="w-full border-0"
-                  style={{ minHeight: "80vh" }}
-                  onLoad={(e) => {
-                    const f = e.target as HTMLIFrameElement;
-                    if (f.contentDocument?.body) {
-                      f.style.height = f.contentDocument.body.scrollHeight + 32 + "px";
-                    }
-                  }}
-                />
+          <div className="mx-auto max-w-4xl p-8 space-y-8">
+            {/* Live content brief — auto-updated from analyst data */}
+            <ContentBriefSection company={company} />
+
+            {/* Herta-generated static strategy (reference / onboarding) */}
+            <div>
+              <h2 className="text-sm font-medium text-stone-400 mb-3">
+                Generated Strategy Document
+                <span className="ml-2 text-xs text-stone-300">(manual — click Generate Strategy to update)</span>
+              </h2>
+              {loadingStrategy ? (
+                <p className="text-stone-500">Loading strategy...</p>
+              ) : currentStrategy ? (
+                currentStrategy.trimStart().startsWith("<!DOCTYPE") || currentStrategy.trimStart().startsWith("<html") ? (
+                  <iframe
+                    srcDoc={currentStrategy}
+                    className="w-full border-0"
+                    style={{ minHeight: "80vh" }}
+                    onLoad={(e) => {
+                      const f = e.target as HTMLIFrameElement;
+                      if (f.contentDocument?.body) {
+                        f.style.height = f.contentDocument.body.scrollHeight + 32 + "px";
+                      }
+                    }}
+                  />
+                ) : (
+                  <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-stone-800">
+                    {currentStrategy}
+                  </pre>
+                )
               ) : (
-                <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-stone-800">
-                  {currentStrategy}
-                </pre>
-              )
-            ) : (
-              <div className="rounded-lg border border-dashed border-stone-300 p-8 text-center">
-                <p className="text-stone-500">No content strategy found for {company}.</p>
-                <p className="mt-1 text-sm text-stone-400">
-                  Click Generate Strategy to create one from interview transcripts and post data.
-                </p>
-              </div>
-            )}
+                <div className="rounded-lg border border-dashed border-stone-300 p-8 text-center">
+                  <p className="text-stone-500">No content strategy document yet.</p>
+                  <p className="mt-1 text-sm text-stone-400">
+                    Click Generate Strategy for an initial strategy from interview transcripts.
+                    Once the analyst has enough data, the live brief above replaces this.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -285,4 +296,139 @@ function getLineColor(type: string): string {
     case "status": return "text-cyan-400";
     default: return "text-stone-400";
   }
+}
+
+function ContentBriefSection({ company }: { company: string }) {
+  const [brief, setBrief] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    analystApi
+      .getBrief(company)
+      .then(setBrief)
+      .catch(() => setBrief(null))
+      .finally(() => setLoading(false));
+  }, [company]);
+
+  if (loading) {
+    return <p className="text-sm text-stone-400">Loading content brief...</p>;
+  }
+
+  if (!brief) {
+    return (
+      <div className="rounded-lg border border-dashed border-stone-200 bg-stone-50 p-6">
+        <p className="text-sm text-stone-500">
+          <strong>Live Content Brief</strong> — auto-updates from engagement data.
+          Needs 10+ scored observations and one analyst run. Until then, use the
+          generated strategy document below.
+        </p>
+      </div>
+    );
+  }
+
+  const plan = brief.content_plan || [];
+  const findings = brief.analyst_findings || [];
+  const bestTopics = brief.best_topics || [];
+  const bestFormats = brief.best_formats || [];
+
+  return (
+    <div className="rounded-lg border border-emerald-200 bg-emerald-50/30 p-6">
+      <div className="flex items-center gap-2 mb-4">
+        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+        <h2 className="text-sm font-semibold text-stone-800">
+          Live Content Brief
+        </h2>
+        <span className="text-xs text-stone-400">
+          auto-updated from {brief.observation_count || 0} scored posts ·
+          {brief.analyst_runs || 0} analyst runs
+        </span>
+      </div>
+
+      {/* Content plan */}
+      {plan.length > 0 && (
+        <div className="mb-4">
+          <h3 className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-2">
+            Next {brief.n_posts_target || 6} Posts
+          </h3>
+          <div className="space-y-2">
+            {plan.map((p: any, i: number) => (
+              <div key={i} className="flex items-center gap-3 text-sm">
+                <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">
+                  {p.count}x
+                </span>
+                <span className="text-stone-700">
+                  {p.topic === "exploration" ? (
+                    <em>Exploration — untested territory</em>
+                  ) : (
+                    <><strong>{p.topic}</strong> in <strong>{p.format}</strong> format</>
+                  )}
+                </span>
+                <span className="text-xs text-stone-400">{p.rationale}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Hook guidance */}
+      {brief.hook_guidance && (
+        <div className="mb-4 rounded bg-amber-50 border border-amber-200 p-3">
+          <p className="text-xs font-medium text-amber-800">Hook Priority</p>
+          <p className="text-sm text-amber-700 mt-1">{brief.hook_guidance}</p>
+        </div>
+      )}
+
+      {/* Performance rankings */}
+      <div className="grid grid-cols-2 gap-4 mb-4">
+        {bestTopics.length > 0 && (
+          <div>
+            <h3 className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-1">Topic Performance</h3>
+            {bestTopics.map((t: any, i: number) => (
+              <div key={i} className="flex justify-between text-sm py-0.5">
+                <span className="text-stone-600">{t.topic}</span>
+                <span className={t.avg_reward >= 0 ? "text-emerald-600" : "text-red-500"}>
+                  {t.avg_reward > 0 ? "+" : ""}{t.avg_reward}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        {bestFormats.length > 0 && (
+          <div>
+            <h3 className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-1">Format Performance</h3>
+            {bestFormats.map((f: any, i: number) => (
+              <div key={i} className="flex justify-between text-sm py-0.5">
+                <span className="text-stone-600">{f.format}</span>
+                <span className={f.avg_reward >= 0 ? "text-emerald-600" : "text-red-500"}>
+                  {f.avg_reward > 0 ? "+" : ""}{f.avg_reward}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Key findings */}
+      {findings.length > 0 && (
+        <div>
+          <h3 className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-2">
+            Analyst Findings ({findings.length})
+          </h3>
+          <div className="space-y-1.5">
+            {findings.slice(0, 5).map((f: any, i: number) => (
+              <div key={i} className="text-sm text-stone-600">
+                <span className={`text-xs font-medium mr-1 ${
+                  f.confidence === "strong" ? "text-emerald-600" :
+                  f.confidence === "suggestive" ? "text-amber-600" : "text-stone-400"
+                }`}>
+                  [{f.confidence}]
+                </span>
+                {f.finding}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }

@@ -148,6 +148,8 @@ export const analystApi = {
     apiFetch<{ company: string; findings: any[]; last_run: any }>(
       `/api/strategy/findings/${company}/refresh`
     ),
+  getBrief: (company: string) =>
+    apiFetch<any>(`/api/strategy/brief/${company}`),
 };
 
 // --- Strategy ---

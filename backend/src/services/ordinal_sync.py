@@ -345,6 +345,36 @@ def sync_all_companies() -> None:
                                 except Exception:
                                     logger.debug("Analyst skipped for %s", company, exc_info=True)
 
+                                # 2m. Content brief: auto-generate the live content strategy
+                                #     from the analyst's latest findings. This replaces the
+                                #     static Herta-generated strategy doc with a data-driven
+                                #     brief that updates every time the analyst learns something
+                                #     new. Runs after the analyst (2l) and whenever analyst
+                                #     findings exist, even if the analyst didn't run this cycle.
+                                try:
+                                    from backend.src.utils.content_brief import build_interview_brief
+                                    import json as _json_brief
+                                    _brief = build_interview_brief(company, n_posts=6)
+                                    if _brief:
+                                        # Save as the live content strategy
+                                        _brief_path = vortex.memory_dir(company) / "content_brief.json"
+                                        _brief_path.parent.mkdir(parents=True, exist_ok=True)
+                                        _tmp_brief = _brief_path.with_suffix(".tmp")
+                                        _tmp_brief.write_text(
+                                            _json_brief.dumps(_brief, indent=2, ensure_ascii=False),
+                                            encoding="utf-8",
+                                        )
+                                        _tmp_brief.rename(_brief_path)
+                                        logger.info(
+                                            "[ordinal_sync] Content brief updated for %s: "
+                                            "%d targets, %d findings",
+                                            company,
+                                            len(_brief.get("content_plan", [])),
+                                            len(_brief.get("analyst_findings", [])),
+                                        )
+                                except Exception:
+                                    logger.debug("Content brief skipped for %s", company, exc_info=True)
+
                                 # 3. ICP auto-generation — create definition if missing.
                                 try:
                                     from backend.src.services.icp_generator import generate_icp_definition

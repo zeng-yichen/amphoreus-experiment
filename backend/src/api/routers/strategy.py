@@ -32,6 +32,46 @@ class StrategyRequest(BaseModel):
 # than treating those words as company slugs.
 
 
+@router.get("/brief/{company}")
+async def get_content_brief(company: str):
+    """Return the live, auto-updated content strategy brief.
+
+    This is the data-driven strategy computed from the analyst's latest
+    findings. It updates automatically after each analyst run — no manual
+    regeneration needed. Replaces Herta's static strategy document for
+    clients with enough data.
+
+    Returns the content plan (topic/format allocation), analyst findings,
+    hook guidance, and performance rankings. 404 if no analyst data exists.
+    """
+    from backend.src.db import vortex
+    path = vortex.memory_dir(company) / "content_brief.json"
+
+    # Try cached file first
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    # Generate on demand if analyst data exists
+    try:
+        from backend.src.utils.content_brief import build_interview_brief
+        brief = build_interview_brief(company, n_posts=6)
+        if brief:
+            return brief
+    except Exception:
+        pass
+
+    raise HTTPException(
+        status_code=404,
+        detail=(
+            f"No content brief available for {company}. Needs at least "
+            "10 scored observations and one analyst run."
+        ),
+    )
+
+
 @router.get("/findings/{company}")
 async def get_analyst_findings(company: str):
     """Return the analyst agent's findings for a client.
