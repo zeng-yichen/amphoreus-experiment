@@ -1489,13 +1489,23 @@ function FeedbackPanel({ company }: { company: string }) {
         </div>
       )}
 
-      {/* Submit new feedback */}
+      {/* Automatic feedback notice */}
+      <div className="rounded-lg border border-stone-700/50 bg-stone-900/50 p-3">
+        <p className="text-xs text-stone-500">
+          <span className="text-emerald-500">●</span>{" "}
+          <strong className="text-stone-400">Edit-based feedback is automatic.</strong>{" "}
+          When the client edits a draft on Ordinal before publishing, the system
+          detects the diff and learns from it. No manual input needed for text changes.
+        </p>
+      </div>
+
+      {/* Submit strategic / non-text feedback */}
       <div className="rounded-lg border border-stone-800 bg-stone-900 p-4">
-        <h3 className="text-sm font-medium text-stone-300">Client Feedback</h3>
+        <h3 className="text-sm font-medium text-stone-300">Strategic Feedback</h3>
         <p className="mt-1 text-xs text-stone-500">
-          Paste Slack messages, email notes, or verbal instructions from the
-          client. The feedback distiller converts these into writing rules
-          Stelle follows.
+          For feedback that isn't captured by text edits: strategic direction
+          changes, tone/voice preferences, verbal instructions, Slack notes.
+          The distiller converts these into writing rules Stelle follows.
         </p>
         <textarea
           value={text}
