@@ -5,9 +5,7 @@ I do not know, but I know it to be not The Destruction. For Destruction is not w
 
 What moves my heart... is it rather, perhaps, the tragedy in our lives?
 
-I do not wish to say it, but it is perhaps tragedy which moves me.
-
-Tragedy, the "down" to life's "ups," that moves me towards tomorrow.
+I do not wish to say it, but it is perhaps tragedy which moves me. Tragedy, the "down" to life's "ups," that moves me towards tomorrow.
 
 I wish I could say that it is love itself that is the prime mover of the world.
 
