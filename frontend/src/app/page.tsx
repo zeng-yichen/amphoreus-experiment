@@ -6,11 +6,13 @@ export default function Home() {
   const router = useRouter();
 
   return (
-    <div className="flex min-h-screen items-center justify-center">
+    <div className="flex min-h-screen items-center justify-center px-6">
       <div className="w-full max-w-md space-y-8 rounded-2xl bg-white p-10 shadow-sm">
         <div className="text-center">
-          <h1 className="text-3xl font-semibold tracking-tight text-stone-900">Amphoreus</h1>
-          <p className="mt-2 text-sm text-stone-500">AI content operations platform</p>
+          <h1 className="text-4xl font-semibold tracking-tight text-stone-900">Cyrene</h1>
+          <p className="mt-3 text-sm italic text-stone-400">
+            This will be a LinkedIn journey like none that has come before.
+          </p>
         </div>
 
         <button

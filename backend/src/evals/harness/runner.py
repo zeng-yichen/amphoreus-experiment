@@ -106,7 +106,7 @@ def _execute_agent(case: EvalCase) -> str:
         ) or ""
 
     elif agent_name == "cyrene":
-        from backend.src.agents.cyrene import Cyrene
+        from backend.src.agents.demiurge import Cyrene
         cyrene = Cyrene()
         result = cyrene.rewrite_single_post(
             post_text=case.context.get("post_text", case.prompt),

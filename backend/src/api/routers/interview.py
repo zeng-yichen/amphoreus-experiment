@@ -102,19 +102,15 @@ async def trash_transcript(req: TrashTranscriptRequest):
 
 
 @router.get("/stream/{job_id}")
-async def stream_session(job_id: str):
+async def stream_session(job_id: str, after_id: int = 0):
     """SSE stream for a Tribbie session. Streams until 'done' or 'error'."""
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
 
-    def _gen():
-        # 2-hour timeout — enough for even the longest interview
-        for event in job_manager.drain_events(job_id, timeout=7_200):
-            yield f"data: {event.model_dump_json()}\n\n"
-
     return StreamingResponse(
-        _gen(),
+        # 2-hour timeout — enough for even the longest interview
+        job_manager.sse_stream(job_id, timeout=7_200, heartbeat_interval=15, after_id=after_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

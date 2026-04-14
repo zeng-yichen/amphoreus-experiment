@@ -82,7 +82,7 @@ class Series:
     series_id: str
     company: str
     theme: str                  # e.g., "sample size estimation"
-    topic_arm: str = ""         # LOLA arm label, if applicable
+    topic_arm: str = ""         # content direction label, if applicable
     num_posts: int = 5
     posts: list[dict] = field(default_factory=list)  # serialized SeriesPost dicts
     status: str = "active"      # "active" | "wrapping" | "complete" | "extending"
@@ -205,7 +205,7 @@ def _derive_arc_from_client(company: str, num_posts: int) -> str | None:
 
     scored = [
         o for o in rm._state.get("observations", [])
-        if o.get("status") == "scored" and o.get("posted_at") and o.get("descriptor", {}).get("analysis")
+        if o.get("status") in ("scored", "finalized") and o.get("posted_at") and o.get("descriptor", {}).get("analysis")
     ]
 
     if len(scored) < 8:
@@ -246,7 +246,7 @@ def _derive_arc_from_cross_client(num_posts: int) -> str | None:
             rm = RuanMei(d.name)
             scored = [
                 o for o in rm._state.get("observations", [])
-                if o.get("status") == "scored" and o.get("posted_at")
+                if o.get("status") in ("scored", "finalized") and o.get("posted_at")
                 and o.get("descriptor", {}).get("analysis")
             ]
             if len(scored) < 6:
@@ -324,7 +324,7 @@ def plan_series(
         company: Client company keyword.
         theme: The series theme (e.g., "sample size estimation").
         num_posts: Number of posts in the series (4-6).
-        topic_arm: LOLA arm label if this series comes from a bandit recommendation.
+        topic_arm: Content direction label if this series comes from a learning recommendation.
         transcript_context: Relevant transcript excerpts for sourcing.
         strategy_context: Content strategy snippet for tone/audience alignment.
         icp_context: ICP definition for MOFU/BOFU targeting.
@@ -694,7 +694,7 @@ def _compute_decline_threshold(company: str) -> int:
     try:
         from backend.src.agents.ruan_mei import RuanMei
         rm = RuanMei(company)
-        scored = [o for o in rm._state.get("observations", []) if o.get("status") == "scored"]
+        scored = [o for o in rm._state.get("observations", []) if o.get("status") in ("scored", "finalized")]
         if len(scored) < 10:
             return _DEFAULT_DECLINE_THRESHOLD
 
@@ -728,7 +728,7 @@ def check_series_health(company: str) -> list[dict]:
             continue
 
         posts = s.get("posts", [])
-        scored_posts = [p for p in posts if p.get("status") == "scored" and p.get("engagement_score", 0) != 0]
+        scored_posts = [p for p in posts if p.get("status") in ("scored", "finalized") and p.get("engagement_score", 0) != 0]
 
         if len(scored_posts) < 2:
             continue  # Need at least 2 scored posts for trend detection
@@ -855,13 +855,13 @@ def update_series_from_ruan_mei(company: str) -> int:
 
     scored_obs = [
         o for o in rm._state.get("observations", [])
-        if o.get("status") == "scored"
+        if o.get("status") in ("scored", "finalized")
     ]
 
     updated = 0
     for s in all_series:
         for p in s.get("posts", []):
-            if p.get("status") == "scored":
+            if p.get("status") in ("scored", "finalized"):
                 continue  # Already scored
 
             local_id = p.get("local_post_id", "")

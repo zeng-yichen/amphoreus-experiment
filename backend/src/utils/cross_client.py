@@ -50,7 +50,7 @@ def build_client_profile(company: str) -> Optional[dict]:
     if state is None:
         return None
 
-    scored = [o for o in state.get("observations", []) if o.get("status") == "scored"]
+    scored = [o for o in state.get("observations", []) if o.get("status") in ("scored", "finalized")]
     if len(scored) < MIN_OBS_FOR_PROFILE:
         logger.debug(
             "[cross_client] %s has %d scored obs (need %d), skipping profile",
@@ -129,34 +129,22 @@ def build_client_profile(company: str) -> Optional[dict]:
     else:
         profile["content_length"] = {"median": 0, "p25": 0, "p75": 0}
 
-    # 5. Top 3 LOLA arms by reward
-    lola_path = vortex.memory_dir(company) / "lola_state.json"
-    top_arms = []
-    if lola_path.exists():
-        try:
-            lola = json.loads(lola_path.read_text(encoding="utf-8"))
-            arms = lola.get("arms", [])
-            # Sort by mean reward (sum_reward / n_pulls)
-            scored_arms = [
-                a for a in arms
-                if a.get("n_pulls", 0) > 0
-            ]
-            scored_arms.sort(
-                key=lambda a: a.get("sum_reward", 0) / max(a.get("n_pulls", 1), 1),
-                reverse=True,
-            )
-            for arm in scored_arms[:3]:
-                top_arms.append({
-                    "label": arm.get("label", ""),
-                    "arm_type": arm.get("arm_type", ""),
-                    "mean_reward": round(
-                        arm.get("sum_reward", 0) / max(arm.get("n_pulls", 1), 1), 4
-                    ),
-                    "n_pulls": arm.get("n_pulls", 0),
-                })
-        except Exception:
-            pass
-    profile["top_lola_arms"] = top_arms
+    # 5. Top 3 performing posts by reward (replaces deprecated LOLA arms)
+    top_posts = []
+    scored_by_reward = sorted(
+        scored,
+        key=lambda o: o.get("reward", {}).get("immediate", 0),
+        reverse=True,
+    )
+    for obs in scored_by_reward[:3]:
+        r = obs.get("reward", {})
+        body = (obs.get("posted_body") or obs.get("post_body") or "").strip()
+        top_posts.append({
+            "reward": round(r.get("immediate", 0), 4),
+            "impressions": r.get("raw_metrics", {}).get("impressions", 0),
+            "hook": body[:100] if body else "",
+        })
+    profile["top_posts"] = top_posts
 
     # 6. Engagement distribution summary
     rewards = [
@@ -284,7 +272,7 @@ def get_similar_client(company: str) -> Optional[str]:
     # Check if this client is actually new
     state = _load_ruan_mei_state(company)
     if state is not None:
-        scored = [o for o in state.get("observations", []) if o.get("status") == "scored"]
+        scored = [o for o in state.get("observations", []) if o.get("status") in ("scored", "finalized")]
         if len(scored) >= MIN_OBS_FOR_NEW_CLIENT:
             logger.debug("[cross_client] %s has %d obs, not a new client", company, len(scored))
             return None
@@ -437,29 +425,9 @@ def get_cold_start_seeds(company: str) -> Optional[dict]:
 
     sim_memory = vortex.memory_dir(similar)
 
-    # 1. LOLA arms with reduced confidence
-    lola_path = sim_memory / "lola_state.json"
-    if lola_path.exists():
-        try:
-            lola = json.loads(lola_path.read_text(encoding="utf-8"))
-            arms = lola.get("arms", [])
-            seeded_arms = []
-            for arm in arms:
-                if arm.get("n_pulls", 0) > 0:
-                    seeded_arms.append({
-                        "label": arm.get("label", ""),
-                        "arm_type": arm.get("arm_type", ""),
-                        "description": arm.get("description", ""),
-                        # Halve the pulls to reduce confidence, keep reward ratio
-                        "n_pulls": max(1, arm.get("n_pulls", 0) // 2),
-                        "sum_reward": arm.get("sum_reward", 0) / 2,
-                        "source": "cross_client_seed",
-                    })
-            seeds["lola_arms"] = seeded_arms
-        except Exception:
-            seeds["lola_arms"] = []
-    else:
-        seeds["lola_arms"] = []
+    # 1. (LOLA arms removed — cold-start content intelligence now provided
+    #    by RuanMei.recommend_context() using LinkedIn-wide data.)
+    seeds["lola_arms"] = []  # kept for backward compat with any remaining callers
 
     # 2. Cyrene dimension weights
     # Check for adaptive config
@@ -690,21 +658,10 @@ def update_universal_patterns() -> list[dict]:
 # ------------------------------------------------------------------
 
 def _load_ruan_mei_state(company: str) -> Optional[dict]:
-    """Load RuanMei state from SQLite or JSON."""
+    """Load RuanMei state from SQLite."""
     try:
         from backend.src.db.local import initialize_db, ruan_mei_load
         initialize_db()
-        state = ruan_mei_load(company)
-        if state is not None:
-            return state
+        return ruan_mei_load(company)
     except Exception:
-        pass
-
-    state_path = vortex.memory_dir(company) / "ruan_mei_state.json"
-    if state_path.exists():
-        try:
-            return json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
-    return None
+        return None

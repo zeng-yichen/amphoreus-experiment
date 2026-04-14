@@ -149,19 +149,23 @@ def fetch_and_persist(
     fetch_comments: bool = False,
     fetch_reactions: bool = True,
     reaction_limit: int = DEFAULT_REACTION_LIMIT,
-) -> Optional[list[str]]:
-    """Fetch engagers, persist to SQLite, return list of headlines.
+) -> Optional[list[dict]]:
+    """Fetch engagers, persist to SQLite, return enriched profile dicts.
 
-    Returns None on failure. Returns cached headlines if already fetched and force=False.
-    Headlines list is suitable for passing directly to icp_scorer.score_engagers().
+    Returns None on failure. Returns cached profiles if already fetched and force=False.
+    Each dict includes ``urn`` (for writing ICP scores back) plus headline/name/company/title/location
+    suitable for passing directly to icp_scorer.score_engagers_segmented()
+    (which returns continuous per-engager scores, no segment buckets).
     """
     from backend.src.db.local import engagers_fetched_for_post, upsert_engagers, get_engagers_for_post
 
     if not force and engagers_fetched_for_post(ordinal_post_id):
         rows = get_engagers_for_post(ordinal_post_id)
         return [
-            {"headline": r.get("headline", ""), "name": r.get("name", ""),
-             "current_company": r.get("current_company", ""), "title": r.get("title", "")}
+            {"urn": r.get("engager_urn", ""),
+             "headline": r.get("headline", ""), "name": r.get("name", ""),
+             "current_company": r.get("current_company", ""), "title": r.get("title", ""),
+             "location": r.get("location", "")}
             for r in rows
             if r.get("headline") or r.get("current_company") or r.get("title")
         ]
@@ -179,13 +183,14 @@ def fetch_and_persist(
         return []
 
     upsert_engagers(company, ordinal_post_id, linkedin_post_url, engagers)
-    # Return enriched dicts (not just headlines) for richer ICP scoring
     return [
         {
+            "urn": e.get("urn", ""),
             "headline": e.get("headline", ""),
             "name": e.get("name", ""),
             "current_company": e.get("current_company", ""),
             "title": e.get("title", ""),
+            "location": e.get("location", ""),
         }
         for e in engagers
         if e.get("headline") or e.get("current_company") or e.get("title")

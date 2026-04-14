@@ -1,0 +1,63 @@
+# Fly.io config for the Amphoreus backend.
+#
+# This app is NOT publicly reachable. Only the frontend (amphoreus-frontend)
+# can talk to it, via Fly's internal 6PN network at:
+#   http://amphoreus-backend.internal:8000
+#
+# State lives on a persistent volume mounted at /data. See docker-entrypoint.sh
+# for how the in-image paths get wired to it.
+#
+# Deploy from the repo root:
+#   fly deploy --config backend/fly.toml
+
+app          = "amphoreus"
+primary_region = "sjc"   # San Jose, US West
+
+[build]
+  # IMPORTANT: the dockerfile path is NOT set here because Fly resolves it
+  # relative to the fly.toml directory (backend/), producing the wrong path.
+  # Instead, pass --dockerfile backend/Dockerfile on the CLI:
+  #   fly deploy --config backend/fly.toml --dockerfile backend/Dockerfile --remote-only
+  # The build context is the repo root (flyctl's working directory).
+
+[env]
+  # Persistent state on the volume.
+  VOLUME_ROOT         = "/data"
+  SQLITE_PATH         = "/data/sqlite/amphoreus.db"
+  DATA_DIR            = "/data/sqlite"
+
+  # CORS — frontend is the only allowed origin. No browser reaches the backend
+  # directly because there's no public HTTP handler (see [services] below:
+  # force_https is off and we only listen on the internal network).
+  # The frontend proxies via Next.js rewrites, so the Origin header on
+  # backend-bound requests is the frontend's server-side fetch, not the browser.
+  # Setting this to * is safe because the backend has no public exposure.
+  ALLOWED_ORIGINS     = "*"
+
+  # Python runtime
+  PYTHONUNBUFFERED    = "1"
+  LOG_LEVEL           = "info"
+
+[[mounts]]
+  source      = "amphoreus_data"
+  destination = "/data"
+  # initial_size set by `fly volumes create amphoreus_data --size 10`
+
+# This app is internal-only. No [[services]] or [http_service] block means
+# Fly doesn't give it a public edge address, but the `amphoreus.internal`
+# DNS name is still reachable from other Fly apps in the same org over 6PN.
+# The Dockerfile HEALTHCHECK handles container health; [[restart]] + the
+# fact that the volume pins the machine to one region keep it up.
+
+[[vm]]
+  size       = "shared-cpu-2x"
+  memory     = "2gb"
+  cpu_kind   = "shared"
+  cpus       = 2
+
+[deploy]
+  strategy = "immediate"   # single machine, no rolling — simpler with a volume
+
+[[restart]]
+  policy = "on-failure"
+  retries = 3

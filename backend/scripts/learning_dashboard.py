@@ -78,9 +78,12 @@ def collect_client(company: str) -> dict:
     data: dict = {"company": company}
 
     # --- RuanMei ---
-    rm_state = _load_json(P.ruan_mei_state_path(company))
-    if rm_state is None:
-        rm_state = _load_json(P.memory_dir(company) / "ruan_mei_state.json")
+    try:
+        from backend.src.db.local import initialize_db, ruan_mei_load
+        initialize_db()
+        rm_state = ruan_mei_load(company)
+    except Exception:
+        rm_state = None
     obs = rm_state.get("observations", []) if rm_state else []
     scored = [o for o in obs if o.get("status") == "scored"]
     pending = [o for o in obs if o.get("status") == "pending"]
@@ -126,46 +129,35 @@ def collect_client(company: str) -> dict:
         "posts_last_7d": sum(1 for t in timestamps if (datetime.now(timezone.utc) - t).days <= 7),
     }
 
-    # --- LOLA ---
-    lola_state = _load_json(P.memory_dir(company) / "lola_state.json")
-    if lola_state:
-        arms = lola_state.get("arms", [])
-        active = [a for a in arms if not a.get("retired")]
-        retired = [a for a in arms if a.get("retired") and not a.get("icp_retired")]
-        icp_retired = [a for a in arms if a.get("icp_retired")]
-        icp_boosted = [a for a in arms if a.get("icp_boosted")]
-        resting = [a for a in arms if a.get("retired") and a.get("rest_counter", 0) > 0]
-
-        sorted_arms = sorted([a for a in arms if a.get("n_pulls", 0) > 0],
-                             key=lambda a: a.get("sum_reward", 0) / max(a.get("n_pulls", 1), 1),
-                             reverse=True)
-        top3 = sorted_arms[:3]
-        bottom3 = sorted_arms[-3:] if len(sorted_arms) >= 3 else []
-
-        thresholds = lola_state.get("thresholds", {})
-
-        data["lola"] = {
-            "total_pulls": lola_state.get("total_pulls", 0),
-            "arm_count": len(arms),
-            "active": len(active),
-            "retired": len(retired),
-            "icp_retired": len(icp_retired),
-            "icp_boosted": len(icp_boosted),
-            "resting": len(resting),
-            "exploration_rate": thresholds.get("exploration_rate", 0.2),
-            "top_arms": [{
-                "label": a.get("label", ""),
-                "pulls": a.get("n_pulls", 0),
-                "avg_reward": round(a.get("sum_reward", 0) / max(a.get("n_pulls", 1), 1), 3),
-            } for a in top3],
-            "bottom_arms": [{
-                "label": a.get("label", ""),
-                "pulls": a.get("n_pulls", 0),
-                "avg_reward": round(a.get("sum_reward", 0) / max(a.get("n_pulls", 1), 1), 3),
-            } for a in bottom3],
-        }
+    # --- Content Intelligence ---
+    n_scored = data["ruan_mei"]["scored"]
+    if n_scored >= 10:
+        ci_phase = "analyst"
+        ci_label = "Phase 1: Claude-as-Analyst + KNN exploration"
+    elif n_scored > 0:
+        ci_phase = "cold_start"
+        ci_label = f"Phase 0: cold start ({10 - n_scored} more posts needed)"
     else:
-        data["lola"] = None
+        ci_phase = "no_data"
+        ci_label = "No scored posts yet"
+
+    # Top posts for display
+    top_posts = sorted(
+        [o for o in obs if o.get("status") == "scored"],
+        key=lambda o: o.get("reward", {}).get("immediate", 0),
+        reverse=True,
+    )[:3]
+
+    data["content_intelligence"] = {
+        "phase": ci_phase,
+        "phase_label": ci_label,
+        "scored_posts": n_scored,
+        "top_posts": [{
+            "reward": round(o.get("reward", {}).get("immediate", 0), 3),
+            "impressions": o.get("reward", {}).get("raw_metrics", {}).get("impressions", 0),
+            "hook": (o.get("posted_body") or o.get("post_body") or "")[:80],
+        } for o in top_posts],
+    }
 
     # --- Adaptive config ---
     ac = _load_json(P.memory_dir(company) / "adaptive_config.json")
@@ -229,17 +221,12 @@ def cross_client_summary(clients: list[dict]) -> dict:
     pattern_count = len(patterns) if isinstance(patterns, list) else 0
 
     # Top/bottom arms across all clients
-    all_arms: list[dict] = []
+    # Phase distribution
+    phase_dist = {"analyst": 0, "cold_start": 0, "no_data": 0}
     for c in clients:
-        lola = c.get("lola")
-        if not lola:
-            continue
-        for a in lola.get("top_arms", []) + lola.get("bottom_arms", []):
-            a["company"] = c["company"]
-            all_arms.append(a)
-
-    all_arms_deduped = {(a["company"], a["label"]): a for a in all_arms}
-    sorted_arms = sorted(all_arms_deduped.values(), key=lambda a: a.get("avg_reward", 0), reverse=True)
+        ci = c.get("content_intelligence", {})
+        phase = ci.get("phase", "no_data")
+        phase_dist[phase] = phase_dist.get(phase, 0) + 1
 
     return {
         "total_observations": total_obs,
@@ -248,8 +235,7 @@ def cross_client_summary(clients: list[dict]) -> dict:
         "adaptive_tiers": tiers,
         "hook_library_size": hook_count,
         "universal_patterns": pattern_count,
-        "top_arms": sorted_arms[:5],
-        "bottom_arms": sorted_arms[-5:] if len(sorted_arms) >= 5 else [],
+        "phase_distribution": phase_dist,
     }
 
 
@@ -271,16 +257,13 @@ def print_client(c: dict) -> None:
     print(f"    Engagement:    avg {_fmt_num(eng['avg_impressions'])} impr | {eng['avg_reactions']:.0f} react | {eng['avg_comments']:.1f} comments")
     print(f"    Cadence:       every {cad['avg_days']:.1f} days | {cad['posts_last_7d']} posts last 7d")
 
-    lola = c.get("lola")
-    if lola:
-        print(f"\n    LOLA ({lola['total_pulls']} pulls, {lola['active']} active, "
-              f"{lola['retired']} retired, {lola['icp_boosted']} icp-boosted):")
-        for a in lola.get("top_arms", []):
-            print(f"      ✦ {a['label']:<35s} {a['pulls']:3d} pulls  avg {a['avg_reward']:+.3f}")
-        if lola.get("bottom_arms"):
-            for a in lola["bottom_arms"]:
-                print(f"      ✧ {a['label']:<35s} {a['pulls']:3d} pulls  avg {a['avg_reward']:+.3f}")
-        print(f"      exploration_rate: {lola['exploration_rate']:.0%}")
+    ci = c.get("content_intelligence", {})
+    if ci:
+        print(f"\n    Content Intelligence: {ci.get('phase_label', 'unknown')}")
+        for tp in ci.get("top_posts", []):
+            hook = tp.get("hook", "")[:60]
+            print(f"      ✦ reward {tp['reward']:+.3f} | {tp['impressions']} impr | \"{hook}\"")
+
 
     adaptive = c.get("adaptive", {})
     if adaptive:
@@ -320,14 +303,10 @@ def print_summary(summary: dict) -> None:
           f"{tiers.get('aggregate', 0)} aggregate, {tiers.get('default', 0)} default")
     print(f"    Hook library: {summary['hook_library_size']} hooks")
     print(f"    Universal patterns: {summary['universal_patterns']}")
-    if summary.get("top_arms"):
-        print(f"\n    Top arms:")
-        for a in summary["top_arms"][:5]:
-            print(f"      ✦ {a['label']:<30s} ({a['company']}) avg {a['avg_reward']:+.3f}")
-    if summary.get("bottom_arms"):
-        print(f"    Bottom arms:")
-        for a in summary["bottom_arms"][-5:]:
-            print(f"      ✧ {a['label']:<30s} ({a['company']}) avg {a['avg_reward']:+.3f}")
+    phases = summary.get("phase_distribution", {})
+    if phases:
+        print(f"    Content intelligence: {phases.get('analyst', 0)} analyst, "
+              f"{phases.get('cold_start', 0)} cold start, {phases.get('no_data', 0)} no data")
 
 
 # ------------------------------------------------------------------
@@ -351,10 +330,11 @@ def main():
     if args.client:
         companies = [args.client]
     else:
+        # Any memory/{slug} directory is a candidate client; collect_client
+        # itself skips those with no SQLite state.
         companies = sorted([
             d.name for d in P.MEMORY_ROOT.iterdir()
             if d.is_dir() and not d.name.startswith(".") and d.name != "our_memory"
-            and (d / "ruan_mei_state.json").exists()
         ])
 
     clients = [collect_client(c) for c in companies]

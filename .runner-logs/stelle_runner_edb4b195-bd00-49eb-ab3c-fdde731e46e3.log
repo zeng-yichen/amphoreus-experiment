@@ -1,0 +1,69 @@
+2026-04-13 21:50:20,424 [INFO] stelle_runner: [stelle_runner] logging to /Users/zengyichen/virio/amphoreus-experiment/.runner-logs/stelle_runner_edb4b195-bd00-49eb-ab3c-fdde731e46e3.log (pid=46130)
+2026-04-13 21:50:20,586 [INFO] amphoreus.usage.instrumentation: usage.instrumentation: installed Anthropic patches (sync=True, async=True)
+2026-04-13 21:50:20,586 [INFO] stelle_runner: [stelle_runner] starting company=innovocommerce job_id=edb4b195-bd00-49eb-ab3c-fdde731e46e3 model=claude-opus-4-6 prompt_len=0 user=dev@localhost
+2026-04-13 21:50:20,775 [INFO] httpx: HTTP Request: GET https://ylplirptcybuzxnecsgp.supabase.co/rest/v1/users?select=id%2Ccompany_id%2Cfirst_name%2Clast_name&linkedin_url=ilike.%25sachilv%25&limit=1 "HTTP/1.1 200 OK"
+2026-04-13 21:50:20,776 [INFO] backend.src.agents.stelle: [Stelle] Resolved Supabase IDs for @sachilv: user=d759e806-0755-449e-bd61-197c73715e09 company=3888886d-b19c-400c-8d02-fb93bd849987 name='Sachil Verma'
+2026-04-13 21:50:20,776 [INFO] backend.src.agents.stelle: [Stelle] Starting agentic ghostwriter for Sachil Verma...
+2026-04-13 21:50:20,778 [INFO] backend.src.agents.stelle: [Stelle] Setting up workspace...
+2026-04-13 21:50:20,784 [INFO] backend.src.agents.stelle: [Stelle] Fetching published posts for @sachilv from Supabase...
+2026-04-13 21:50:21,005 [INFO] httpx: HTTP Request: GET https://ylplirptcybuzxnecsgp.supabase.co/rest/v1/linkedin_posts?select=hook%2Cpost_text%2Cposted_at%2Ctotal_reactions%2Ctotal_comments%2Ctotal_reposts%2Cengagement_score%2Cis_outlier&creator_username=eq.sachilv&is_company_post=eq.false&post_text=not.is.null&order=posted_at.desc&limit=50 "HTTP/1.1 200 OK"
+2026-04-13 21:50:21,010 [INFO] backend.src.agents.stelle: [Stelle] Fetched 44 published posts for @sachilv
+2026-04-13 21:50:21,181 [INFO] httpx: HTTP Request: GET https://ylplirptcybuzxnecsgp.supabase.co/rest/v1/linkedin_posts?select=post_text%2Cposted_at%2Ctotal_reactions%2Ctotal_comments%2Cengagement_score%2Chook&creator_username=eq.sachilv&is_company_post=eq.false&post_text=not.is.null&order=engagement_score.desc&limit=5 "HTTP/1.1 200 OK"
+2026-04-13 21:50:21,186 [INFO] backend.src.agents.stelle: [Stelle] Fetched 5 voice examples for @sachilv
+2026-04-13 21:50:21,828 [INFO] httpx: HTTP Request: GET https://app.tryordinal.com/api/v1/posts?limit=100 "HTTP/1.1 200 OK"
+2026-04-13 21:50:21,978 [INFO] backend.src.agents.stelle: [Stelle] Fetched 2 existing Ordinal drafts for innovocommerce
+2026-04-13 21:50:22,195 [INFO] httpx: HTTP Request: GET https://ylplirptcybuzxnecsgp.supabase.co/rest/v1/users?select=id%2Ccompany_id%2Cfirst_name%2Clast_name&linkedin_url=ilike.%25sachilv%25&limit=1 "HTTP/1.1 200 OK"
+2026-04-13 21:50:22,196 [INFO] backend.src.agents.stelle: [Stelle] Resolved Supabase IDs for @sachilv: user=d759e806-0755-449e-bd61-197c73715e09 company=3888886d-b19c-400c-8d02-fb93bd849987 name='Sachil Verma'
+2026-04-13 21:50:22,363 [INFO] httpx: HTTP Request: GET https://ylplirptcybuzxnecsgp.supabase.co/rest/v1/parallel_research_results?select=output%2Cbasis%2Ccreated_at&research_type=eq.person&error=is.null&order=created_at.desc&limit=1&user_id=eq.d759e806-0755-449e-bd61-197c73715e09 "HTTP/1.1 200 OK"
+2026-04-13 21:50:22,574 [INFO] httpx: HTTP Request: GET https://ylplirptcybuzxnecsgp.supabase.co/rest/v1/parallel_research_results?select=output%2Cbasis%2Ccreated_at&research_type=eq.company&error=is.null&order=created_at.desc&limit=1&company_id=eq.3888886d-b19c-400c-8d02-fb93bd849987 "HTTP/1.1 200 OK"
+2026-04-13 21:50:22,579 [INFO] backend.src.agents.stelle: [Stelle] Fetched 2 research files for innovocommerce
+2026-04-13 21:50:22,580 [INFO] backend.src.agents.stelle: [Stelle] Using person.md research as profile.md fallback
+2026-04-13 21:50:22,584 [INFO] backend.src.agents.stelle: [Stelle] Workspace staged at /Users/zengyichen/virio/amphoreus-experiment/data/workspaces/innovocommerce (44 published posts, 5 voice examples, 2 research files)
+2026-04-13 21:50:23,186 [INFO] httpx: HTTP Request: GET https://app.tryordinal.com/api/v1/posts?limit=100 "HTTP/1.1 200 OK"
+2026-04-13 21:50:23,353 [INFO] backend.src.agents.stelle: [Stelle] Fetched 37 existing post hooks for dedup (innovocommerce)
+2026-04-13 21:50:23,399 [INFO] backend.src.agents.stelle: [Stelle] Using direct API loop (max 60 turns)...
+2026-04-13 21:50:37,780 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:50:44,465 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:50:51,607 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:50:59,550 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:51:10,285 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:51:19,793 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:51:29,289 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:51:38,606 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:51:51,541 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:52:06,561 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:52:12,434 [INFO] httpx: HTTP Request: GET https://ylplirptcybuzxnecsgp.supabase.co/rest/v1/linkedin_posts?select=provider_urn%2Ccreator_username%2Chook%2Cpost_text%2Ctotal_reactions%2Ctotal_comments%2Cengagement_score%2Cposted_at&post_text=ilike.%2Atrial%2A&is_company_post=eq.false&engagement_score=gt.0&order=engagement_score.desc&limit=80 "HTTP/1.1 200 OK"
+2026-04-13 21:52:17,397 [INFO] httpx: HTTP Request: GET https://ylplirptcybuzxnecsgp.supabase.co/rest/v1/linkedin_posts?select=provider_urn%2Ccreator_username%2Chook%2Cpost_text%2Ctotal_reactions%2Ctotal_comments%2Cengagement_score%2Cposted_at&post_text=ilike.%2Atrial%2A&is_company_post=eq.false&engagement_score=gt.0&order=engagement_score.desc&limit=80 "HTTP/1.1 200 OK"
+2026-04-13 21:52:21,961 [INFO] httpx: HTTP Request: GET https://ylplirptcybuzxnecsgp.supabase.co/rest/v1/linkedin_posts?select=provider_urn%2Ccreator_username%2Chook%2Cpost_text%2Ctotal_reactions%2Ctotal_comments%2Cengagement_score%2Cposted_at&post_text=ilike.%2ACopilot%2A&is_company_post=eq.false&engagement_score=gt.0&order=engagement_score.desc&limit=80 "HTTP/1.1 200 OK"
+2026-04-13 21:52:34,696 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:52:44,980 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:53:14,295 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:53:14,302 [INFO] backend.src.agents.irontomb: [Irontomb] calibrate(innovocommerce): 10 rounds, cost=$1.8905, summary=
+2026-04-13 21:53:14,302 [INFO] backend.src.agents.stelle: [Stelle] Irontomb calibration skipped/empty for innovocommerce
+2026-04-13 21:53:14,302 [INFO] backend.src.agents.stelle: [Stelle] Turn 1 — calling Claude...
+2026-04-13 21:53:17,164 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:53:22,185 [INFO] backend.src.agents.stelle: [Stelle] Turn 1 done in 7.9s — stop=tool_use blocks=13 in=3 out=515 cache_read=7375 cache_write=1981 (79% cached)
+2026-04-13 21:53:22,190 [INFO] backend.src.agents.stelle: [Stelle]   tool: read_file(memory/config.md)
+2026-04-13 21:53:22,194 [INFO] backend.src.agents.stelle: [Stelle]   tool: read_file(memory/profile.md)
+2026-04-13 21:53:22,196 [INFO] backend.src.agents.stelle: [Stelle]   tool: read_file(memory/strategy.md)
+2026-04-13 21:53:22,199 [INFO] backend.src.agents.stelle: [Stelle]   tool: read_file(memory/constraints.md)
+2026-04-13 21:53:22,201 [INFO] backend.src.agents.stelle: [Stelle]   tool: read_file(memory/story-inventory.md)
+2026-04-13 21:53:22,204 [INFO] backend.src.agents.stelle: [Stelle]   tool: list_directory(memory/voice-examples)
+2026-04-13 21:53:22,206 [INFO] backend.src.agents.stelle: [Stelle]   tool: list_directory(memory/published-posts)
+2026-04-13 21:53:22,209 [INFO] backend.src.agents.stelle: [Stelle]   tool: list_directory(memory/source-material)
+2026-04-13 21:53:22,211 [INFO] backend.src.agents.stelle: [Stelle]   tool: list_directory(memory/draft-posts)
+2026-04-13 21:53:22,212 [INFO] backend.src.agents.stelle: [Stelle]   tool: list_directory(memory/references)
+2026-04-13 21:53:22,214 [INFO] backend.src.agents.stelle: [Stelle]   tool: list_directory(memory/feedback/edits)
+2026-04-13 21:53:22,216 [INFO] backend.src.agents.stelle: [Stelle] Turn 2 — calling Claude...
+2026-04-13 21:53:24,885 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:53:26,776 [INFO] backend.src.agents.stelle: [Stelle] Turn 2 done in 4.6s — stop=tool_use blocks=5 in=1 out=257 cache_read=7375 cache_write=9169 (45% cached)
+2026-04-13 21:53:26,780 [INFO] backend.src.agents.stelle: [Stelle]   tool: read_file(memory/voice-examples/01-engagement-100.md)
+2026-04-13 21:53:26,784 [INFO] backend.src.agents.stelle: [Stelle]   tool: read_file(memory/voice-examples/02-engagement-96.md)
+2026-04-13 21:53:26,787 [INFO] backend.src.agents.stelle: [Stelle]   tool: read_file(memory/voice-examples/03-engagement-79.md)
+2026-04-13 21:53:26,791 [INFO] backend.src.agents.stelle: [Stelle]   tool: read_file(memory/voice-examples/04-engagement-76.md)
+2026-04-13 21:53:26,794 [INFO] backend.src.agents.stelle: [Stelle]   tool: read_file(memory/voice-examples/05-engagement-59.md)
+2026-04-13 21:53:26,796 [INFO] backend.src.agents.stelle: [Stelle] Turn 3 — calling Claude...
+2026-04-13 21:53:28,517 [INFO] httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-13 21:53:29,938 [INFO] backend.src.agents.stelle: [Stelle] Turn 3 done in 3.1s — stop=tool_use blocks=3 in=1 out=116 cache_read=16544 cache_write=3162 (84% cached)
+2026-04-13 21:53:29,942 [INFO] backend.src.agents.stelle: [Stelle]   tool: read_file(memory/source-material/latest.txt)
+2026-04-13 21:53:29,945 [INFO] backend.src.agents.stelle: [Stelle] Turn 4 — calling Claude...

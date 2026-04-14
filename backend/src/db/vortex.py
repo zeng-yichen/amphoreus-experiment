@@ -111,11 +111,6 @@ def our_memory_dir() -> pathlib.Path:
     return MEMORY_ROOT / "our_memory"
 
 
-def ruan_mei_state_path(company: str) -> pathlib.Path:
-    """Per-client RuanMei observation history and content state."""
-    return MEMORY_ROOT / company / "ruan_mei_state.json"
-
-
 def linkedin_username_path(company: str) -> pathlib.Path:
     return MEMORY_ROOT / company / "linkedin_username.txt"
 

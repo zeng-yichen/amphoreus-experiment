@@ -1,23 +1,27 @@
-"""LOLA — LinUCB Online Learning Agent for content strategy exploration.
+"""LOLA — UCB1 Online Learning Agent for content strategy exploration.
 
-LOLA maintains a set of per-client content arms (topic + format combinations)
-and selects which to explore or exploit next, using UCB1 bandit logic.
-Reward comes from RuanMei observations (ICP-weighted engagement score).
+██████████████████████████████████████████████████████████████████████
+██  DEPRECATED: LOLA is superseded by RuanMei.recommend_context().  ██
+██                                                                    ██
+██  Content intelligence is now provided by a Claude-as-Analyst       ██
+██  pipeline in ruan_mei.py (Phase 1) with KNN-based frontier         ██
+██  detection and cross-client blind spot exploration.                 ██
+██                                                                    ██
+██  This file is kept for reference. No active codepath imports LOLA.  ██
+██████████████████████████████████████████████████████████████████████
+
+LOLA maintained a set of per-client content arms (topic + format combinations)
+and selected which to explore or exploit next, using UCB1 bandit logic.
+Reward came from RuanMei observations (ICP-weighted engagement score).
 
 Design:
   - UCB1 for topic arms (stable enough for confidence-interval exploration)
   - Thompson Sampling for format arms (categorical, low sample size tolerant)
-  - 20% exploration budget — always tries high-uncertainty arms
-  - Topic retirement after 3 consecutive declining posts
-  - Embedding-based arm matching (all-MiniLM-L6-v2 sentence embeddings)
+  - Adaptive exploration budget (decays from 20% as bandit converges)
+  - Topic retirement after adaptive consecutive declining threshold
+  - OpenAI text-embedding-3-small for semantic arm matching
+  - Continuous kernel reward field (Phase 1) blends in after 10+ data points
   - Persisted to memory/{company}/lola_state.json
-
-Usage in Stelle (pre-generation):
-    from backend.src.agents.lola import LOLA
-    lola = LOLA(company)
-    context = lola.recommend_context()  # inject into user_prompt
-    # After observations are scored:
-    lola.update_from_ruan_mei()         # pull latest rewards from RuanMei
 """
 
 from __future__ import annotations
@@ -91,10 +95,10 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
         return 0.0
     return float(dot / (norm_a * norm_b))
 
-_ALPHA = 1.0          # UCB1 exploration coefficient
-_EXPLORATION_RATE = 0.20  # 20% of selections force exploration
-_DEFAULT_RETIREMENT_THRESHOLD = 3  # consecutive declining posts before retirement (cold-start default)
-_REST_CYCLES = 4           # how many "pulls" before a retired arm can return
+_ALPHA = 1.0          # UCB1 exploration coefficient (cold-start; learned after 5+ pulls)
+_EXPLORATION_RATE = 0.20  # exploration rate (cold-start; decays with 1/sqrt(pulls))
+_DEFAULT_RETIREMENT_THRESHOLD = 3  # consecutive declines before retirement (cold-start; adaptive after data)
+_REST_CYCLES = 4           # rest pulls before retired arm returns (cold-start; adaptive)
 
 
 def _now() -> str:
@@ -121,15 +125,13 @@ class Arm:
     sum_reward: float = 0.0       # cumulative reward
     last_reward: float = 0.0      # most recent reward (for decline detection)
     prev_reward: float = 0.0      # reward before last (for trend)
+    positive_pulls: int = 0       # pulls where reward > 0 (for Thompson sampling)
     consecutive_declining: int = 0
     last_pulled_at: str = ""
     retired: bool = False
     rest_counter: int = 0         # increments each global pull when arm is retired
     # ICP flywheel fields
     icp_match_rates: list = field(default_factory=list)  # rolling window of per-post match rates
-    icp_segments_total: dict = field(default_factory=lambda: {
-        "exact_icp": 0, "adjacent": 0, "neutral": 0, "anti_icp": 0,
-    })
     icp_retired: bool = False     # retired specifically due to low ICP match rate
     icp_boosted: bool = False     # UCB bonus boosted due to high ICP match rate
     # Embedding for semantic arm matching (cached, computed once)
@@ -163,12 +165,11 @@ class Arm:
     def thompson_sample(self) -> float:
         """Beta-Bernoulli Thompson sample for format arms.
 
-        Maps reward to [0,1] for Beta distribution. Uses (successes, failures)
-        where success = reward > 0.
+        Uses per-pull success tracking (positive_pulls) for the Beta
+        distribution. Alpha = positive_pulls + 1, Beta = failures + 1.
         """
-        successes = max(0, sum(1 for _ in range(self.n_pulls) if self.mean_reward > 0))
-        alpha = successes + 1
-        beta = max(self.n_pulls - successes, 0) + 1
+        alpha = self.positive_pulls + 1
+        beta = max(self.n_pulls - self.positive_pulls, 0) + 1
         return random.betavariate(alpha, beta)
 
 
@@ -273,11 +274,12 @@ class LOLA:
         self._state.arms = [asdict(a) for a in arms]
 
     def _get_thresholds(self) -> AdaptiveThresholds:
-        """Return current adaptive thresholds (from state or learned ICP distribution).
+        """Return current adaptive thresholds from state, or sane defaults.
 
-        Cold-start defaults are sourced from the client's ICP score distribution
-        (via icp_scorer._get_segment_thresholds) when available, instead of
-        hard-coded 0.40/0.70.
+        Once the client has pulled enough arms to run ``recompute_thresholds``,
+        the retire/boost cutoffs are learned directly from the distribution of
+        arm icp_match_rates. Before that, we just use the AdaptiveThresholds
+        defaults — no cold-start coupling to external threshold functions.
         """
         raw = self._state.thresholds
         if isinstance(raw, dict):
@@ -285,18 +287,7 @@ class LOLA:
                 return AdaptiveThresholds(**raw)
             except Exception:
                 pass
-
-        # Cold start: try to source defaults from client's ICP distribution
-        t = AdaptiveThresholds()
-        try:
-            from backend.src.utils.icp_scorer import _get_segment_thresholds
-            icp_t = _get_segment_thresholds(self.company)
-            if icp_t.get("observation_count", 0) >= 15:
-                t.icp_retire = icp_t.get("neutral", t.icp_retire)
-                t.icp_boost = icp_t.get("exact", t.icp_boost)
-        except Exception:
-            pass
-        return t
+        return AdaptiveThresholds()
 
     def recompute_thresholds(self) -> AdaptiveThresholds:
         """Recompute adaptive thresholds from the client's own data.
@@ -424,6 +415,18 @@ class LOLA:
         for arm, emb in zip(needs_embed, embeddings):
             arm.embedding = emb
 
+        # If embeddings were just computed (first time or model change),
+        # clear the dedup set so all observations are re-matched using
+        # embeddings instead of the inferior substring fallback.
+        had_obs = len(self._state.matched_obs_hashes)
+        if had_obs:
+            logger.info(
+                "[LOLA] Arm embeddings (re)computed — clearing %d matched hashes "
+                "to re-match with embeddings (%s)",
+                had_obs, self.company,
+            )
+            self._state.matched_obs_hashes = []
+
         self._state.arm_embeddings_model = _EMBEDDING_MODEL_NAME
         self._set_arms(arms)
         self._save()
@@ -511,6 +514,8 @@ class LOLA:
                 arm.last_reward = reward
                 arm.sum_reward += reward
                 arm.n_pulls += 1
+                if reward > 0:
+                    arm.positive_pulls += 1
                 arm.last_pulled_at = _now()
                 # Track consecutive decline.
                 if arm.n_pulls >= 2 and reward < arm.prev_reward:
@@ -535,7 +540,7 @@ class LOLA:
         self._set_arms(arms)
         self._save()
 
-    def update_icp_signal(self, label: str, icp_match_rate: float, icp_segments: dict | None = None) -> None:
+    def update_icp_signal(self, label: str, icp_match_rate: float) -> None:
         """Update an arm's ICP tracking after engager data arrives.
 
         Called by update_from_ruan_mei when an observation has icp_match_rate.
@@ -543,8 +548,8 @@ class LOLA:
 
         Args:
             label: The arm label.
-            icp_match_rate: The (exact + adjacent) / total rate for this post, in [0, 1].
-            icp_segments: Optional segment counts dict.
+            icp_match_rate: Mean continuous icp_score across this post's
+                reactors, in [0, 1].
         """
         arms = self._arms()
         for arm in arms:
@@ -553,11 +558,6 @@ class LOLA:
 
             # Append to rolling window
             arm.icp_match_rates.append(round(icp_match_rate, 4))
-
-            # Accumulate segment totals
-            if icp_segments:
-                for seg in ("exact_icp", "adjacent", "neutral", "anti_icp"):
-                    arm.icp_segments_total[seg] = arm.icp_segments_total.get(seg, 0) + icp_segments.get(seg, 0)
 
             # Check rolling rate for retirement / boost (adaptive thresholds)
             thresholds = self._get_thresholds()
@@ -594,14 +594,10 @@ class LOLA:
         self._save()
 
     def update_from_ruan_mei(self) -> int:
-        """Pull latest RuanMei observations and update arm rewards + ICP signals.
-
-        Uses embedding-based cosine similarity to match each observation's
-        descriptor analysis to the most similar arm. Falls back to substring
-        matching if sentence-transformers is unavailable.
+        """Pull latest scored observations and ingest into the continuous reward field.
 
         Deduplicates: each observation (by post_hash) is only processed once.
-        Returns number of arms updated.
+        Returns number of new observations ingested.
         """
         try:
             from backend.src.agents.ruan_mei import RuanMei
@@ -609,36 +605,20 @@ class LOLA:
             return 0
 
         rm = RuanMei(self.company)
-        scored = [o for o in rm._state["observations"] if o.get("status") == "scored"]
-        arms = self._arms()
-        if not arms:
+        scored = [o for o in rm._state["observations"] if o.get("status") in ("scored", "finalized")]
+        if not scored:
             return 0
 
-        # Recompute adaptive thresholds each sync cycle
-        if self._state.total_pulls >= 5:
-            self.recompute_thresholds()
-
-        # Deduplicate: skip observations we've already processed
-        already_matched = set(self._state.matched_obs_hashes)
+        already_seen = set(self._state.matched_obs_hashes)
         new_obs = [
             o for o in scored
-            if o.get("post_hash") and o["post_hash"] not in already_matched
+            if o.get("post_hash") and o["post_hash"] not in already_seen
         ]
         if not new_obs:
             return 0
 
-        # Populate continuous reward field points (always runs)
         self._ingest_continuous_points(new_obs)
-
-        # Arm-based matching: only run if continuous path is not yet active.
-        # Once continuous has enough points, arm accumulation is wasted computation.
-        updated = 0
-        if not self._use_continuous():
-            use_embeddings = self._ensure_arm_embeddings()
-            if use_embeddings:
-                updated = self._match_by_embedding(arms, new_obs)
-            else:
-                updated = self._match_by_substring(arms, new_obs)
+        updated = len(new_obs)
 
         # Record processed hashes
         for obs in new_obs:
@@ -705,11 +685,7 @@ class LOLA:
 
             obs_icp_rate = obs.get("icp_match_rate")
             if obs_icp_rate is not None:
-                self.update_icp_signal(
-                    best_label,
-                    icp_match_rate=obs_icp_rate,
-                    icp_segments=obs.get("icp_segments"),
-                )
+                self.update_icp_signal(best_label, icp_match_rate=obs_icp_rate)
 
             updated += 1
             logger.debug(
@@ -737,11 +713,7 @@ class LOLA:
                     self.record_pull(label, reward)
                     obs_icp_rate = obs.get("icp_match_rate")
                     if obs_icp_rate is not None:
-                        self.update_icp_signal(
-                            label,
-                            icp_match_rate=obs_icp_rate,
-                            icp_segments=obs.get("icp_segments"),
-                        )
+                        self.update_icp_signal(label, icp_match_rate=obs_icp_rate)
                     updated += 1
                     break
 
@@ -818,6 +790,19 @@ class LOLA:
     def _use_continuous(self) -> bool:
         """True if we have enough correctly-dimensioned points for continuous selection."""
         return len(self._get_points()) >= _MIN_POINTS_FOR_CONTINUOUS
+
+    def _continuous_blend_weight(self) -> float:
+        """Blend weight for continuous vs arm-based recommendations.
+
+        Returns 0.0 when fewer than _MIN_POINTS_FOR_CONTINUOUS points exist
+        (pure arm-based), ramps linearly to 1.0 over the next 10 points
+        (pure continuous). During the ramp, both systems contribute.
+        """
+        n = len(self._get_points())
+        if n < _MIN_POINTS_FOR_CONTINUOUS:
+            return 0.0
+        ramp_length = 10
+        return min(1.0, (n - _MIN_POINTS_FOR_CONTINUOUS) / ramp_length)
 
     def _update_field_params(self) -> None:
         """Recompute reward field parameters from data."""
@@ -981,45 +966,57 @@ class LOLA:
     def recommend_context(self) -> str:
         """Generate a Stelle-ready context string with content direction recommendations.
 
-        Uses continuous reward field when enough points exist (>= 10),
-        falls back to arm-based recommendations otherwise.
+        Uses the continuous reward field exclusively.  Returns a cold-start
+        message when fewer than _MIN_POINTS_FOR_CONTINUOUS data points exist.
         """
-        # Try continuous first
-        if self._use_continuous():
-            return self._recommend_continuous()
-
-        # Fall back to arm-based
-        return self._recommend_arm_based()
+        if not self._use_continuous():
+            n = len(self._get_points())
+            remaining = _MIN_POINTS_FOR_CONTINUOUS - n
+            return (
+                f"\n\nCONTENT INTELLIGENCE: collecting data ({n} posts scored, "
+                f"{remaining} more needed before the system can provide data-driven "
+                f"content direction recommendations)."
+            )
+        return self._recommend_continuous()
 
     def _recommend_continuous(self) -> str:
-        """Generate context from the continuous reward field."""
-        candidates = self.select_continuous(n_candidates=3)
-        if not candidates:
-            return self._recommend_arm_based()
+        """Generate context: actual post performance + sparsity-based exploration.
 
+        Exploitation = actual top posts with real metrics (no interpolation).
+        Exploration = density measurement in embedding space (valid in
+        non-convex spaces — "where haven't we been?" is geometric, not
+        a reward assumption).
+        """
         points = self._get_points()
+        if not points:
+            return ""
+
         n_points = len(points)
+        by_reward = sorted(points, key=lambda p: p.reward, reverse=True)
 
-        lines = [f"\n\nCONTENT INTELLIGENCE (continuous field, {n_points} data points):"]
+        lines = [f"\n\nCONTENT INTELLIGENCE ({n_points} scored posts):"]
 
-        # High-reward direction
-        top = candidates[0] if candidates else None
-        if top and top.get("label_snippets"):
+        lines.append("Top performing posts (draw on what specifically worked in each):")
+        for p in by_reward[:3]:
+            hook = p.descriptor_snippet[:80] if p.descriptor_snippet else "(no preview)"
+            lines.append(f"  • reward {p.reward:+.2f}: \"{hook}\"")
+
+        if len(by_reward) > 5:
+            lines.append("Underperformers (avoid these patterns):")
+            for p in by_reward[-2:]:
+                hook = p.descriptor_snippet[:80] if p.descriptor_snippet else "(no preview)"
+                lines.append(f"  • reward {p.reward:+.2f}: \"{hook}\"")
+
+        sparse = self._find_sparse_regions(points)
+        if sparse:
             lines.append(
-                f"Strongest direction (expected reward {top['expected_reward']:+.2f}): "
-                f"content similar to: {'; '.join(s[:60] for s in top['label_snippets'][:2])}"
+                "Exploration opportunity — underexplored territory this client "
+                "hasn't tested yet (based on content space coverage, not reward "
+                "interpolation):"
             )
+            for label in sparse[:2]:
+                lines.append(f"  • {label}")
 
-        # Exploration opportunity
-        explore = [c for c in candidates if c.get("exploration_bonus", 0) > 0.5]
-        if explore:
-            exp = explore[0]
-            lines.append(
-                f"Exploration opportunity (sparse region, bonus {exp['exploration_bonus']:.2f}): "
-                f"content near: {'; '.join(s[:60] for s in exp.get('label_snippets', [])[:2])}"
-            )
-
-        # Recent trajectory
         recent = sorted(points, key=lambda p: p.posted_at, reverse=True)[:3]
         if recent:
             avg_recent = sum(p.reward for p in recent) / len(recent)
@@ -1027,10 +1024,43 @@ class LOLA:
             lines.append(f"Recent trajectory: {trend} (last 3 avg reward {avg_recent:+.2f})")
 
         lines.append(
-            "These are data-driven directions from engagement patterns, not categorical labels. "
-            "Write content that explores these directions."
+            "These are actual post results, not interpolated directions. "
+            "The content space is non-convex — draw on specific posts that worked, "
+            "don't try to average or blend them."
         )
         return "\n".join(lines)
+
+    def _find_sparse_regions(self, points: list[ContentPoint]) -> list[str]:
+        """Identify underexplored regions by measuring local density.
+
+        Density is a geometric property of the embedding space — it
+        tells us where we *haven't* published, without assuming anything
+        about the reward landscape.  Returns human-readable labels of
+        the sparsest points (those furthest from their nearest neighbors).
+        """
+        if len(points) < 8:
+            return []
+
+        all_emb = np.array([p.embedding for p in points], dtype=np.float32)
+
+        nn_dists = []
+        for i, emb in enumerate(all_emb):
+            dists = np.linalg.norm(all_emb - emb, axis=1)
+            dists[i] = np.inf
+            k = min(3, len(points) - 1)
+            nn_dist = float(np.partition(dists, k)[:k].mean())
+            nn_dists.append((nn_dist, points[i]))
+
+        nn_dists.sort(key=lambda x: x[0], reverse=True)
+
+        labels = []
+        for dist, p in nn_dists[:3]:
+            if p.descriptor_snippet:
+                labels.append(
+                    f"far from existing content (isolation {dist:.2f}): "
+                    f"\"{p.descriptor_snippet[:60]}\""
+                )
+        return labels
 
     def _recommend_arm_based(self) -> str:
         """Legacy arm-based recommendations (fallback for < 10 points)."""

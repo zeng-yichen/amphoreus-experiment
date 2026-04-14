@@ -85,7 +85,7 @@ def run_inline_edit(
         result = inline_edit(company, post_text, instruction, event_callback=event_callback)
         return result or ""
     except (ImportError, AttributeError):
-        from backend.src.agents.cyrene import Cyrene
+        from backend.src.agents.demiurge import Cyrene
         cyrene = Cyrene()
         result = cyrene.rewrite_single_post(post_text, instruction)
         return result.get("final_post", "")

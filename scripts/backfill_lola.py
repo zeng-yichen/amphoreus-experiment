@@ -1,27 +1,12 @@
 #!/usr/bin/env python3
 """
-Backfill LOLA bandit rewards from existing RuanMei observation history.
+DEPRECATED: LOLA bandit has been superseded by RuanMei.recommend_context().
 
-Run this after backfill_ruan_mei.py so LOLA starts with real reward signal
-instead of cold-starting with no arm stats.
+This script backfilled LOLA arm rewards from RuanMei observations.
+It is no longer needed — content intelligence is now provided directly
+by RuanMei's Claude-as-Analyst pipeline (Phase 1).
 
-Optionally seeds topic/format arms from a topic_arms.json file in each
-company's memory directory before backfilling rewards.
-
-Usage:
-    # Update all clients in ordinal_auth_rows.csv:
-    python scripts/backfill_lola.py
-
-    # Single client:
-    python scripts/backfill_lola.py --company sachil-verma
-
-    # Seed arms from topic_arms.json before updating (creates arms if missing):
-    python scripts/backfill_lola.py --seed-arms
-
-    # Just show current LOLA state, no updates:
-    python scripts/backfill_lola.py --dry-run
-
-Dependency: run backfill_ruan_mei.py first so observations are scored.
+Kept for reference only.
 """
 
 import argparse
@@ -156,4 +141,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    print("DEPRECATED: LOLA bandit has been superseded by RuanMei.recommend_context().")
+    print("This script is no longer functional. See ruan_mei.py for the new architecture.")
+    import sys
+    sys.exit(0)

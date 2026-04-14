@@ -1,12 +1,13 @@
 """Cross-Client Learning Network — transfer learning across all Amphoreus clients.
 
-Three components:
+Two active components:
 1. **Universal pattern extraction** — structured patterns from top performers
    across 2+ clients, stored in memory/our_memory/universal_patterns.json.
 2. **Cross-client hook library** — top-quartile hooks with metadata, stored
    in memory/our_memory/hook_library.json.
-3. **Cold-start LOLA seeding** — auto-generate seed arms for new clients
-   from universal patterns + client ICP.
+
+(LOLA arm seeding is deprecated — cold-start content intelligence is now
+handled by RuanMei.recommend_context().)
 
 Wired into ordinal_sync as step 9 (after series health check).
 
@@ -14,7 +15,6 @@ Usage:
     from backend.src.services.cross_client_learning import (
         refresh_universal_patterns,
         refresh_hook_library,
-        auto_seed_lola,
         load_hook_library_for_stelle,
     )
 
@@ -22,11 +22,8 @@ Usage:
     refresh_universal_patterns()
     refresh_hook_library()
 
-    # When LOLA initializes with 0 arms:
-    auto_seed_lola("new-client")
-
     # Stelle context:
-    hooks = load_hook_library_for_stelle(industry="biotech", limit=10)
+    hooks = load_hook_library_for_stelle(company="biotech-co", limit=10)
 """
 
 from __future__ import annotations
@@ -67,6 +64,34 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _sanitize_analysis(analysis: str, source_company: str, all_companies: set[str]) -> str:
+    """Remove client-identifying content from analysis text for cross-client use.
+
+    Replaces:
+    - Source company name and slug variants with "[company]" (case-insensitive)
+    - Other known company names with "[company]"
+
+    This prevents client-specific strategies, product names, and identifiers
+    from leaking into the universal pattern prompt.
+    """
+    import re
+
+    result = analysis
+
+    for company in all_companies:
+        slug_variants = {company, company.replace("-", " "), company.replace("-", "")}
+        slug_variants.add(company.title())
+        slug_variants.add(company.replace("-", " ").title())
+        for variant in slug_variants:
+            if len(variant) >= 4:
+                result = re.sub(re.escape(variant), '[company]', result, flags=re.IGNORECASE)
+
+    result = re.sub(r'https?://\S+', '[url]', result)
+    result = re.sub(r'\S+@\S+\.\S+', '[email]', result)
+
+    return result
+
+
 # ------------------------------------------------------------------
 # 1. Universal pattern extraction
 # ------------------------------------------------------------------
@@ -76,19 +101,24 @@ def _load_all_scored() -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {}
     if not P.MEMORY_ROOT.exists():
         return result
+    try:
+        from backend.src.db.local import initialize_db, ruan_mei_load
+        initialize_db()
+    except Exception:
+        return result
     for d in P.MEMORY_ROOT.iterdir():
         if not d.is_dir() or d.name.startswith(".") or d.name == "our_memory":
             continue
-        state_path = d / "ruan_mei_state.json"
-        if not state_path.exists():
-            continue
+        company = d.name
         try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            scored = [o for o in state.get("observations", []) if o.get("status") == "scored"]
-            if len(scored) >= 5:
-                result[d.name] = scored
+            state = ruan_mei_load(company)
         except Exception:
+            state = None
+        if not state:
             continue
+        scored = [o for o in state.get("observations", []) if o.get("status") in ("scored", "finalized")]
+        if len(scored) >= 5:
+            result[company] = scored
     return result
 
 
@@ -111,9 +141,11 @@ def refresh_universal_patterns() -> list[dict]:
     if len(all_scored) < 2:
         return []
 
-    # Collect top analyses with client tag (anonymized as client_1, client_2, etc)
+    # Collect top analyses with client tag (anonymized as client_1, client_2, etc).
+    # Analysis text is sanitized to strip client-identifying content.
     top_entries: list[dict] = []
     client_map: dict[str, str] = {}
+    company_names = set(all_scored.keys())
     for i, (company, scored) in enumerate(sorted(all_scored.items())):
         client_map[company] = f"client_{i+1}"
         top = _top_quartile(scored)
@@ -121,6 +153,7 @@ def refresh_universal_patterns() -> list[dict]:
             analysis = o.get("descriptor", {}).get("analysis", "")
             if not analysis:
                 continue
+            analysis = _sanitize_analysis(analysis, company, company_names)
             reward = o.get("reward", {}).get("immediate", 0)
             impressions = o.get("reward", {}).get("raw_metrics", {}).get("impressions", 0)
             icp_rate = o.get("icp_match_rate")
@@ -348,8 +381,8 @@ def load_hook_library_for_stelle(company: str = "", limit: int = 15) -> str:
     """Build a Stelle-ready context string from the hook library.
 
     Two modes:
-    - If LOLA has a content direction for the client: retrieve hooks by
-      embedding similarity to that direction (relevant exemplars).
+    - If the client has enough scored posts: retrieve hooks by embedding
+      similarity to their reward-weighted content direction.
     - Fallback: return top hooks by engagement score (globally best).
 
     Excludes same-client hooks to avoid self-plagiarism.
@@ -386,215 +419,92 @@ def load_hook_library_for_stelle(company: str = "", limit: int = 15) -> str:
 def _retrieve_hooks_by_embedding(company: str, hooks: list[dict], limit: int) -> list[dict]:
     """Retrieve hooks most relevant to the client's content direction.
 
-    Uses LOLA's continuous reward field centroid as the query vector.
+    Computes a reward-weighted centroid from post embeddings and scores
+    hooks by cosine similarity to that direction.
     Falls back to empty list if embeddings unavailable.
     """
     try:
-        from backend.src.agents.lola import LOLA, _embed_texts
+        from backend.src.utils.post_embeddings import get_post_embeddings, embed_texts
+        from backend.src.agents.ruan_mei import RuanMei
         import numpy as np
     except ImportError:
         return []
 
-    lola = LOLA(company)
-    points = lola._get_points()
-    if len(points) < 5:
+    embeddings = get_post_embeddings(company)
+    if len(embeddings) < 5:
         return []
 
-    # Compute content direction: reward-weighted centroid
-    embeddings = [p.embedding for p in points if p.embedding]
-    rewards = [max(p.reward, 0) for p in points if p.embedding]
-    if not embeddings:
+    rm = RuanMei(company)
+    scored = [
+        o for o in rm._state.get("observations", [])
+        if o.get("status") in ("scored", "finalized") and o.get("post_hash") in embeddings
+    ]
+    if len(scored) < 5:
         return []
 
-    emb_matrix = np.array(embeddings, dtype=np.float32)
+    emb_list = [embeddings[o["post_hash"]] for o in scored]
+    rewards = [max(o.get("reward", {}).get("immediate", 0), 0) for o in scored]
+
+    emb_matrix = np.array(emb_list, dtype=np.float32)
     reward_weights = np.array(rewards, dtype=np.float32) + 1e-8
     centroid = np.average(emb_matrix, axis=0, weights=reward_weights)
 
-    # Embed hooks
     hook_texts = [h["hook"] for h in hooks]
-    hook_embs = _embed_texts(hook_texts)
+
+    # Cache hook embeddings alongside hook_library.json
+    hook_embs = None
+    cache_path = _our_memory() / "hook_embeddings_cache.json"
+    if cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            cached_hooks = cached.get("hooks", [])
+            if cached_hooks == hook_texts and cached.get("embeddings"):
+                hook_embs = cached["embeddings"]
+        except Exception:
+            pass
+
+    if hook_embs is None:
+        hook_embs = embed_texts(hook_texts)
+        if hook_embs and len(hook_embs) == len(hooks):
+            try:
+                cache_path.write_text(json.dumps({
+                    "hooks": hook_texts,
+                    "embeddings": [e if isinstance(e, list) else e.tolist() for e in hook_embs],
+                    "computed_at": datetime.now(timezone.utc).isoformat(),
+                }), encoding="utf-8")
+            except Exception:
+                pass
+
     if not hook_embs or len(hook_embs) != len(hooks):
         return []
 
-    # Score by cosine similarity to content direction
     hook_matrix = np.array(hook_embs, dtype=np.float32)
     centroid_norm = centroid / (np.linalg.norm(centroid) + 1e-8)
     hook_norms = hook_matrix / (np.linalg.norm(hook_matrix, axis=1, keepdims=True) + 1e-8)
     similarities = hook_norms @ centroid_norm
 
-    # Blend similarity with engagement score for final ranking
     eng_scores = np.array([h.get("engagement_score", 0) for h in hooks], dtype=np.float32)
     eng_norm = eng_scores / (np.max(np.abs(eng_scores)) + 1e-8)
     final_scores = 0.6 * similarities + 0.4 * eng_norm
 
-    # Sort and return top-k
     ranked_indices = np.argsort(final_scores)[::-1][:limit]
     return [hooks[i] for i in ranked_indices]
 
 
 # ------------------------------------------------------------------
-# 3. Cold-start LOLA seeding
+# 3. Cold-start LOLA seeding (DEPRECATED)
 # ------------------------------------------------------------------
+# LOLA arm seeding is no longer used. Cold-start content intelligence
+# is now handled by RuanMei.recommend_context() which falls back to
+# cross-client insights when a client has < 10 scored observations.
 
 def auto_seed_lola(company: str) -> int:
-    """Auto-generate LOLA seed arms for a new client with no arms.
+    """DEPRECATED: LOLA arm seeding is no longer used.
 
-    Priority order:
-    1. Manual override (topic_arms.json)
-    2. Cross-client cold-start seeds (proven arms from similar client)
-    3. LLM-generated from universal patterns + client ICP
-
-    Returns number of arms seeded.
+    Kept as a no-op stub so existing callers don't crash.
     """
-    from backend.src.agents.lola import LOLA
-
-    lola = LOLA(company)
-    if lola._state.arms:
-        return 0  # Already has arms
-
-    # Check for topic_arms.json first (manual override)
-    arms_path = P.memory_dir(company) / "topic_arms.json"
-    if arms_path.exists():
-        try:
-            manual_arms = json.loads(arms_path.read_text(encoding="utf-8"))
-            if manual_arms:
-                return lola.seed_arms(manual_arms)
-        except Exception:
-            pass
-
-    # Cross-client cold-start: seed from similar client's proven arms
-    try:
-        from backend.src.utils.cross_client import get_cold_start_seeds
-        seeds = get_cold_start_seeds(company)
-        if seeds and seeds.get("lola_arms"):
-            seed_arms = [
-                {
-                    "label": a["label"],
-                    "arm_type": a.get("arm_type", "topic"),
-                    "description": a.get("description", ""),
-                }
-                for a in seeds["lola_arms"]
-                if a.get("label") and a.get("description")
-            ]
-            if seed_arms:
-                seeded = lola.seed_arms(seed_arms)
-                if seeded:
-                    logger.info(
-                        "[cross_client] Cold-start seeded %d arms for %s from %s",
-                        seeded, company, seeds.get("source_client", "?"),
-                    )
-                    return seeded
-    except Exception as e:
-        logger.debug("[cross_client] Cold-start seed failed for %s: %s", company, e)
-
-    patterns = load_universal_patterns()
-    if not patterns:
-        logger.info("[cross_client] No universal patterns for LOLA seeding of %s", company)
-        return 0
-
-    # Load client context
-    icp_text = ""
-    icp_path = P.icp_definition_path(company)
-    if icp_path.exists():
-        try:
-            icp = json.loads(icp_path.read_text(encoding="utf-8"))
-            icp_text = icp.get("description", "")
-        except Exception:
-            pass
-
-    strategy_text = ""
-    cs_dir = P.content_strategy_dir(company)
-    if cs_dir.exists():
-        for f in sorted(cs_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True)[:1]:
-            if f.suffix in (".md", ".txt"):
-                try:
-                    strategy_text = f.read_text(encoding="utf-8", errors="replace")[:1500]
-                except Exception:
-                    pass
-
-    transcript_snippet = ""
-    t_dir = P.transcripts_dir(company)
-    if t_dir.exists():
-        for f in sorted(t_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True)[:1]:
-            if f.suffix in (".txt", ".md"):
-                try:
-                    transcript_snippet = f.read_text(encoding="utf-8", errors="replace")[:1000]
-                except Exception:
-                    pass
-
-    patterns_text = "\n".join(
-        f"- [{p['category']}] {p['pattern']} (confidence {p['confidence']}, "
-        f"reward lift +{p['avg_reward_lift']:.2f})"
-        for p in patterns[:10]
-    )
-
-    prompt = (
-        "You are initializing a content exploration system for a new LinkedIn client.\n\n"
-        f"UNIVERSAL PATTERNS (proven across multiple B2B clients):\n{patterns_text}\n\n"
-    )
-    if icp_text:
-        prompt += f"CLIENT ICP:\n{icp_text}\n\n"
-    if strategy_text:
-        prompt += f"CLIENT STRATEGY (excerpt):\n{strategy_text[:800]}\n\n"
-    if transcript_snippet:
-        prompt += f"CLIENT TRANSCRIPT (excerpt):\n{transcript_snippet[:600]}\n\n"
-
-    prompt += (
-        "Generate 6-8 topic arms and 3-4 format arms for this client. "
-        "Each arm should combine a universal pattern with this client's specific domain.\n\n"
-        "Return a JSON array:\n"
-        "[\n"
-        '  {"label": "protocol_error_storytelling", "arm_type": "topic", '
-        '"description": "Personal stories about protocol errors and what they taught"},\n'
-        '  {"label": "carousel_data", "arm_type": "format", '
-        '"description": "Document/carousel format with data visualization"},\n'
-        "  ...\n"
-        "]\n\n"
-        "Labels should be snake_case, 2-4 words. Descriptions should be specific "
-        "to this client's domain, not generic. Output ONLY the JSON array."
-    )
-
-    try:
-        resp = _client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = resp.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        arms = json.loads(raw)
-        if not isinstance(arms, list):
-            return 0
-    except Exception as e:
-        logger.warning("[cross_client] LOLA auto-seed failed for %s: %s", company, e)
-        return 0
-
-    # Validate and seed
-    valid_arms = []
-    for a in arms:
-        label = a.get("label", "").strip()
-        arm_type = a.get("arm_type", "topic").strip()
-        description = a.get("description", "").strip()
-        if label and description and arm_type in ("topic", "format"):
-            valid_arms.append({
-                "label": label,
-                "arm_type": arm_type,
-                "description": description,
-            })
-
-    if not valid_arms:
-        return 0
-
-    seeded = lola.seed_arms(valid_arms)
-    if seeded:
-        logger.info("[cross_client] Auto-seeded %d LOLA arms for %s", seeded, company)
-
-    return seeded
+    logger.debug("[cross_client] auto_seed_lola called for %s — DEPRECATED, returning 0", company)
+    return 0
 
 
 # ------------------------------------------------------------------
@@ -626,22 +536,8 @@ def run_cross_client_sync() -> dict:
     except Exception as e:
         logger.warning("[cross_client] Hook library refresh failed: %s", e)
 
-    # 3. Auto-seed LOLA for any client with 0 arms
-    if not P.MEMORY_ROOT.exists():
-        return result
-
-    for d in P.MEMORY_ROOT.iterdir():
-        if not d.is_dir() or d.name.startswith(".") or d.name == "our_memory":
-            continue
-        company = d.name
-        try:
-            from backend.src.agents.lola import LOLA
-            lola = LOLA(company)
-            if not lola._state.arms:
-                seeded = auto_seed_lola(company)
-                if seeded:
-                    result["seeded_clients"].append({"company": company, "arms": seeded})
-        except Exception:
-            continue
+    # 3. (LOLA auto-seeding removed — content intelligence now handled
+    #    by RuanMei.recommend_context() which uses cross-client insights
+    #    as a cold-start fallback instead of discrete arms.)
 
     return result

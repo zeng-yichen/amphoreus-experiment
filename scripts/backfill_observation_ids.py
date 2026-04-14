@@ -113,13 +113,13 @@ def main():
         if not api_key or not company or not profile_id:
             continue
 
-        state_path = vortex.ruan_mei_state_path(company)
-        if not state_path.exists():
-            continue
-
         try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
+            from backend.src.db.local import initialize_db, ruan_mei_load
+            initialize_db()
+            state = ruan_mei_load(company)
         except Exception:
+            state = None
+        if not state:
             continue
 
         observations = state.get("observations", [])
@@ -166,7 +166,8 @@ def main():
                 fixed += 1
 
         if fixed and not args.dry_run:
-            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            from backend.src.db.local import ruan_mei_save
+            ruan_mei_save(company, state)
 
         logger.info("  %s %d/%d observations", "Would fix" if args.dry_run else "Fixed", fixed, len(needs_fix))
         total_fixed += fixed

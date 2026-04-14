@@ -1,1654 +1,1162 @@
-"""
-Cyrene — SELF-REFINE critique-revise loop for post quality optimization.
+"""Cyrene — strategic growth agent.
 
-Implements the SELF-REFINE architecture (Madaan et al., NeurIPS 2023,
-arXiv:2303.17651) as a structured generate→critique→revise loop.
+The outermost loop in the Amphoreus content pipeline. Every other agent
+operates within a single generation run (Stelle drafts posts, Irontomb
+simulates audience reactions). Cyrene operates ACROSS runs, across
+interviews, across months — studying what happened, identifying what to
+do next, and producing a strategic brief that shapes the entire
+operation.
 
-The critic scores each draft along 7 platform-native dimensions:
-1. 360Brew Semantic Alignment — profile-content consistency
-2. Hook Scroll-Stop Score — first 140 chars effectiveness
-3. Save-Worthiness — would a reader hit "Save"?
-4. Comment Invitation — does the post leave an open loop?
-5. Dwell Time Prediction — length, structure, density
-6. Magic Moment Test — "you told my story better than I could've"
-7. ICP Resonance — would the target persona find this novel/actionable?
+## Objective
 
-Each dimension gets a 1-5 score with specific actionable feedback.
-The reviser only addresses dimensions scoring ≤3.
-After the learned iteration ceiling (or pass threshold), ships the best version
-by composite score.
+Maximize the client's ICP exposure and pipeline generation on LinkedIn
+over time. Three layers, in order of importance:
 
-Usage:
-    from backend.src.agents.cyrene import refine_post, refine_batch
+  1. Pipeline: engagement from ICP prospects → conversations → deals
+  2. ICP exposure: each successive batch attracts more of the right people
+  3. Engagement: posts perform well (the base layer that enables 1 and 2)
 
-    result = refine_post(
-        company="hensley-biostats",
-        draft_text="My post text...",
-        transcript_excerpt="Source transcript...",
-        max_iterations=3,
-    )
-    # result = {"final_text": "...", "iterations": [...], "best_score": 4.2}
+## Architecture
+
+Turn-based tool-calling agent, same skeleton as Irontomb and Stelle.
+Runs on demand (the operator triggers it when they want a strategy
+review), produces a JSON strategic brief, self-schedules the next run.
+
+Uses Opus for deep strategic reasoning. Runs infrequently ($5-10 per
+run, maybe twice a month per client) so cost is not the bottleneck.
+
+## Output
+
+A JSON strategic brief with: interview questions, asset requests,
+content priorities, content avoidance, ABM targets, DM-ready warm
+prospects, Stelle scheduling recommendation, ICP exposure assessment,
+and a self-schedule trigger for the next Cyrene run.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import time
-from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Optional
+import math
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
 
 import anthropic
 
+from backend.src.db import vortex as P
+
 logger = logging.getLogger(__name__)
 
-# Safety ceiling for the critique-revise loop. NOT the typical iteration count —
-# most posts pass on iteration 1-2 via the learned pass_threshold. The ceiling is
-# a guard against infinite loops, not a target. Set high enough that the learned
-# early-exit conditions (pass_threshold, min_improvement) are what actually control
-# convergence, not this number.
-_DEFAULT_MAX_ITERATIONS = 8
-_DEFAULT_PASS_THRESHOLD = 3.5
-_DEFAULT_MIN_IMPROVEMENT = 0.15
-_MIN_OBS_FOR_FREEFORM = 5     # switch from dimension-based to freeform critic early
-_MIN_OBS_FOR_PROJECTION = 20  # activate linear reward projection
-_DEFAULT_DIMENSION_WEIGHTS = {
-    "360Brew Alignment": 1 / 7,
-    "Hook Scroll-Stop": 1 / 7,
-    "Save-Worthiness": 1 / 7,
-    "Comment Invitation": 1 / 7,
-    "Dwell Time": 1 / 7,
-    "Magic Moment": 1 / 7,
-    "ICP Resonance": 1 / 7,
-}
-# 10 is sufficient for Spearman correlation of 7 continuous dimension scores
-# against continuous engagement. Each score has 5 levels of granularity,
-# producing meaningful rank correlations even at small n.
-_MIN_OBS_FOR_ADAPTIVE = 10
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-_client = anthropic.Anthropic()
+_CYRENE_MODEL = "claude-opus-4-6"
+_CYRENE_MAX_TOKENS = 4096
+_CYRENE_MAX_TURNS = 40
+
+# Opus 4.6 pricing per million tokens
+_INPUT_COST_PER_MTOK = 15.0
+_OUTPUT_COST_PER_MTOK = 75.0
+_CACHE_READ_COST_PER_MTOK = 1.50
+_CACHE_WRITE_COST_PER_MTOK = 18.75
+
+_BRIEF_FILENAME = "cyrene_brief.json"
 
 
-# ------------------------------------------------------------------
-# Adaptive config
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
 
-class CyreneAdaptiveConfig:
-    """Data-driven dimension weights and pass threshold.
+# Fields produced by observation_tagger.py for DASHBOARD DISPLAY only.
+# Cyrene must not condition strategic recommendations on these because
+# they're a hand-designed taxonomy — a Bitter Lesson trap. She reasons
+# from post text + engagement + reactor identity, not from human buckets.
+_DISPLAY_ONLY_FIELDS = ("topic_tag", "source_segment_type", "format_tag")
 
-    Three-tier cascade:
-    1. Per-client: Spearman correlation of each dimension score vs engagement
-    2. Cross-client aggregate: same analysis across all clients
-    3. Defaults: equal weights (1/7), threshold 3.5
+
+def _strip_display_tags(obs_list: list[dict]) -> list[dict]:
+    out = []
+    for o in obs_list:
+        o2 = {k: v for k, v in o.items() if k not in _DISPLAY_ONLY_FIELDS}
+        out.append(o2)
+    return out
+
+
+def _load_cyrene_observations(company: str) -> list[dict]:
+    """Scored/finalized observations with display-only tags stripped."""
+    from backend.src.db.local import ruan_mei_load
+    state = ruan_mei_load(company) or {}
+    obs = [
+        o for o in state.get("observations", [])
+        if o.get("status") in ("scored", "finalized")
+    ]
+    return _strip_display_tags(obs)
+
+
+def _query_observations(company: str, args: dict) -> str:
+    """Reuse the shared observation query tool from the analyst module."""
+    try:
+        from backend.src.agents.analyst import _tool_query_observations
+        # Also forbid filtering BY the tags Cyrene can't see.
+        args = {
+            k: v for k, v in (args or {}).items()
+            if k not in ("topic_filter", "format_filter")
+        }
+        return _tool_query_observations(args, _load_cyrene_observations(company))
+    except Exception as e:
+        return json.dumps({"error": str(e)[:300]})
+
+
+def _query_top_engagers(company: str, args: dict) -> str:
+    """Reuse the shared top-engagers query."""
+    try:
+        from backend.src.db.local import get_top_icp_engagers
+        limit = min(args.get("limit", 30), 50)
+        engagers = get_top_icp_engagers(company, limit=limit)
+        return json.dumps({"count": len(engagers), "engagers": engagers}, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)[:300]})
+
+
+def _query_transcript_inventory(company: str, args: dict) -> str:
+    """List transcripts + story inventory, or read one transcript's text.
+
+    Transcripts are the single source of truth for anything the client
+    has said — story material AND offline pipeline signals (DMs,
+    meetings, deals) mentioned in passing on a call. Pass
+    ``read_filename`` to get the raw text of one file.
     """
+    transcripts_dir = P.memory_dir(company) / "transcripts"
+    read_filename = (args.get("read_filename") or "").strip()
 
-    MODULE_NAME = "cyrene"
-
-    def get_defaults(self) -> dict:
-        return {
-            "dimension_weights": dict(_DEFAULT_DIMENSION_WEIGHTS),
-            "pass_threshold": _DEFAULT_PASS_THRESHOLD,
-            "min_improvement": _DEFAULT_MIN_IMPROVEMENT,
-            "max_iterations": _DEFAULT_MAX_ITERATIONS,
-        }
-
-    def sufficient_data(self, company: str) -> bool:
-        obs = self._get_observations_with_dims(company)
-        return len(obs) >= _MIN_OBS_FOR_ADAPTIVE
-
-    def compute_from_client(self, company: str) -> dict:
-        obs = self._get_observations_with_dims(company)
-        self._current_company = company
+    if read_filename:
+        # Prevent path traversal — only files directly under transcripts/
+        safe_name = Path(read_filename).name
+        target = transcripts_dir / safe_name
+        if not target.exists() or not target.is_file():
+            return json.dumps({"error": f"transcript not found: {safe_name}"})
         try:
-            return self._compute(obs)
-        finally:
-            self._current_company = None
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return json.dumps({"error": f"read failed: {str(e)[:200]}"})
+        return json.dumps({
+            "filename": safe_name,
+            "n_chars": len(text),
+            "text": text[:20000],
+            "truncated": len(text) > 20000,
+        })
 
-    def compute_from_aggregate(self) -> dict:
-        from backend.src.db import vortex as P
-        all_obs = []
-        if P.MEMORY_ROOT.exists():
-            for d in P.MEMORY_ROOT.iterdir():
-                if d.is_dir() and not d.name.startswith(".") and d.name != "our_memory":
-                    all_obs.extend(self._get_observations_with_dims(d.name))
-        if len(all_obs) < _MIN_OBS_FOR_ADAPTIVE:
-            return {}
-        return self._compute(all_obs)
+    transcript_list: list[dict] = []
+    if transcripts_dir.exists():
+        for f in sorted(transcripts_dir.iterdir()):
+            if f.is_file() and f.suffix in (".txt", ".md", ".json", ".pdf", ".docx"):
+                try:
+                    size_kb = round(f.stat().st_size / 1024, 1)
+                    mtime = datetime.fromtimestamp(
+                        f.stat().st_mtime, tz=timezone.utc
+                    ).isoformat()[:19]
+                except Exception:
+                    size_kb = 0
+                    mtime = ""
+                transcript_list.append({
+                    "filename": f.name,
+                    "size_kb": size_kb,
+                    "modified": mtime,
+                })
 
-    def resolve(self, company: str) -> dict:
-        """Three-tier cascade with cache check."""
-        from backend.src.utils.adaptive_config import AdaptiveConfig
-        # Inline cascade (avoids subclass boilerplate for this simple case)
-        if self.sufficient_data(company):
-            try:
-                config = self.compute_from_client(company)
-                config["_tier"] = "client"
-                return config
-            except Exception as e:
-                logger.debug("[CyreneConfig] Client compute failed: %s", e)
-        agg = self.compute_from_aggregate()
-        if agg:
-            agg["_tier"] = "aggregate"
-            return agg
-        defaults = self.get_defaults()
-        defaults["_tier"] = "default"
-        return defaults
-
-    def recompute(self, company: str) -> dict:
-        return self.resolve(company)
-
-    def _get_observations_with_dims(self, company: str) -> list[dict]:
-        """Load scored observations that have both cyrene_dimensions and engagement."""
+    story_inventory = ""
+    workspace_inv = P.workspace_dir(company) / "memory" / "story-inventory.md"
+    if workspace_inv.exists():
         try:
-            from backend.src.agents.ruan_mei import RuanMei
-            rm = RuanMei(company)
-            return [
-                o for o in rm._state.get("observations", [])
-                if o.get("status") == "scored"
-                and o.get("cyrene_dimensions")
-                and o.get("reward", {}).get("immediate") is not None
-            ]
-        except Exception:
-            return []
-
-    # ---- company_context carried via call sites; we stash it per-resolve ----
-    _current_company: Optional[str] = None
-
-    def _load_cyrene_causal_confidences(self) -> dict:
-        """Return {dimension_name: confidence_factor} from causal_filter output.
-
-        The causal filter stores classifications for cyrene dimensions under the
-        key ``cyrene_{dimension_name}``. This method maps them back to Cyrene's
-        native dimension names and converts classifications to multiplicative
-        confidence factors:
-          - causal       → 1.0 (full weight)
-          - uncertain    → 0.7 (some downweight — partial signal but not validated)
-          - confounded   → 0.3 (heavy downweight — apparent signal is misleading)
-          - inert        → 0.1 (near-zero — the dimension doesn't carry reward signal)
-
-        Returns an empty dict when no causal filter output exists for the client
-        (behavior is then identical to before Task 3).
-        """
-        company = self._current_company
-        if not company:
-            return {}
-        try:
-            from backend.src.db import vortex as _P
-            path = _P.memory_dir(company) / "causal_dimensions.json"
-            if not path.exists():
-                return {}
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-
-        confidence_by_class = {
-            "causal": 1.0,
-            "uncertain": 0.7,
-            "confounded": 0.3,
-            "inert": 0.1,
-        }
-
-        confidences: dict = {}
-        for d in data.get("dimensions", []):
-            name = d.get("dimension", "")
-            cls = d.get("classification", "")
-            if name.startswith("cyrene_") and cls in confidence_by_class:
-                # Strip the "cyrene_" prefix to match CyreneAdaptiveConfig keys
-                native_name = name[len("cyrene_"):]
-                confidences[native_name] = confidence_by_class[cls]
-        return confidences
-
-    def _compute(self, observations: list[dict]) -> dict:
-        """Compute adaptive weights and threshold from observations."""
-        from backend.src.utils.correlation_analyzer import correlate_with_engagement
-
-        # Correlate each dimension score with engagement
-        correlations = correlate_with_engagement(
-            observations,
-            attribute_extractor=lambda obs: {
-                k: float(v) for k, v in obs.get("cyrene_dimensions", {}).items()
-                if isinstance(v, (int, float))
-            },
-            min_n=5,
-        )
-
-        if not correlations:
-            return self.get_defaults()
-
-        # Causal confidence weighting: when causal_dimensions.json has classifications
-        # for any cyrene dimension, multiply the raw correlation by a confidence
-        # factor. This downweights dimensions the causal filter identified as
-        # confounded (their marginal correlation is misleading) and preserves full
-        # weight for causal / uncertain / untested dimensions.
-        #
-        # Without this, Cyrene's critic would over-index on dimensions whose
-        # correlation with reward is explained by other factors — exactly the
-        # problem B3 solved for the engagement predictor.
-        #
-        # The causal filter keys cyrene dimensions as "cyrene_{dim_name}" in its
-        # feature matrix. We look up each correlation key under that prefix.
-        causal_confidences = self._load_cyrene_causal_confidences()
-        if causal_confidences:
-            correlations = {
-                k: v * causal_confidences.get(k, 1.0)
-                for k, v in correlations.items()
-            }
-
-        # Normalize correlations to weights (clamp negatives to 0, then normalize)
-        raw_weights = {k: max(0.0, v) for k, v in correlations.items()}
-        total = sum(raw_weights.values())
-        if total == 0:
-            return self.get_defaults()
-
-        weights = {k: round(v / total, 4) for k, v in raw_weights.items()}
-
-        # Fill in any missing dimensions with small default weight
-        for dim in _DEFAULT_DIMENSION_WEIGHTS:
-            if dim not in weights:
-                weights[dim] = 0.05
-        # Re-normalize
-        total = sum(weights.values())
-        weights = {k: round(v / total, 4) for k, v in weights.items()}
-
-        # Pass threshold grounded in engagement: median composite score of
-        # posts that actually performed well (above 40th percentile reward).
-        rewards = [obs.get("reward", {}).get("immediate", 0) for obs in observations]
-        rewards.sort()
-        threshold = _DEFAULT_PASS_THRESHOLD
-        if len(rewards) >= 5:
-            reward_cutoff = rewards[int(len(rewards) * 0.4)]
-            good_composites = []
-            for obs in observations:
-                r = obs.get("reward", {}).get("immediate", 0)
-                if r >= reward_cutoff:
-                    dims = obs.get("cyrene_dimensions", {})
-                    if dims:
-                        wt = sum(weights.get(d, 1 / 7) for d in weights)
-                        score = sum(dims.get(d, 3) * weights.get(d, 1 / 7) for d in weights)
-                        good_composites.append(score / wt if wt > 0 else 3.0)
-            if good_composites:
-                good_composites.sort()
-                threshold = good_composites[len(good_composites) // 2]
-
-        # min_improvement: from std of historical composite improvements.
-        # If improvements are typically small, lower the threshold to avoid
-        # wasting iterations. If large, raise it to keep iterating.
-        min_imp = _DEFAULT_MIN_IMPROVEMENT
-        if len(observations) >= 5:
-            composites_for_std = []
-            for obs in observations:
-                dims = obs.get("cyrene_dimensions", {})
-                if dims:
-                    wt = sum(weights.get(d, 1 / 7) for d in weights)
-                    score = sum(dims.get(d, 3) * weights.get(d, 1 / 7) for d in weights)
-                    composites_for_std.append(score / wt if wt > 0 else 3.0)
-            if len(composites_for_std) >= 3:
-                import math as _math
-                mean_c = sum(composites_for_std) / len(composites_for_std)
-                var_c = sum((c - mean_c) ** 2 for c in composites_for_std) / len(composites_for_std)
-                std_c = _math.sqrt(var_c)
-                # Continuous: min_improvement scales linearly with std
-                min_imp = round(std_c * 0.6, 3) or _DEFAULT_MIN_IMPROVEMENT
-
-        # Emergent min obs: fast-posting clients reach eligibility faster
-        timestamps = [o.get("posted_at", "") for o in observations if o.get("posted_at")]
-        if len(timestamps) >= 2:
-            timestamps.sort()
-            try:
-                from datetime import datetime as _dt, timezone as _tz
-                first = _dt.fromisoformat(timestamps[0].replace("Z", "+00:00"))
-                last = _dt.fromisoformat(timestamps[-1].replace("Z", "+00:00"))
-                days_active = max(1, (last - first).days)
-            except Exception:
-                days_active = 30
-        else:
-            days_active = 30
-        # Emergent min obs: scale with client's posting density.
-        # No hard clamp — data-sparse clients naturally get higher thresholds,
-        # data-rich clients lower ones. _DEFAULT_EMERGENT_MIN_OBS is the floor.
-        emergent_min = days_active * 2
-        if emergent_min < _DEFAULT_EMERGENT_MIN_OBS:
-            emergent_min = _DEFAULT_EMERGENT_MIN_OBS
-
-        # Dimension cache TTL: scale with observation growth rate
-        obs_at_last = len(observations)
-        if days_active > 0:
-            obs_per_day = obs_at_last / days_active
-            # Fast growers get shorter TTL (more frequent rediscovery)
-            cache_ttl = round(14 / max(obs_per_day, 0.1))
-        else:
-            cache_ttl = 14
-
-        # Learned max_iterations: how many critique-revise cycles does this
-        # client typically need before the critic is satisfied?
-        #
-        # The ceiling is a safety net, not a target. The pass_threshold and
-        # min_improvement early-exit conditions are what actually drive
-        # convergence — the ceiling should be generous enough that they
-        # almost always fire before it binds. When data shows that extra
-        # iterations don't help (or hurt), the ceiling tightens.
-        learned_max = _DEFAULT_MAX_ITERATIONS
-        iter_data = [
-            (o.get("cyrene_iterations", 0), o.get("reward", {}).get("immediate", 0))
-            for o in observations
-            if o.get("cyrene_iterations") and o.get("reward", {}).get("immediate") is not None
-        ]
-        if len(iter_data) >= 10:
-            iters = [d[0] for d in iter_data]
-            iter_rewards = [d[1] for d in iter_data]
-            median_iter = sorted(iters)[len(iters) // 2]
-
-            # Check: do more iterations correlate with worse engagement?
-            # If yes, the critic is overpolishing — cap at the median.
-            try:
-                from backend.src.utils.correlation_analyzer import _spearman_correlation
-                iter_engagement_corr = _spearman_correlation(
-                    [float(i) for i in iters], iter_rewards,
-                )
-            except Exception:
-                iter_engagement_corr = 0.0
-
-            if iter_engagement_corr < -0.15:
-                # More iterations → worse posts. Cap tightly.
-                learned_max = max(2, median_iter)
-                logger.info(
-                    "[CyreneConfig] Overpolishing detected for this client "
-                    "(iter-reward corr=%.3f). Capping max_iterations at %d.",
-                    iter_engagement_corr, learned_max,
-                )
-            else:
-                # Normal: set ceiling at median + headroom, bounded by default.
-                learned_max = min(
-                    _DEFAULT_MAX_ITERATIONS,
-                    max(2, int(median_iter * 1.5) + 1),
-                )
-
-        return {
-            "dimension_weights": weights,
-            "pass_threshold": round(threshold, 2),
-            "min_improvement": min_imp,
-            "max_iterations": learned_max,
-            "observation_count": len(observations),
-            "emergent_min_obs": emergent_min,
-            "dimension_cache_ttl_days": cache_ttl,
-        }
-
-
-# ------------------------------------------------------------------
-# Data structures
-# ------------------------------------------------------------------
-
-@dataclass
-class DimensionScore:
-    name: str
-    score: int  # 1-5
-    feedback: str  # Specific, actionable feedback
-
-
-@dataclass
-class CritiqueResult:
-    dimensions: list[DimensionScore]
-    composite_score: float
-    revision_instructions: str  # Specific instructions for the reviser
-    pass_threshold_met: bool
-    weights_applied: dict | None = None   # dim_name → weight, or None if default
-    adaptive_tier: str = "default"        # "client" | "aggregate" | "default"
-    dimension_set: str = "fixed_v1"       # "fixed_v1" | "emergent_v{N}" | "freeform"
-    # Phase 2: free-form quality signal
-    analysis_text: str = ""               # free-form quality analysis (when freeform mode)
-    analysis_embedding: list | None = None  # 384-dim embedding of analysis (for projection)
-    confidence: float = 0.0               # 0.0-1.0 critic confidence
-    predicted_reward: float | None = None  # from linear projection (None if not available)
-
-    @property
-    def weak_dimensions(self) -> list[DimensionScore]:
-        return [d for d in self.dimensions if d.score <= 3]
-
-
-@dataclass
-class Iteration:
-    iteration_num: int
-    draft_text: str
-    critique: CritiqueResult
-    revised_text: str
-    timestamp: str
-
-
-@dataclass
-class RefineResult:
-    final_text: str
-    best_score: float
-    iterations: list[dict]
-    total_iterations: int
-    method: str  # "refined" | "passed_first" | "no_improvement"
-    adaptive_tier: str = "default"  # "client" | "aggregate" | "default"
-    dimension_set: str = "fixed_v1"  # "fixed_v1" | "emergent_v{N}" | "freeform"
-    # Phase 2: continuous quality signal
-    analysis_text: str = ""                # final critique's free-form analysis
-    analysis_embedding: list | None = None  # 384-dim quality vector
-    confidence: float = 0.0
-    predicted_reward: float | None = None
-
-
-# ------------------------------------------------------------------
-# Critic
-# ------------------------------------------------------------------
-
-# Emergent dimension thresholds — adaptive overrides computed in CyreneAdaptiveConfig
-_DEFAULT_EMERGENT_MIN_OBS = 15
-_ADAPTIVE_WEIGHTS_MIN_OBS = _MIN_OBS_FOR_ADAPTIVE  # 10 — for learned weights on fixed dims
-_DEFAULT_DIMENSION_CACHE_TTL_DAYS = 14
-_DIMENSION_DRIFT_THRESHOLD = 0.5  # if >50% of dims changed, log warning
-
-_dimension_version_counter: dict[str, int] = {}  # company → version, in-memory only
-
-
-def _discover_dimensions(company: str, n_dims: int = 7) -> list[dict] | None:
-    """Discover emergent scoring dimensions from client's own post history.
-
-    Compares top-quartile vs bottom-quartile posts to find what actually
-    explains the performance difference for this specific client.
-
-    Returns list of dimension dicts with name/description/score_5/score_3/score_1,
-    or None if insufficient data.
-    """
-    from backend.src.db import vortex as P
-
-    # Check cache first
-    cache_path = P.memory_dir(company) / "cyrene_dimensions_cache.json"
-    if cache_path.exists():
-        try:
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            cached_at = cached.get("_cached_at", "")
-            if cached_at:
-                from datetime import datetime, timezone, timedelta
-                dt = datetime.fromisoformat(cached_at.replace("Z", "+00:00"))
-                age_days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400
-                if age_days < _DEFAULT_DIMENSION_CACHE_TTL_DAYS:
-                    return cached.get("dimensions")
+            story_inventory = workspace_inv.read_text(encoding="utf-8", errors="replace")
         except Exception:
             pass
 
-    # Load observations
+    return json.dumps({
+        "transcripts": transcript_list,
+        "n_transcripts": len(transcript_list),
+        "story_inventory": story_inventory[:8000] if story_inventory else "(no story inventory yet)",
+    }, default=str)
+
+
+def _query_icp_exposure_trend(company: str, args: dict) -> str:
+    """Compute icp_match_rate averaged per approximate batch over time.
+
+    Groups posts by week (Mon-Sun), computes mean icp_match_rate and
+    mean engagement per group. Returns chronological list showing whether
+    ICP targeting is improving across successive batches.
+    """
     try:
-        from backend.src.agents.ruan_mei import RuanMei
-        rm = RuanMei(company)
-        scored = [
-            o for o in rm._state.get("observations", [])
-            if o.get("status") == "scored"
-            and o.get("reward", {}).get("immediate") is not None
-            and (o.get("posted_body") or o.get("post_body"))
-        ]
+        from backend.src.db.local import ruan_mei_load
+        state = ruan_mei_load(company) or {}
     except Exception:
-        return None
+        return json.dumps({"error": "could not load observations"})
 
-    if len(scored) < _DEFAULT_EMERGENT_MIN_OBS:
-        return None
+    obs = [
+        o for o in state.get("observations", [])
+        if o.get("status") in ("scored", "finalized") and o.get("posted_at")
+    ]
+    if not obs:
+        return json.dumps({"error": "no scored observations with posted_at"})
 
-    # Split into top/bottom quartiles
-    scored.sort(key=lambda o: o.get("reward", {}).get("immediate", 0))
-    n = len(scored)
-    bottom = scored[:max(1, n // 4)]
-    top = scored[max(0, n - n // 4):]
-
-    def _format_posts(posts: list[dict], label: str) -> str:
-        lines = []
-        for i, o in enumerate(posts[-6:], 1):  # cap at 6 per group
-            body = (o.get("posted_body") or o.get("post_body") or "")[:400]
-            reward = o.get("reward", {}).get("immediate", 0)
-            analysis = o.get("descriptor", {}).get("analysis", "")[:150]
-            lines.append(f"[{label} {i} | score={reward:.2f}] {body}")
-            if analysis:
-                lines.append(f"  Analysis: {analysis}")
-        return "\n\n".join(lines)
-
-    top_text = _format_posts(top, "TOP")
-    bottom_text = _format_posts(bottom, "LOW")
-
-    prompt = (
-        f"You are analyzing LinkedIn post performance for a specific author.\n\n"
-        f"Here are their TOP-PERFORMING posts (highest engagement):\n{top_text}\n\n"
-        f"Here are their LOWEST-PERFORMING posts:\n{bottom_text}\n\n"
-        f"Identify exactly {n_dims} dimensions that EXPLAIN the difference between "
-        f"high and low performers.\n\n"
-        "Rules:\n"
-        "- Each dimension must be specific and measurable (not 'quality' or 'engagement')\n"
-        "- Dimensions should be things the WRITER can control (not audience size or timing)\n"
-        "- Include dimensions the default rubric would miss\n"
-        "- Name each dimension in 2-4 words\n\n"
-        "Return JSON:\n"
-        "[\n"
-        '  {\n'
-        '    "name": "Concrete Number Lead",\n'
-        '    "description": "Post opens with a specific number, stat, or quantified claim",\n'
-        '    "score_5": "First sentence contains a precise, surprising number tied to the core insight",\n'
-        '    "score_3": "Numbers appear but buried in body, or rounded/vague",\n'
-        '    "score_1": "No quantification anywhere, entirely conceptual"\n'
-        "  },\n"
-        "  ...\n"
-        "]\n"
-        "Output ONLY the JSON array."
-    )
-
-    try:
-        resp = _client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=3000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = resp.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        dims = json.loads(raw)
-        if not isinstance(dims, list) or len(dims) < 3:
-            return None
-
-        # Validate structure
-        valid = []
-        for d in dims[:n_dims]:
-            if d.get("name") and d.get("score_5") and d.get("score_1"):
-                valid.append({
-                    "name": d["name"],
-                    "description": d.get("description", d["name"]),
-                    "score_5": d["score_5"],
-                    "score_3": d.get("score_3", "Moderate presence"),
-                    "score_1": d["score_1"],
-                })
-        if len(valid) < 3:
-            return None
-
-    except Exception as e:
-        logger.warning("[Cyrene] Dimension discovery failed for %s: %s", company, e)
-        return None
-
-    # Drift detection: compare with previous cached dimensions
-    _check_dimension_drift(company, valid, cache_path)
-
-    # Cache
-    from datetime import datetime, timezone
-    cache_data = {
-        "dimensions": valid,
-        "_cached_at": datetime.now(timezone.utc).isoformat(),
-        "_observation_count": len(scored),
-        "_version": _dimension_version_counter.get(company, 0) + 1,
-    }
-    _dimension_version_counter[company] = cache_data["_version"]
-    try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cache_data, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.rename(cache_path)
-    except Exception:
-        pass
-
-    logger.info(
-        "[Cyrene] Discovered %d emergent dimensions for %s (v%d, from %d obs)",
-        len(valid), company, cache_data["_version"], len(scored),
-    )
-    return valid
-
-
-def _check_dimension_drift(company: str, new_dims: list[dict], cache_path) -> None:
-    """Log warning if >50% of dimensions changed since last discovery."""
-    if not cache_path.exists():
-        return
-    try:
-        old = json.loads(cache_path.read_text(encoding="utf-8")).get("dimensions", [])
-        old_names = {d["name"].lower() for d in old}
-        new_names = {d["name"].lower() for d in new_dims}
-        if not old_names:
-            return
-        overlap = len(old_names & new_names)
-        total = max(len(old_names), len(new_names))
-        change_rate = 1.0 - (overlap / total)
-        if change_rate > _DIMENSION_DRIFT_THRESHOLD:
-            logger.warning(
-                "[Cyrene] Dimension drift for %s: %.0f%% changed (%d→%d). "
-                "Old: %s. New: %s",
-                company, change_rate * 100, len(old_names), len(new_names),
-                sorted(old_names - new_names), sorted(new_names - old_names),
+    # Parse posted_at into weeks
+    weekly: dict[str, list[dict]] = {}
+    for o in obs:
+        try:
+            dt = datetime.fromisoformat(
+                o["posted_at"].replace("Z", "+00:00")
             )
+            # ISO week key: YYYY-WNN
+            week_key = f"{dt.isocalendar()[0]}-W{dt.isocalendar()[1]:02d}"
+        except Exception:
+            continue
+        weekly.setdefault(week_key, []).append(o)
+
+    trend: list[dict] = []
+    for week in sorted(weekly):
+        posts = weekly[week]
+        icp_rates = [
+            o["icp_match_rate"] for o in posts
+            if isinstance(o.get("icp_match_rate"), (int, float))
+        ]
+        raw_metrics = [
+            (o.get("reward") or {}).get("raw_metrics") or {}
+            for o in posts
+        ]
+        impressions = [m.get("impressions", 0) for m in raw_metrics]
+        reactions = [m.get("reactions", 0) for m in raw_metrics]
+
+        trend.append({
+            "week": week,
+            "n_posts": len(posts),
+            "mean_icp_match_rate": round(
+                sum(icp_rates) / len(icp_rates), 4
+            ) if icp_rates else None,
+            "mean_impressions": round(
+                sum(impressions) / len(impressions), 1
+            ) if impressions else 0,
+            "mean_reactions": round(
+                sum(reactions) / len(reactions), 1
+            ) if reactions else 0,
+        })
+
+    return json.dumps({
+        "company": company,
+        "n_weeks": len(trend),
+        "trend": trend,
+    }, default=str)
+
+
+def _query_warm_prospects(company: str, args: dict) -> str:
+    """Cross-reference reactor pool against ABM targets. Return warm leads.
+
+    Warm = engaged with min_engagements posts AND has a non-trivial
+    ICP score. Cross-references against abm_profiles/ if present.
+    """
+    min_eng = args.get("min_engagements", 2)
+    try:
+        from backend.src.db.local import get_top_icp_engagers
+        all_engagers = get_top_icp_engagers(company, limit=200)
+    except Exception as e:
+        return json.dumps({"error": str(e)[:300]})
+
+    warm = [
+        e for e in all_engagers
+        if (e.get("engagement_count") or 0) >= min_eng
+    ]
+
+    # Load ABM target names if available
+    abm_names: set[str] = set()
+    abm_dir = P.memory_dir(company) / "abm_profiles"
+    if abm_dir.exists():
+        for f in abm_dir.iterdir():
+            if f.is_file():
+                try:
+                    content = f.read_text(encoding="utf-8", errors="replace")[:500]
+                    # Extract names from ABM profile filenames or content
+                    abm_names.add(f.stem.lower().replace("-", " ").replace("_", " "))
+                except Exception:
+                    pass
+
+    for w in warm:
+        name_lower = (w.get("name") or "").lower()
+        company_lower = (w.get("current_company") or "").lower()
+        w["is_abm_target"] = any(
+            abn in name_lower or abn in company_lower
+            for abn in abm_names
+        ) if abm_names else False
+
+    return json.dumps({
+        "min_engagements": min_eng,
+        "n_warm_prospects": len(warm),
+        "prospects": warm[:50],
+        "n_abm_profiles_loaded": len(abm_names),
+    }, default=str)
+
+
+def _query_engagement_trajectories(company: str, args: dict) -> str:
+    """Return posts ranked by trajectory metrics.
+
+    Sort by velocity_first_6h, longevity_ratio, peak_velocity, etc.
+    Only includes posts that have trajectory data computed.
+    """
+    sort_by = args.get("sort_by", "velocity_first_6h")
+    limit = min(args.get("limit", 10), 20)
+
+    try:
+        from backend.src.db.local import ruan_mei_load
+        state = ruan_mei_load(company) or {}
+    except Exception:
+        return json.dumps({"error": "could not load observations"})
+
+    obs = [
+        o for o in state.get("observations", [])
+        if o.get("status") in ("scored", "finalized") and o.get("trajectory")
+    ]
+
+    if not obs:
+        return json.dumps({
+            "error": "no observations with trajectory data yet (need more engagement snapshots)",
+            "hint": "fast sync captures trajectory every 15 min for posts <72h old",
+        })
+
+    def _sort_key(o: dict) -> float:
+        traj = o.get("trajectory") or {}
+        val = traj.get(sort_by)
+        if isinstance(val, (int, float)):
+            return float(val)
+        return 0.0
+
+    ranked = sorted(obs, key=_sort_key, reverse=True)[:limit]
+
+    results = []
+    for o in ranked:
+        traj = o.get("trajectory") or {}
+        raw = (o.get("reward") or {}).get("raw_metrics") or {}
+        body = (o.get("posted_body") or o.get("post_body") or "")
+        hook = body.split("\n")[0][:120] if body else ""
+        results.append({
+            "ordinal_post_id": o.get("ordinal_post_id", ""),
+            "posted_at": o.get("posted_at", ""),
+            "hook": hook,
+            "impressions": raw.get("impressions", 0),
+            "reactions": raw.get("reactions", 0),
+            "icp_match_rate": o.get("icp_match_rate"),
+            "trajectory": {
+                k: v for k, v in traj.items()
+                if k != "insufficient_data"
+            },
+        })
+
+    return json.dumps({
+        "sorted_by": sort_by,
+        "returned": len(results),
+        "posts": results,
+    }, default=str)
+
+
+def _execute_python(company: str, args: dict) -> str:
+    """Reuse the shared Python execution tool from the analyst module."""
+    try:
+        from backend.src.agents.analyst import _tool_execute_python
+        # Pipe embeddings into the subprocess preamble so Cyrene can
+        # operate on raw continuous vectors (cosine sim, PCA, clustering)
+        # instead of reaching for hand-engineered feature buckets.
+        try:
+            from backend.src.utils.post_embeddings import get_post_embeddings
+            emb = get_post_embeddings(company)
+        except Exception:
+            emb = None
+        return _tool_execute_python(args, _load_cyrene_observations(company), embeddings=emb)
+    except Exception as e:
+        return json.dumps({"error": str(e)[:300]})
+
+
+def _search_linkedin_corpus(company: str, args: dict) -> str:
+    """Reuse the shared LinkedIn bank search."""
+    try:
+        from backend.src.agents.analyst import _tool_search_linkedin_bank
+        return _tool_search_linkedin_bank(args)
+    except Exception as e:
+        return json.dumps({"error": str(e)[:300]})
+
+
+def _fetch_url(company: str, args: dict) -> str:
+    """Resolve a URL to readable plain text.
+
+    For when a transcript mentions a link (e.g. "Sachil sent this article:
+    https://...") and Cyrene needs to know what the article actually says
+    rather than hallucinating from URL tokens.
+    """
+    try:
+        from backend.src.utils.fetch_url import fetch_url as _fetch
+        url = (args.get("url") or "").strip()
+        if not url:
+            return json.dumps({"error": "url is required"})
+        max_chars = int(args.get("max_chars", 12000))
+        result = _fetch(url, max_chars=min(max_chars, 20000))
+        return json.dumps(result, default=str)
+    except Exception as e:
+        return json.dumps({"error": f"fetch_url failed: {str(e)[:200]}"})
+
+
+def _web_search(company: str, args: dict) -> str:
+    """Web search via Parallel API."""
+    query = (args.get("query") or "").strip()
+    if not query:
+        return json.dumps({"error": "query is required"})
+    try:
+        import httpx
+        api_key = __import__("os").environ.get("PARALLEL_API_KEY", "")
+        if not api_key:
+            return json.dumps({"error": "PARALLEL_API_KEY not set"})
+        resp = httpx.post(
+            "https://api.parallel.ai/v1/search",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"query": query, "max_results": 5},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return json.dumps(resp.json(), default=str)[:8000]
+    except Exception as e:
+        return json.dumps({"error": f"web search failed: {str(e)[:200]}"})
+
+
+def _query_ordinal_posts(company: str, args: dict) -> str:
+    """Return the client's full Ordinal publishing history.
+
+    Unlike ``query_observations`` (which only sees Stelle-drafted posts
+    that got matched back via ordinal_sync), this returns every LinkedIn
+    post Ordinal has analytics for — including ones the client wrote
+    themselves and anything from before Amphoreus started tracking.
+
+    Each post is annotated ``tracked_by_stelle`` so the caller can tell
+    Stelle-drafted posts from client-authored ones.
+    """
+    try:
+        from backend.src.services.ordinal_sync import (
+            _extract_ordinal_post_id,
+            fetch_ordinal_posts_for,
+        )
+    except Exception as e:
+        return json.dumps({"error": f"import failed: {str(e)[:200]}"})
+
+    posts = fetch_ordinal_posts_for(company)
+    if posts is None:
+        return json.dumps({
+            "error": "Ordinal credentials or profile id not found for this client",
+        })
+
+    # Build set of ordinal_post_ids tracked as Stelle observations, to
+    # tag each Ordinal post with provenance.
+    tracked_ids: set[str] = set()
+    try:
+        from backend.src.db.local import ruan_mei_load
+        state = ruan_mei_load(company) or {}
+        for o in state.get("observations", []):
+            if o.get("status") in ("scored", "finalized") and o.get("ordinal_post_id"):
+                tracked_ids.add(str(o["ordinal_post_id"]))
     except Exception:
         pass
 
+    limit = min(int(args.get("limit", 50)), 200)
+    min_impr = int(args.get("min_impressions", 0))
 
-def _get_dimension_set_label(company: str, custom_dims: list[dict] | None) -> str:
-    """Return a label for the dimension set used, for observation auditability."""
-    if custom_dims is None:
-        return "fixed_v1"
-    version = _dimension_version_counter.get(company, 0)
-    return f"emergent_v{version}"
+    def _url(p: dict) -> str:
+        direct = p.get("post_url") or p.get("postUrl") or p.get("linkedin_url") or ""
+        if direct:
+            return direct
+        for k in ("permalink", "linkedinPermalink", "linkedin_permalink", "url"):
+            v = p.get(k)
+            if v:
+                return v
+        return ""
+
+    flat: list[dict] = []
+    for p in posts:
+        text = (
+            p.get("commentary") or p.get("text") or p.get("copy")
+            or p.get("content") or p.get("post_text") or ""
+        ).strip()
+        impressions = p.get("impressionCount") or p.get("impressions") or 0
+        if impressions < min_impr:
+            continue
+        oid = _extract_ordinal_post_id(p) or ""
+        flat.append({
+            "ordinal_post_id": oid,
+            "tracked_by_stelle": oid in tracked_ids if oid else False,
+            "posted_at": p.get("publishedAt") or p.get("postedAt") or p.get("published_at") or "",
+            "linkedin_url": _url(p),
+            "text": text[:3000],
+            "impressions": impressions,
+            "reactions": p.get("likeCount") or p.get("reactions") or p.get("total_reactions") or 0,
+            "comments": p.get("commentCount") or p.get("comments") or p.get("total_comments") or 0,
+            "reposts": p.get("shareCount") or p.get("repostCount") or p.get("reposts") or 0,
+        })
+
+    # Newest first
+    flat.sort(key=lambda x: x.get("posted_at") or "", reverse=True)
+    flat = flat[:limit]
+
+    n_client = sum(1 for p in flat if not p["tracked_by_stelle"])
+    n_stelle = sum(1 for p in flat if p["tracked_by_stelle"])
+    return json.dumps({
+        "company": company,
+        "n_returned": len(flat),
+        "n_client_authored": n_client,
+        "n_stelle_drafted": n_stelle,
+        "posts": flat,
+    }, default=str)
 
 
-_DIMENSIONS = [
-    ("360Brew Alignment", "profile-content consistency",
-     "5: Squarely within the author's established topic pillars\n   3: Tangentially related but not core\n   1: Completely off-topic for this author"),
-    ("Hook Scroll-Stop", "first 140 characters",
-     "5: Specific, curiosity-provoking, hints at the OMI, impossible to scroll past\n   3: Decent but generic or predictable\n   1: Vague, cliché, or buried lede"),
-    ("Save-Worthiness", "would a reader hit 'Save'?",
-     "5: Contains a framework, specific insight, or reference-worthy takeaway\n   3: Interesting but not bookmark-worthy\n   1: Generic advice anyone could write"),
-    ("Comment Invitation", "does the post invite response?",
-     "5: Leaves an explicit open loop, asks a genuine question, or takes a stance people will debate\n   3: Makes a point but closes the argument\n   1: Monologue that discourages engagement"),
-    ("Dwell Time", "structure and density",
-     "5: Optimal length (800-1500 chars), well-structured paragraphs, information-dense\n   3: Slightly too long/short, some padding\n   1: Wall of text, or too thin to justify the read"),
-    ("Magic Moment", "would the client say 'you told my story better than I could've'?",
-     "5: Deeply personal, grounded in specific transcript moments, authentically voiced\n   3: Plausibly the client but could be anyone in their industry\n   1: Generic thought leadership that screams AI-written"),
-    ("ICP Resonance", "would the target persona find this novel/actionable?",
-     "5: Directly addresses ICP pain points with specific, implementable insight\n   3: Broadly relevant but not targeted\n   1: Off-target audience entirely"),
+def _note(company: str, args: dict) -> str:
+    """Working memory — append to per-run notes list."""
+    # Notes are managed by the agent loop, not stored persistently.
+    # The agent loop tracks them in a list and passes them back as context.
+    return json.dumps({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Tool schemas
+# ---------------------------------------------------------------------------
+
+_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "query_observations",
+        "description": (
+            "Query this client's full scored post history. Each observation: "
+            "stelle_draft (post_body), client-published version (posted_body), "
+            "engagement metrics (impressions/reactions/comments/reposts), "
+            "icp_match_rate, per-post reactor list with individual icp_scores. "
+            "Filter by min_reward, max_reward. Sort by any metric. "
+            "Pass summary_only=true for aggregate stats without full texts."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sort_by": {"type": "string", "default": "posted_at"},
+                "limit": {"type": "integer", "default": 10},
+                "min_reward": {"type": "number"},
+                "max_reward": {"type": "number"},
+                "summary_only": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "query_top_engagers",
+        "description": (
+            "Aggregated top engagers across all scored posts, ranked by "
+            "ICP fit × engagement frequency. Shows who repeatedly engages "
+            "with this client's content and their profile details."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 30},
+            },
+        },
+    },
+    {
+        "name": "query_transcript_inventory",
+        "description": (
+            "Without arguments: list all interview transcripts (filename, "
+            "size, modified date) plus the story inventory showing which "
+            "stories have been turned into posts vs are still untapped. "
+            "With ``read_filename``: return the raw text of one transcript. "
+            "Transcripts are the SINGLE source of truth for anything the "
+            "client has said — mine them for both (a) untapped story "
+            "material and (b) offline pipeline signals the client "
+            "mentioned in passing (DMs from ICP, meetings booked, deals "
+            "sourced). Those signals will not appear anywhere else."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "read_filename": {
+                    "type": "string",
+                    "description": "Name of a specific transcript to read in full.",
+                },
+            },
+        },
+    },
+    {
+        "name": "query_icp_exposure_trend",
+        "description": (
+            "ICP match rate averaged per week over the client's history. "
+            "Shows whether successive batches of posts are attracting more "
+            "of the right people. THE STRATEGIC KPI — if this is flat or "
+            "declining, the content strategy needs adjustment."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "query_warm_prospects",
+        "description": (
+            "Reactor pool cross-referenced against ABM targets. Returns "
+            "people who have engaged with multiple posts, their ICP score, "
+            "which posts they engaged with, and whether they're from a named "
+            "ABM target account. These are DM-ready warm leads — the client "
+            "should reach out to them directly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "min_engagements": {
+                    "type": "integer",
+                    "default": 2,
+                    "description": "Minimum posts engaged with to qualify as warm.",
+                },
+            },
+        },
+    },
+    {
+        "name": "query_engagement_trajectories",
+        "description": (
+            "Posts ranked by trajectory metrics: velocity_first_6h (how "
+            "fast engagement grew initially), longevity_ratio (how much "
+            "engagement continued past 24h), peak_velocity_imp_per_h, "
+            "time_to_plateau_hours. Shows which content shapes have legs "
+            "vs which peak and die. Only available for posts with enough "
+            "engagement snapshots."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sort_by": {
+                    "type": "string",
+                    "default": "velocity_first_6h",
+                    "description": "Trajectory metric to rank by.",
+                },
+                "limit": {"type": "integer", "default": 10},
+            },
+        },
+    },
+    {
+        "name": "execute_python",
+        "description": (
+            "Run arbitrary Python code with scored observations and raw "
+            "1536-dim OpenAI embeddings pre-loaded, plus numpy/scipy/"
+            "sklearn/pandas. Pre-loaded globals:\n"
+            "  • obs — list of scored observation dicts\n"
+            "  • embeddings — {post_hash: [1536 floats]}\n"
+            "  • emb_matrix — np.array shape (N, 1536), rows aligned to emb_hashes\n"
+            "  • emb_hashes — list[str] of post_hash keys\n"
+            "  • emb_by_obs — embeddings aligned to obs order (None for missing)\n"
+            "Use the vectors directly for cosine similarity, PCA, "
+            "clustering, nearest-neighbor lookups — anything continuous. "
+            "Print results to stdout."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Python code."},
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "search_linkedin_corpus",
+        "description": (
+            "Search the 200K+ LinkedIn post corpus by keyword or semantic "
+            "similarity. Use for competitive intelligence — what's working "
+            "in adjacent niches that this client could adapt?"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "mode": {
+                    "type": "string",
+                    "enum": ["keyword", "semantic"],
+                    "default": "keyword",
+                },
+                "limit": {"type": "integer", "default": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "web_search",
+        "description": (
+            "Search the web for industry news, regulatory updates, "
+            "competitive moves — anything timely that could become a hook "
+            "for the next batch of posts."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "fetch_url",
+        "description": (
+            "Resolve a specific URL to readable plain text. Use when a "
+            "transcript mentions a link the client shared (article, report, "
+            "tweet) and you need to know what it actually says rather than "
+            "inferring from the URL alone. Returns title + body text, "
+            "nav/script/footer stripped. Fails gracefully on paywalls or "
+            "4xx/5xx with a clean error message — don't fabricate content."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "max_chars": {
+                    "type": "integer",
+                    "default": 12000,
+                    "description": "Maximum characters to return (capped at 20000).",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "query_ordinal_posts",
+        "description": (
+            "Full LinkedIn publishing history for this client from Ordinal "
+            "analytics — every post Ordinal has seen, including ones the "
+            "client wrote themselves (not drafted by Stelle) and historical "
+            "posts from before Amphoreus. Each post is tagged "
+            "`tracked_by_stelle` so you can distinguish agency-drafted from "
+            "self-authored. query_observations only shows Stelle-drafted "
+            "posts; this tool shows the full picture."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 50},
+                "min_impressions": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Skip posts with fewer impressions.",
+                },
+            },
+        },
+    },
+    {
+        "name": "note",
+        "description": "Record an observation to your working memory.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "submit_brief",
+        "description": (
+            "Terminal tool. Submit the strategic brief. All fields required "
+            "except where noted."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "interview_questions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Data-backed questions for the next client interview. "
+                        "Each should target a content gap or high-signal topic."
+                    ),
+                },
+                "asset_requests": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Specific things to request from the client: "
+                        "screenshots, documents, metrics, case studies."
+                    ),
+                },
+                "content_priorities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "What Stelle should emphasize in the next batch, "
+                        "grounded in engagement evidence."
+                    ),
+                },
+                "content_avoid": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Topics/angles Stelle should NOT do: saturated, "
+                        "declining, or attracted the wrong audience."
+                    ),
+                },
+                "abm_targets": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "company": {"type": "string"},
+                            "rationale": {"type": "string"},
+                        },
+                    },
+                    "description": (
+                        "Named prospects or companies to weave into posts."
+                    ),
+                },
+                "dm_targets": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "headline": {"type": "string"},
+                            "company": {"type": "string"},
+                            "icp_score": {"type": "number"},
+                            "posts_engaged": {"type": "integer"},
+                            "suggested_angle": {"type": "string"},
+                        },
+                    },
+                    "description": (
+                        "Warm prospects the client should DM on LinkedIn "
+                        "right now. Include which posts they reacted to."
+                    ),
+                },
+                "stelle_timing": {
+                    "type": "string",
+                    "description": "When to run Stelle next and why.",
+                },
+                "icp_exposure_assessment": {
+                    "type": "string",
+                    "description": (
+                        "Free-text assessment of ICP exposure trajectory. "
+                        "Is it improving? What's driving or stalling it?"
+                    ),
+                },
+                "next_run_trigger": {
+                    "type": "object",
+                    "properties": {
+                        "condition": {"type": "string"},
+                        "or_after_days": {"type": "integer"},
+                        "rationale": {"type": "string"},
+                    },
+                    "description": "When Cyrene should run again.",
+                },
+            },
+            "required": [
+                "interview_questions",
+                "content_priorities",
+                "content_avoid",
+                "dm_targets",
+                "stelle_timing",
+                "icp_exposure_assessment",
+                "next_run_trigger",
+            ],
+        },
+    },
 ]
 
 
-# -----------------------------------------------------------------------
-# Phase 2: Free-form quality signal (continuous, no dimensions)
-# -----------------------------------------------------------------------
-
-def _build_freeform_critic_system(
-    high_examples: list[str],
-    low_examples: list[str],
-) -> str:
-    """Build a freeform critic system prompt using example-based evaluation."""
-    lines = [
-        "You are evaluating a LinkedIn post for a B2B ghostwriting agency.\n",
-        "Write a detailed, free-form quality analysis. Cover whatever aspects "
-        "matter most for THIS specific post. Do not follow a predefined rubric. "
-        "Instead, identify:\n",
-        "1. What makes this post work (or not work)",
-        "2. What specific changes would improve it most",
-        "3. Your overall confidence that this post will perform well (0.0 to 1.0)\n",
-    ]
-
-    if high_examples:
-        lines.append("Quality analyses of this author's BEST-PERFORMING posts:")
-        for i, ex in enumerate(high_examples[:3], 1):
-            lines.append(f"  [{i}] {ex[:300]}")
-        lines.append("")
-
-    if low_examples:
-        lines.append("Quality analyses of this author's WORST-PERFORMING posts:")
-        for i, ex in enumerate(low_examples[:3], 1):
-            lines.append(f"  [{i}] {ex[:300]}")
-        lines.append("")
-
-    lines.append(
-        "Your analysis should identify what makes THIS post more like the "
-        "best-performers or the worst-performers above.\n"
-    )
-
-    lines.append(
-        "Be specific. Reference exact phrases, structural choices, and audience impact.\n\n"
-        "Respond as JSON:\n"
-        "{\n"
-        '  "analysis": "your detailed free-form quality analysis...",\n'
-        '  "confidence": 0.73,\n'
-        '  "revision_instructions": "1. ... 2. ... 3. ...",\n'
-        '  "pass": true\n'
-        "}"
-    )
-
-    return "\n".join(lines)
-
-
-def _get_quality_examples(company: str) -> tuple[list[str], list[str]]:
-    """Get quality analysis examples from top and bottom performers."""
-    try:
-        from backend.src.agents.ruan_mei import RuanMei
-        rm = RuanMei(company)
-        scored = [
-            o for o in rm._state.get("observations", [])
-            if o.get("status") == "scored"
-            and o.get("descriptor", {}).get("analysis")
-            and o.get("reward", {}).get("immediate") is not None
-        ]
-    except Exception:
-        return [], []
-
-    if len(scored) < 6:
-        return [], []
-
-    scored.sort(key=lambda o: o.get("reward", {}).get("immediate", 0))
-    n = len(scored)
-    bottom = scored[:max(1, n // 4)]
-    top = scored[max(0, n - n // 4):]
-
-    high = [o.get("descriptor", {}).get("analysis", "") for o in top if o.get("descriptor", {}).get("analysis")]
-    low = [o.get("descriptor", {}).get("analysis", "") for o in bottom if o.get("descriptor", {}).get("analysis")]
-
-    return high[-3:], low[-3:]
-
-
-class LinearProjection:
-    """Simple linear reward predictor from quality embeddings.
-
-    Trained on (quality_embedding, engagement_reward) pairs.
-    Uses ridge regression (numpy-only, no sklearn dependency).
-    """
-
-    def __init__(self, company: str):
-        self.company = company
-        self._W: np.ndarray | None = None
-        self._b: float = 0.0
-        self._trained = False
-
-    def train(self, embeddings: list[list[float]], rewards: list[float], ridge_alpha: float = 1.0) -> bool:
-        """Fit W, b from data. Returns True if training succeeded."""
-        if len(embeddings) < _MIN_OBS_FOR_PROJECTION or len(embeddings) != len(rewards):
-            return False
-
-        X = np.array(embeddings, dtype=np.float32)
-        y = np.array(rewards, dtype=np.float32)
-
-        # Ridge regression: W = (X^T X + alpha I)^-1 X^T y
-        n, d = X.shape
-        XtX = X.T @ X + ridge_alpha * np.eye(d, dtype=np.float32)
-        Xty = X.T @ y
-
-        try:
-            self._W = np.linalg.solve(XtX, Xty)
-            self._b = float(y.mean() - X.mean(axis=0) @ self._W)
-            self._trained = True
-            return True
-        except np.linalg.LinAlgError:
-            return False
-
-    def predict(self, embedding: list[float]) -> float:
-        """Predict reward from a quality embedding."""
-        if not self._trained or self._W is None:
-            return 0.0
-        x = np.array(embedding, dtype=np.float32)
-        return float(x @ self._W + self._b)
-
-    def train_from_observations(self, company: str) -> bool:
-        """Train from RuanMei observations that have quality embeddings stored.
-
-        After the embedding model migration (sentence-transformers → OpenAI),
-        old 384-dim and new 1536-dim vectors may coexist in quality_embeddings.json.
-        We filter to the most recent dimension (last pair's dim) to avoid mixing
-        incompatible embedding spaces. Old pairs are effectively discarded for
-        training purposes — they'll be re-embedded when ordinal_sync runs again.
-        """
-        from backend.src.db import vortex as P
-        cache_path = P.memory_dir(company) / "quality_embeddings.json"
-        if not cache_path.exists():
-            return False
-        try:
-            data = json.loads(cache_path.read_text(encoding="utf-8"))
-            pairs = data.get("pairs", [])
-            if not pairs:
-                return False
-            # Determine target dimension from the most recent embedding
-            target_dim = len(pairs[-1].get("embedding", []))
-            pairs = [p for p in pairs if len(p.get("embedding", [])) == target_dim]
-            if len(pairs) < _MIN_OBS_FOR_PROJECTION:
-                return False
-            embeddings = [p["embedding"] for p in pairs]
-            rewards = [p["reward"] for p in pairs]
-            return self.train(embeddings, rewards)
-        except Exception:
-            return False
-
-
-def _persist_quality_embedding(company: str, embedding: list[float], reward: float, post_hash: str) -> None:
-    """Append a quality embedding + reward pair for linear projection training."""
-    from backend.src.db import vortex as P
-    cache_path = P.memory_dir(company) / "quality_embeddings.json"
-    try:
-        data = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {"pairs": []}
-    except Exception:
-        data = {"pairs": []}
-
-    # Deduplicate by post_hash
-    existing_hashes = {p.get("post_hash") for p in data["pairs"]}
-    if post_hash in existing_hashes:
-        return
-
-    data["pairs"].append({
-        "embedding": embedding,
-        "reward": reward,
-        "post_hash": post_hash,
-    })
-
-    # Cap at 200 pairs
-    if len(data["pairs"]) > 200:
-        data["pairs"] = data["pairs"][-200:]
-
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    tmp.rename(cache_path)
-
-
-def _get_learned_blend_weight(company: str) -> float:
-    """Learn the confidence vs predicted_reward blend weight from historical data.
-
-    Computes Spearman correlation of each signal with actual engagement.
-    The signal that better predicts engagement gets proportionally more weight.
-    Falls back to 0.7 (confidence-dominant) when insufficient data.
-    """
-    from backend.src.db import vortex as P
-    cache_path = P.memory_dir(company) / "quality_embeddings.json"
-    if not cache_path.exists():
-        return 0.7  # default: confidence dominates
-
-    try:
-        data = json.loads(cache_path.read_text(encoding="utf-8"))
-        pairs = data.get("pairs", [])
-        if len(pairs) < _MIN_OBS_FOR_PROJECTION:
-            return 0.7
-
-        # We need observations that have BOTH a confidence score and a predicted reward
-        # stored alongside their actual engagement. For now, use the correlation between
-        # the embedding-predicted reward and actual reward as the projection's reliability.
-        # If projection is reliable (high corr), weight it more. If not, weight confidence.
-        rewards = [p.get("reward", 0) for p in pairs]
-        embeddings = [p.get("embedding") for p in pairs]
-
-        if not embeddings or not all(embeddings):
-            return 0.7
-
-        # Train projection, compute prediction accuracy
-        proj = LinearProjection(company)
-        if not proj.train(embeddings, rewards):
-            return 0.7
-
-        # Compute correlation between predicted and actual
-        predicted = [proj.predict(e) for e in embeddings]
-        from backend.src.utils.correlation_analyzer import _spearman_correlation
-        corr = _spearman_correlation(predicted, rewards)
-
-        # Blend weight = continuous function of prediction correlation.
-        # corr=1 → confidence_weight=0.3 (prediction reliable, lean on it)
-        # corr=0 → confidence_weight=0.9 (prediction useless, lean on confidence)
-        # Linear interpolation, no hard clamp.
-        confidence_weight = 0.9 - 0.6 * max(corr, 0)
-        return round(confidence_weight, 3)
-    except Exception:
-        return 0.7
-
-
-def _use_freeform(company: str) -> bool:
-    """Check if client has enough data for free-form critic."""
-    try:
-        from backend.src.agents.ruan_mei import RuanMei
-        rm = RuanMei(company)
-        scored_with_analysis = sum(
-            1 for o in rm._state.get("observations", [])
-            if o.get("status") == "scored" and o.get("descriptor", {}).get("analysis")
-        )
-        return scored_with_analysis >= _MIN_OBS_FOR_FREEFORM
-    except Exception:
-        return False
-
-
-def _build_critic_system(
-    dim_weights: dict[str, float],
-    is_adaptive: bool,
-    custom_dimensions: list[dict] | None = None,
-) -> str:
-    """Build the critic system prompt.
-
-    Three modes:
-    - custom_dimensions provided → emergent dimensions (client-specific rubric)
-    - is_adaptive=True → fixed dimensions with learned weights
-    - is_adaptive=False → fixed dimensions, equal weight (cold start)
-    """
-    use_custom = custom_dimensions and len(custom_dimensions) >= 3
-
-    n_dims = len(custom_dimensions) if use_custom else len(_DIMENSIONS)
-    lines = [
-        "You are a ruthless LinkedIn post quality critic for a B2B ghostwriting agency.\n",
-        f"Score the draft along these {n_dims} dimensions (1-5 each):\n",
-    ]
-
-    if use_custom:
-        # Emergent dimensions: build rubric from discovered dimension data
-        for i, dim in enumerate(custom_dimensions, 1):
-            name = dim["name"]
-            desc = dim.get("description", name)
-            weight = dim_weights.get(name)
-            pct = f" — {weight:.0%} importance" if is_adaptive and weight is not None else ""
-            lines.append(f"{i}. **{name}** ({desc}{pct})")
-            lines.append(f"   5: {dim.get('score_5', 'Excellent')}")
-            lines.append(f"   3: {dim.get('score_3', 'Moderate')}")
-            lines.append(f"   1: {dim.get('score_1', 'Poor')}\n")
-    else:
-        # Fixed dimensions (cold start or adaptive weights)
-        for i, (name, subtitle, rubric) in enumerate(_DIMENSIONS, 1):
-            weight = dim_weights.get(name)
-            pct = f" — {weight:.0%} importance" if is_adaptive and weight is not None else ""
-            lines.append(f"{i}. **{name}** ({subtitle}{pct})")
-            lines.append(f"   {rubric}\n")
-
-    if is_adaptive:
-        lines.append(
-            "Dimensions with higher importance weight should receive more scrutiny. "
-            "A score of 2 on a high-importance dimension is much worse than a 2 on a "
-            "low-importance dimension. Factor this into your revision_instructions — "
-            "prioritize fixing high-weight dimensions first.\n"
-        )
-
-    lines.append(
-        "For each dimension scoring ≤3, provide SPECIFIC revision instructions "
-        "(not vague 'make it better').\n\n"
-        "Respond with ONLY a JSON object:\n"
-        "{\n"
-        '  "dimensions": [\n'
-        '    {"name": "DimensionName", "score": 4, "feedback": "..."},\n'
-        f"    ...all {n_dims}...\n"
-        "  ],\n"
-        '  "composite_score": 3.4,\n'
-        '  "revision_instructions": "1. Fix X. 2. Improve Y.",\n'
-        '  "pass_threshold_met": false\n'
-        "}"
-    )
-
-    return "\n".join(lines)
-
-
-def _build_critic_prompt(
-    draft_text: str,
-    company: str,
-    alignment_score: dict | None = None,
-    icp_definition: dict | None = None,
-    transcript_excerpt: str = "",
-    style_rules: list[dict] | None = None,
-    iteration_num: int = 1,
-) -> str:
-    """Build the critic's user message with all available context."""
-    parts = [f"DRAFT POST (iteration {iteration_num}):\n{draft_text}"]
-
-    if alignment_score:
-        parts.append(
-            f"\n360BREW ALIGNMENT DATA:\n"
-            f"Score: {alignment_score.get('score', 'N/A')}/1.0 "
-            f"({alignment_score.get('label', 'unknown')})\n"
-            f"Method: {alignment_score.get('method', 'unknown')}\n"
-            f"{alignment_score.get('summary', '')}"
-        )
-
-    if icp_definition:
-        desc = icp_definition.get("description", "")
-        anti = icp_definition.get("anti_description", "")
-        if desc:
-            parts.append(f"\nICP DEFINITION:\n{desc}")
-        if anti:
-            parts.append(f"\nANTI-ICP (people we do NOT want engaging):\n{anti}")
-
-    if transcript_excerpt:
-        parts.append(f"\nSOURCE TRANSCRIPT EXCERPT:\n{transcript_excerpt[:2000]}")
-
-    if style_rules:
-        hard = [r for r in style_rules if r.get("tier") == "hard"]
-        if hard:
-            rules_text = "\n".join(f"- {r['description']}" for r in hard[:10])
-            parts.append(f"\nCLIENT-SPECIFIC STYLE RULES (hard):\n{rules_text}")
-
-    # Engagement diagnostic: compare this draft against the client's
-    # empirical success profile. Gives the critic concrete, data-grounded
-    # context for its revision instructions.
-    if iteration_num == 1:  # only on first critique to avoid redundant LLM calls
-        try:
-            from backend.src.utils.feedback_distiller import build_engagement_diagnostic
-            _diagnostic = build_engagement_diagnostic(company, draft_text)
-            if _diagnostic:
-                parts.append(
-                    f"\nENGAGEMENT DIAGNOSTIC (from this client's historical performance data):\n"
-                    f"{_diagnostic}"
-                )
-        except Exception:
-            pass
-
-    return "\n\n---\n\n".join(parts)
-
-
-def critique(
-    draft_text: str,
-    company: str,
-    alignment_score: dict | None = None,
-    icp_definition: dict | None = None,
-    transcript_excerpt: str = "",
-    style_rules: list[dict] | None = None,
-    iteration_num: int = 1,
-) -> CritiqueResult:
-    """Run the critic on a single draft. Returns structured scores + revision instructions."""
-
-    # Get alignment score if not provided
-    if alignment_score is None:
-        try:
-            from backend.src.utils.alignment_scorer import score_draft_alignment
-            alignment_score = score_draft_alignment(company, draft_text)
-        except Exception:
-            alignment_score = None
-
-    # Load ICP if not provided
-    if icp_definition is None:
-        try:
-            from backend.src.db import vortex as P
-            icp_path = P.icp_definition_path(company)
-            if icp_path.exists():
-                icp_definition = json.loads(icp_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
-    # Style rules removed: feedback learning happens through RuanMei
-    # observations (draft → final → engagement), not categorical rules.
-    style_rules = None
-
-    # Resolve adaptive config (weights + threshold)
-    adaptive = CyreneAdaptiveConfig().resolve(company)
-    dim_weights = adaptive.get("dimension_weights", _DEFAULT_DIMENSION_WEIGHTS)
-    pass_threshold = adaptive.get("pass_threshold", _DEFAULT_PASS_THRESHOLD)
-    is_adaptive = adaptive.get("_tier") != "default"
-
-    # Route: freeform (continuous) vs dimension-based (categorical)
-    use_freeform = _use_freeform(company)
-
-    if use_freeform:
-        return _critique_freeform(
-            draft_text, company, adaptive, alignment_score,
-            icp_definition, transcript_excerpt, style_rules, iteration_num,
-        )
-
-    # Dimension-based path (cold-start / insufficient data)
-    # Try emergent dimensions when adaptive config has enough data OR
-    # when the client has enough scored observations (even without prior
-    # Cyrene dimension scores — breaks the chicken-and-egg bootstrap).
-    custom_dims = None
-    obs_count = adaptive.get("observation_count", 0)
-    emergent_min = adaptive.get("emergent_min_obs", _DEFAULT_EMERGENT_MIN_OBS)
-    if (is_adaptive and obs_count >= emergent_min) or obs_count == 0:
-        # obs_count==0 means no cyrene_dimensions yet; _discover_dimensions
-        # checks its own threshold against scored observations with post bodies.
-        custom_dims = _discover_dimensions(company)
-
-    user_msg = _build_critic_prompt(
-        draft_text, company, alignment_score, icp_definition,
-        transcript_excerpt, style_rules, iteration_num,
-    )
-
-    system = _build_critic_system(dim_weights, is_adaptive, custom_dimensions=custom_dims)
-
-    try:
-        resp = _client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=4096,
-            system=system,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        raw = resp.content[0].text.strip()
-
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        data = json.loads(raw)
-
-        dimensions = [
-            DimensionScore(
-                name=d.get("name", f"dim_{i}"),
-                score=max(1, min(5, int(d.get("score", 3)))),
-                feedback=d.get("feedback", ""),
-            )
-            for i, d in enumerate(data.get("dimensions", []))
-        ]
-
-        if dimensions:
-            weighted_sum = sum(d.score * dim_weights.get(d.name, 1 / 7) for d in dimensions)
-            weight_total = sum(dim_weights.get(d.name, 1 / 7) for d in dimensions)
-            composite = weighted_sum / weight_total if weight_total > 0 else 3.0
-        else:
-            composite = float(data.get("composite_score", 3.0))
-
-        return CritiqueResult(
-            dimensions=dimensions,
-            composite_score=round(composite, 2),
-            revision_instructions=data.get("revision_instructions", ""),
-            pass_threshold_met=composite >= pass_threshold,
-            weights_applied=dim_weights if is_adaptive else None,
-            adaptive_tier=adaptive.get("_tier", "default"),
-            dimension_set=_get_dimension_set_label(company, custom_dims),
-        )
-
-    except json.JSONDecodeError:
-        logger.warning("[Cyrene] Critic returned non-JSON")
-        return _default_critique(draft_text)
-    except Exception as e:
-        logger.warning("[Cyrene] Critique failed: %s", e)
-        return _default_critique(draft_text)
-
-
-def _critique_freeform(
-    draft_text: str,
-    company: str,
-    adaptive: dict,
-    alignment_score: dict | None,
-    icp_definition: dict | None,
-    transcript_excerpt: str,
-    style_rules: list[dict] | None,
-    iteration_num: int,
-) -> CritiqueResult:
-    """Free-form quality critique — no predefined dimensions.
-
-    The critic writes open-ended analysis, which gets embedded into a
-    continuous quality vector. A linear projection predicts engagement
-    from the quality vector when enough training data exists.
-    """
-    pass_threshold = adaptive.get("pass_threshold", _DEFAULT_PASS_THRESHOLD)
-
-    # Get example analyses from top/bottom performers
-    high_ex, low_ex = _get_quality_examples(company)
-
-    system = _build_freeform_critic_system(high_ex, low_ex)
-
-    user_msg = _build_critic_prompt(
-        draft_text, company, alignment_score, icp_definition,
-        transcript_excerpt, style_rules, iteration_num,
-    )
-
-    try:
-        resp = _client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=4096,
-            system=system,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        raw = resp.content[0].text.strip()
-
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        data = json.loads(raw)
-
-        analysis = data.get("analysis", "")
-        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
-        revision_instructions = data.get("revision_instructions", "")
-        critic_pass = data.get("pass", confidence >= 0.6)
-
-        # Embed the analysis for continuous quality vector
-        analysis_embedding = None
-        predicted_reward = None
-        try:
-            from backend.src.agents.lola import _embed_texts
-            embs = _embed_texts([analysis])
-            if embs:
-                analysis_embedding = embs[0]
-
-                # Try linear projection if enough training data
-                proj = LinearProjection(company)
-                if proj.train_from_observations(company):
-                    predicted_reward = proj.predict(analysis_embedding)
-        except Exception:
-            pass
-
-        # Composite score: native 0-1 space.
-        # Blend weight between confidence and predicted_reward is LEARNED
-        # from historical correlation with actual engagement.
-        if predicted_reward is not None:
-            pred_01 = max(0.0, min(1.0, 0.5 + predicted_reward * 0.25))
-            blend_w = _get_learned_blend_weight(company)
-            composite_01 = blend_w * confidence + (1.0 - blend_w) * pred_01
-        else:
-            composite_01 = confidence
-
-        # Map to 1-5 for backward-compatible output only (NOT used for pass decision)
-        composite_15 = composite_01 * 5.0
-
-        # Pass decision in native 0-1 space.
-        # Threshold: pass_threshold is in 1-5 scale from adaptive config.
-        # Convert to 0-1: 3.5/5 = 0.7 (default)
-        threshold_01 = pass_threshold / 5.0
-        pass_met = critic_pass and composite_01 >= threshold_01
-
-        # Create synthetic dimension for backward compat
-        dim = DimensionScore(
-            name="freeform_quality",
-            score=max(1, min(5, round(composite_15))),
-            feedback=analysis[:200] if analysis else "",
-        )
-
-        return CritiqueResult(
-            dimensions=[dim],
-            composite_score=round(composite_15, 2),  # 1-5 for backward compat display
-            revision_instructions=revision_instructions,
-            pass_threshold_met=pass_met,
-            weights_applied=None,
-            adaptive_tier=adaptive.get("_tier", "default"),
-            dimension_set="freeform",
-            analysis_text=analysis,
-            analysis_embedding=analysis_embedding,
-            confidence=confidence,
-            predicted_reward=round(predicted_reward, 4) if predicted_reward is not None else None,
-        )
-
-    except json.JSONDecodeError:
-        logger.warning("[Cyrene] Freeform critic returned non-JSON")
-        return _default_critique(draft_text)
-    except Exception as e:
-        logger.warning("[Cyrene] Freeform critique failed: %s", e)
-        return _default_critique(draft_text)
-
-
-def _default_critique(draft_text: str) -> CritiqueResult:
-    """Fallback critique that passes everything (don't block generation)."""
-    return CritiqueResult(
-        dimensions=[DimensionScore(name="fallback", score=4, feedback="Critique unavailable")],
-        composite_score=4.0,
-        revision_instructions="",
-        pass_threshold_met=True,
-    )
-
-
-# ------------------------------------------------------------------
-# Reviser
-# ------------------------------------------------------------------
-
-_REVISER_SYSTEM = """\
-You are revising a LinkedIn post based on specific critic feedback. \
-Apply ONLY the requested changes. Do not rewrite sections that weren't flagged. \
-Preserve the author's voice, specific details, and transcript-sourced material.
-
-Return ONLY the revised post text. No JSON, no markdown fences, no explanation.
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT = """\
+You are Cyrene, the strategic growth agent for a LinkedIn ghostwriting \
+operation. You operate ABOVE the post generation pipeline — your job is \
+to make every successive cycle of content creation more effective than \
+the last by studying what happened, identifying what to do next, and \
+producing a strategic brief that informs the entire operation.
+
+## Your objective
+
+Maximize this client's ICP exposure and pipeline generation on LinkedIn \
+over time. Not post by post — across the full arc of their presence. \
+Three layers, in order of importance:
+
+  1. Pipeline: engagement from ICP prospects should convert to \
+     conversations and deals. This is what the client pays for.
+  2. ICP exposure: the RIGHT people should be engaging, and each batch \
+     should attract MORE of them than the last.
+  3. Engagement: posts should perform well. Base layer enabling 1 and 2.
+
+## How the content pipeline works (what you are optimizing)
+
+The operator (a ghostwriter at a content agency) runs a repeating cycle:
+
+  1. INTERVIEW: the operator interviews the client on a video call, \
+     asking questions designed to surface personal stories worth posting.
+  2. TRANSCRIPTS: the interview is transcribed and placed in \
+     memory/{{company}}/transcripts/.
+  3. STELLE GENERATES: Stelle (the post-writing agent) reads the \
+     transcripts, mines them for angles, and writes a batch of LinkedIn \
+     posts. Stelle has access to:
+       - Raw transcripts as source material
+       - Client voice examples (top past posts by engagement)
+       - Published post history (for topic dedup)
+       - Scored observation history via query_observations (draft vs \
+         published diffs, engagement metrics, reactor identities)
+       - 200K LinkedIn post corpus for reference
+       - Irontomb (adversarial audience simulator that predicts \
+         engagement from comparable past posts — turn-based retrieval)
+     Stelle iterates each draft against Irontomb at least 3 times \
+     before submitting. She writes from specific transcript moments.
+  4. PUBLISH: posts are pushed to Ordinal, scheduled, go live on LinkedIn.
+  5. ENGAGEMENT: real engagement data collected via Ordinal analytics \
+     every hour (every 15 min for posts <72h old). Reactor identities \
+     scraped via Apify. Per-reactor ICP scores computed. Engagement \
+     trajectories (velocity, plateau, longevity) tracked.
+  6. LEARNING: RuanMei scores each post, Irontomb calibrates against \
+     real outcomes, the system gets smarter.
+  7. REPEAT from step 1.
+
+You sit between step 6 and step 1. After the system learns from the \
+latest batch, you study everything and produce a brief that shapes the \
+NEXT cycle.
+
+## Client context
+
+{client_context}
+
+This client has {n_scored} scored observations in their history.
+
+## What the data actually measures
+
+`icp_match_rate` is computed from people who REACTED to a post. \
+Anything about readers who didn't react — a scroll-past, a \
+memorized-for-later, an offline DM a week later — is not in that \
+number. Offline pipeline outcomes (DMs, calls, deals) show up only \
+when the client mentions them on interview calls, which are \
+transcribed into `transcripts/`. `query_transcript_inventory` with \
+`read_filename` returns a transcript's full text.
+
+## How to work
+
+Study the data across multiple tools before forming recommendations. \
+A good Cyrene run takes 15-30 turns. You are forming a comprehensive \
+strategy from evidence, not generating a quick summary.
+
+No hand-engineered strategy frameworks. No "post 3x/week." No \
+"rotate between TOFU/MOFU/BOFU." Read the data, see what's working, \
+see what's not, and form your own view.
+
+When ready, call submit_brief with your strategic recommendations.
 """
 
 
-def revise(
-    draft_text: str,
-    critique_result: CritiqueResult,
-    company: str = "",
-) -> str:
-    """Revise a draft based on critic feedback. Returns revised text."""
+# ---------------------------------------------------------------------------
+# Tool dispatcher
+# ---------------------------------------------------------------------------
 
-    if not critique_result.revision_instructions:
-        return draft_text
+_TOOL_DISPATCH: dict[str, Any] = {
+    "query_observations": _query_observations,
+    "query_top_engagers": _query_top_engagers,
+    "query_transcript_inventory": _query_transcript_inventory,
+    "query_icp_exposure_trend": _query_icp_exposure_trend,
+    "query_warm_prospects": _query_warm_prospects,
+    "query_engagement_trajectories": _query_engagement_trajectories,
+    "execute_python": _execute_python,
+    "search_linkedin_corpus": _search_linkedin_corpus,
+    "web_search": _web_search,
+    "fetch_url": _fetch_url,
+    "query_ordinal_posts": _query_ordinal_posts,
+    "note": _note,
+}
 
-    user_msg = (
-        f"ORIGINAL DRAFT:\n{draft_text}\n\n"
-        f"CRITIC SCORES:\n"
-    )
-    for d in critique_result.dimensions:
-        user_msg += f"  {d.name}: {d.score}/5"
-        if d.score <= 3:
-            user_msg += f" — {d.feedback}"
-        user_msg += "\n"
 
-    user_msg += f"\nREVISION INSTRUCTIONS:\n{critique_result.revision_instructions}\n\n"
-    user_msg += (
-        "Apply ONLY these specific changes. Do not alter parts that scored well. "
-        "Return the complete revised post text."
-    )
+def _dispatch_tool(company: str, name: str, args: dict, notes: list[str]) -> str:
+    """Route a tool call to its implementation."""
+    if name == "note":
+        text = (args.get("text") or "").strip()
+        if text:
+            notes.append(text)
+        return json.dumps({"ok": True, "note_count": len(notes)})
+
+    handler = _TOOL_DISPATCH.get(name)
+    if handler is None:
+        return json.dumps({"error": f"unknown tool: {name}"})
 
     try:
-        resp = _client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=4096,
-            system=_REVISER_SYSTEM,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        revised = resp.content[0].text.strip()
-
-        # Basic sanity: revised should be reasonable length
-        if len(revised) < 200:
-            logger.warning("[Cyrene] Revision too short (%d chars), keeping original", len(revised))
-            return draft_text
-        if len(revised) > 3200:
-            logger.warning("[Cyrene] Revision too long (%d chars), keeping original", len(revised))
-            return draft_text
-
-        return revised
-
+        return handler(company, args)
     except Exception as e:
-        logger.warning("[Cyrene] Revision failed: %s", e)
-        return draft_text
+        logger.exception("[Cyrene] tool %s failed", name)
+        return json.dumps({"error": f"{type(e).__name__}: {str(e)[:300]}"})
 
 
-# ------------------------------------------------------------------
-# SELF-REFINE Loop
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
-def refine_post(
-    company: str,
-    draft_text: str,
-    transcript_excerpt: str = "",
-    max_iterations: Optional[int] = None,
-    event_callback: Callable | None = None,
-) -> RefineResult:
-    """Run the full SELF-REFINE loop on a single post.
+def run_strategic_review(company: str) -> dict[str, Any]:
+    """Run a full Cyrene strategic review for one client.
 
-    Returns the best version (by composite score), not necessarily the latest.
-
-    The iteration count is NOT hard-coded. The loop continues until:
-      1. The critic says the post passes (composite >= learned pass_threshold), OR
-      2. Improvement between iterations is below the learned min_improvement, OR
-      3. The safety ceiling is reached (learned per-client, default 8).
-
-    The critic decides when to stop. The ceiling is a safety net, not a target.
-    Same philosophy as Stelle's "write as many posts as the transcripts support"
-    — the LLM evaluates quality, the system just caps the worst case.
-
-    Args:
-        company: Client company keyword.
-        draft_text: The initial draft from Stelle.
-        transcript_excerpt: Source material for Magic Moment evaluation.
-        max_iterations: Override for the learned ceiling. None = use learned value.
-        event_callback: Optional callback for progress events.
+    Turn-based agent loop. Returns the strategic brief dict on success,
+    or a dict with `_error` on failure. Persists the brief to
+    memory/{company}/cyrene_brief.json.
     """
-    iterations: list[Iteration] = []
-    best_text = draft_text
-    best_score = 0.0
-    current_text = draft_text
+    # Load audience context from transcripts
+    from backend.src.agents.irontomb import _load_icp_context
+    client_context = _load_icp_context(company)
 
-    # Pre-compute alignment score (reused across iterations)
-    alignment_score = None
+    # Count scored observations
     try:
-        from backend.src.utils.alignment_scorer import score_draft_alignment
-        alignment_score = score_draft_alignment(company, draft_text)
-    except Exception:
-        pass
-
-    # Resolve adaptive thresholds — ALL three are learned from client data:
-    #   pass_threshold:   what composite score is "good enough to ship"
-    #   min_improvement:  when to stop iterating (diminishing returns)
-    #   max_iterations:   safety ceiling (overpolishing detection lowers it)
-    adaptive = CyreneAdaptiveConfig().resolve(company)
-    min_improvement = adaptive.get("min_improvement", _DEFAULT_MIN_IMPROVEMENT)
-    if max_iterations is None:
-        max_iterations = adaptive.get("max_iterations", _DEFAULT_MAX_ITERATIONS)
-
-    for i in range(1, max_iterations + 1):
-        if event_callback:
-            event_callback("status", {"message": f"[Cyrene] Critique iteration {i}/{max_iterations}..."})
-
-        logger.info("[Cyrene] Iteration %d/%d for %s", i, max_iterations, company)
-
-        # Critique
-        crit = critique(
-            current_text,
-            company,
-            alignment_score=alignment_score,
-            transcript_excerpt=transcript_excerpt,
-            iteration_num=i,
+        from backend.src.db.local import ruan_mei_load
+        state = ruan_mei_load(company) or {}
+        n_scored = sum(
+            1 for o in state.get("observations", [])
+            if o.get("status") in ("scored", "finalized")
         )
+    except Exception:
+        n_scored = 0
 
-        # Track best
-        if crit.composite_score > best_score:
-            best_score = crit.composite_score
-            best_text = current_text
+    system_prompt = _SYSTEM_PROMPT.format(
+        client_context=client_context,
+        n_scored=n_scored,
+        company=company,
+    )
 
-        # Check if we can stop
-        if crit.pass_threshold_met:
-            logger.info(
-                "[Cyrene] Passed threshold at iteration %d (score %.2f)",
-                i, crit.composite_score,
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": (
+                f"Run a strategic review for {company}. Study the data "
+                f"across your tools, form your strategy from evidence, "
+                f"and produce a comprehensive brief via submit_brief."
+            ),
+        }
+    ]
+
+    client = anthropic.Anthropic()
+    notes: list[str] = []
+    total_cost = 0.0
+    turns_used = 0
+    brief: Optional[dict] = None
+
+    for turn in range(1, _CYRENE_MAX_TURNS + 1):
+        turns_used = turn
+        try:
+            resp = client.messages.create(
+                model=_CYRENE_MODEL,
+                max_tokens=_CYRENE_MAX_TOKENS,
+                system=[
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                tools=_TOOLS,
+                messages=messages,
             )
-            iterations.append(Iteration(
-                iteration_num=i,
-                draft_text=current_text,
-                critique=crit,
-                revised_text=current_text,
-                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            ))
+        except Exception as e:
+            logger.warning("[Cyrene] API call failed turn=%d: %s", turn, e)
+            return {
+                "_error": f"API call failed on turn {turn}: {str(e)[:200]}",
+                "_turns_used": turns_used,
+            }
+
+        # Cost tracking
+        try:
+            usage = resp.usage
+            in_tok = getattr(usage, "input_tokens", 0) or 0
+            out_tok = getattr(usage, "output_tokens", 0) or 0
+            cache_r = getattr(usage, "cache_read_input_tokens", 0) or 0
+            cache_w = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            total_cost += (
+                (in_tok / 1e6) * _INPUT_COST_PER_MTOK
+                + (out_tok / 1e6) * _OUTPUT_COST_PER_MTOK
+                + (cache_r / 1e6) * _CACHE_READ_COST_PER_MTOK
+                + (cache_w / 1e6) * _CACHE_WRITE_COST_PER_MTOK
+            )
+        except Exception:
+            pass
+
+        messages.append({"role": "assistant", "content": resp.content})
+
+        tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
+        if not tool_uses:
+            logger.warning("[Cyrene] %s: no tool call on turn %d", company, turn)
             break
 
-        # Check for diminishing returns
-        if i > 1 and iterations:
-            prev_score = iterations[-1].critique.composite_score
-            improvement = crit.composite_score - prev_score
-            if improvement < min_improvement and crit.composite_score > prev_score:
-                logger.info(
-                    "[Cyrene] Diminishing returns at iteration %d (improvement %.2f)",
-                    i, improvement,
-                )
-                iterations.append(Iteration(
-                    iteration_num=i,
-                    draft_text=current_text,
-                    critique=crit,
-                    revised_text=current_text,
-                    timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                ))
-                break
+        tool_results: list[dict] = []
+        for tu in tool_uses:
+            if tu.name == "submit_brief":
+                if isinstance(tu.input, dict):
+                    brief = dict(tu.input)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu.id,
+                    "content": "Brief submitted. Review complete.",
+                })
+            else:
+                result = _dispatch_tool(company, tu.name, tu.input or {}, notes)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu.id,
+                    "content": result[:12000],
+                })
 
-        # Revise
-        if event_callback:
-            weak = [d.name for d in crit.weak_dimensions]
-            event_callback("status", {
-                "message": f"[Cyrene] Revising: {', '.join(weak) if weak else 'minor polish'}..."
-            })
+        messages.append({"role": "user", "content": tool_results})
 
-        revised = revise(current_text, crit, company)
+        if brief is not None:
+            break
 
-        iterations.append(Iteration(
-            iteration_num=i,
-            draft_text=current_text,
-            critique=crit,
-            revised_text=revised,
-            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        ))
+        if resp.stop_reason == "end_turn":
+            break
 
-        # Update alignment score for revised text
-        if revised != current_text:
-            try:
-                alignment_score = score_draft_alignment(company, revised)
-            except Exception:
-                pass
-
-        # Track best after revision
-        # We'll score the revision in the next iteration's critique
-        current_text = revised
-
-    # Final check: if the last revision was never critiqued, score it
-    if current_text != best_text:
-        final_crit = critique(current_text, company, alignment_score=alignment_score)
-        if final_crit.composite_score > best_score:
-            best_score = final_crit.composite_score
-            best_text = current_text
-
-    method = "passed_first" if len(iterations) == 1 and iterations[0].critique.pass_threshold_met else "refined"
-    if best_text == draft_text and len(iterations) > 1:
-        method = "no_improvement"
-
-    if event_callback:
-        event_callback("status", {
-            "message": f"[Cyrene] Complete: {len(iterations)} iterations, best score {best_score:.2f}/5.0"
-        })
-
-    # Get adaptive tier and dimension set from the last critique
-    adaptive_tier = "default"
-    dimension_set = "fixed_v1"
-    final_analysis = ""
-    final_embedding = None
-    final_confidence = 0.0
-    final_predicted = None
-    if iterations:
-        last_crit = iterations[-1].critique
-        adaptive_tier = last_crit.adaptive_tier
-        dimension_set = last_crit.dimension_set
-        final_analysis = last_crit.analysis_text
-        final_embedding = last_crit.analysis_embedding
-        final_confidence = last_crit.confidence
-        final_predicted = last_crit.predicted_reward
-
-    return RefineResult(
-        final_text=best_text,
-        best_score=round(best_score, 2),
-        iterations=[
-            {
-                "iteration": it.iteration_num,
-                "composite_score": it.critique.composite_score,
-                "all_dimensions": {
-                    d.name: d.score
-                    for d in it.critique.dimensions
-                },
-                "weak_dimensions": [
-                    {"name": d.name, "score": d.score, "feedback": d.feedback}
-                    for d in it.critique.weak_dimensions
-                ],
-                "revision_instructions": it.critique.revision_instructions,
-                "text_changed": it.draft_text != it.revised_text,
-                "adaptive_tier": it.critique.adaptive_tier,
-                "dimension_set": it.critique.dimension_set,
-            }
-            for it in iterations
-        ],
-        total_iterations=len(iterations),
-        method=method,
-        adaptive_tier=adaptive_tier,
-        dimension_set=dimension_set,
-        analysis_text=final_analysis,
-        analysis_embedding=final_embedding,
-        confidence=final_confidence,
-        predicted_reward=final_predicted,
-    )
-
-
-def refine_batch(
-    company: str,
-    drafts: list[dict],
-    max_iterations: Optional[int] = None,
-    event_callback: Callable | None = None,
-) -> list[RefineResult]:
-    """Refine multiple posts. Each dict must have 'text' key, optionally 'transcript_excerpt'.
-
-    Returns a list of RefineResult, one per draft.
-    """
-    results = []
-    for i, draft in enumerate(drafts):
-        if event_callback:
-            event_callback("status", {"message": f"[Cyrene] Refining post {i+1}/{len(drafts)}..."})
-
-        text = draft.get("text", "")
-        excerpt = draft.get("transcript_excerpt", "")
-
-        if not text.strip():
-            results.append(RefineResult(
-                final_text=text,
-                best_score=0.0,
-                iterations=[],
-                total_iterations=0,
-                method="skip",
-            ))
-            continue
-
-        result = refine_post(
-            company=company,
-            draft_text=text,
-            transcript_excerpt=excerpt,
-            max_iterations=max_iterations,
-            event_callback=event_callback,
-        )
-        results.append(result)
-
-    return results
-
-
-# ------------------------------------------------------------------
-# Legacy stylistic rewrite (original Cyrene functionality)
-# ------------------------------------------------------------------
-
-class CyreneStyleRewriter:
-    """Cyrene's original stylistic rewrite capability.
-
-    Rewrites individual LinkedIn post drafts while preserving factual payload.
-    Uses a 4-step XML framework: fact extraction → style approach → strategy → rewrite.
-    """
-
-    def __init__(self, model_name: str = "claude-opus-4-6"):
-        self.model_name = model_name
-
-    def rewrite_single_post(
-        self,
-        post_text: str,
-        style_instruction: str,
-        image_suggestion: str = "",
-        theme: str = "",
-        client_context: str = "",
-    ) -> dict:
-        """Rewrite a single post using Cyrene's 4-step XML framework."""
-        system_prompt = (
-            "You are Cyrene, a meticulous copyeditor. Your job is to completely rewrite a draft "
-            "stylistically while maintaining 100% of the original factual payload and logical arguments."
-        )
-        if client_context:
-            system_prompt = (
-                "You have access to the following client context (interview transcripts, "
-                "approved posts, feedback). Use this to ground your edits in what the client "
-                "actually said and prefers.\n\n"
-                + client_context + "\n\n" + system_prompt
-            )
-
-        if style_instruction and style_instruction.strip():
-            style_directive = f"Apply the following stylistic direction strictly: '{style_instruction.strip()}'"
-            analysis_directive = "Analyze the requested style direction and outline how you will apply it."
-        else:
-            style_directive = (
-                "No specific style was provided. Introduce creative stylistic noise — "
-                "randomize sentence lengths, swap vocabulary, restructure flow, and "
-                "change emotional undertone slightly to make it feel organic."
-            )
-            analysis_directive = "Describe the random stylistic variations you are choosing to apply."
-
-        import re as _re
-
-        user_prompt = f"""
-        <raw_draft>
-        {post_text}
-        </raw_draft>
-
-        STYLE DIRECTIVE:
-        {style_directive}
-
-        INSTRUCTIONS:
-        Output your response in the following exact XML format:
-
-        <step_1_fact_extraction>
-        List bullet points of every core argument, statistic, and narrative beat.
-        </step_1_fact_extraction>
-
-        <step_2_style_approach>
-        {analysis_directive}
-        </step_2_style_approach>
-
-        <step_3_rewrite_strategy>
-        How you will map facts onto the stylistic approach.
-        </step_3_rewrite_strategy>
-
-        <final_post>
-        [Your rewritten post goes here]
-        </final_post>
-        """
-
-        resp = _client.messages.create(
-            model=self.model_name,
-            max_tokens=8192,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-        raw = resp.content[0].text
-
-        def _parse_xml(text, tag):
-            import re
-            m = re.search(f"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
-            if m:
-                return m.group(1).strip()
-            m2 = re.search(f"<{tag}>(.*)", text, re.DOTALL)
-            return m2.group(1).strip() if m2 else ""
-
+    if brief is None:
         return {
-            "fact_extraction": _parse_xml(raw, "step_1_fact_extraction"),
-            "style_analysis": _parse_xml(raw, "step_2_style_approach"),
-            "strategy": _parse_xml(raw, "step_3_rewrite_strategy"),
-            "final_post": _parse_xml(raw, "final_post"),
-            "image_suggestion": image_suggestion.strip() if image_suggestion else "",
-            "theme": theme.strip() if theme else "",
+            "_error": f"no submit_brief within {_CYRENE_MAX_TURNS} turns",
+            "_turns_used": turns_used,
+            "_cost_usd": round(total_cost, 2),
+            "_notes": notes,
         }
 
+    # Stamp metadata
+    brief["_company"] = company
+    brief["_computed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    brief["_turns_used"] = turns_used
+    brief["_cost_usd"] = round(total_cost, 2)
+    brief["_notes"] = notes
 
-# Backward-compatible alias
-Cyrene = CyreneStyleRewriter
+    # Persist
+    try:
+        brief_path = P.memory_dir(company) / _BRIEF_FILENAME
+        brief_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = brief_path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(brief, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        tmp.rename(brief_path)
+        logger.info(
+            "[Cyrene] %s: brief saved (%d turns, $%.2f). "
+            "interview_questions=%d, dm_targets=%d, content_priorities=%d",
+            company, turns_used, total_cost,
+            len(brief.get("interview_questions", [])),
+            len(brief.get("dm_targets", [])),
+            len(brief.get("content_priorities", [])),
+        )
+    except Exception as e:
+        logger.warning("[Cyrene] failed to persist brief for %s: %s", company, e)
+
+    return brief
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 2:
+        print("Usage: python3 cyrene.py <company>")
+        sys.exit(1)
+
+    company_arg = sys.argv[1]
+    result = run_strategic_review(company_arg)
+    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))

@@ -54,7 +54,7 @@ def update_prediction_accuracy(company: str) -> Optional[dict]:
         pred = obs.get("predicted_engagement")
         reward = obs.get("reward")
         actual = reward.get("immediate") if isinstance(reward, dict) else None
-        if pred is not None and actual is not None and obs.get("status") == "scored":
+        if pred is not None and actual is not None and obs.get("status") in ("scored", "finalized"):
             pairs.append({
                 "post_hash": obs.get("post_hash", "")[:8],
                 "predicted": pred,
@@ -93,20 +93,19 @@ def update_prediction_accuracy(company: str) -> Optional[dict]:
         except Exception:
             pass
 
-    # Trend: is accuracy improving? Compare first half vs second half
-    trend = "insufficient_data"
-    if len(pairs) >= 6:
-        mid = len(pairs) // 2
+    # Raw first-half vs second-half MAE comparison. No categorical
+    # "improving/stable/degrading" label — consumers read the two numbers
+    # and judge the trend themselves.
+    early_mae = None
+    late_mae = None
+    if len(pairs) >= 2:
+        mid = max(1, len(pairs) // 2)
         early_errors = [p["abs_error"] for p in pairs[:mid]]
         late_errors = [p["abs_error"] for p in pairs[mid:]]
-        early_mae = sum(early_errors) / len(early_errors)
-        late_mae = sum(late_errors) / len(late_errors)
-        if late_mae < early_mae * 0.8:
-            trend = "improving"
-        elif late_mae > early_mae * 1.2:
-            trend = "degrading"
-        else:
-            trend = "stable"
+        if early_errors:
+            early_mae = round(sum(early_errors) / len(early_errors), 4)
+        if late_errors:
+            late_mae = round(sum(late_errors) / len(late_errors), 4)
 
     report = {
         "company": company,
@@ -114,11 +113,11 @@ def update_prediction_accuracy(company: str) -> Optional[dict]:
         "spearman": round(spearman, 4),
         "mean_error": round(mean_error, 4),
         "mean_abs_error": round(mean_abs_error, 4),
-        "trend": trend,
+        "early_mae": early_mae,
+        "late_mae": late_mae,
         "pairs": pairs,
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "status": "active",
-        "interpretation": _interpret(len(pairs), spearman, trend),
     }
 
     # Persist
@@ -129,46 +128,8 @@ def update_prediction_accuracy(company: str) -> Optional[dict]:
     tmp.rename(path)
 
     logger.info(
-        "[prediction_tracker] %s: %d predictions, Spearman=%.3f, MAE=%.3f, trend=%s",
-        company, len(pairs), spearman, mean_abs_error, trend,
+        "[prediction_tracker] %s: n=%d Spearman=%.3f MAE=%.3f early_mae=%s late_mae=%s",
+        company, len(pairs), spearman, mean_abs_error, early_mae, late_mae,
     )
 
     return report
-
-
-def _interpret(n: int, spearman: float, trend: str) -> str:
-    if n < 3:
-        return (
-            f"Only {n} predictions tracked. Need at least 10 to assess model quality. "
-            "Generate more posts through Stelle to accumulate prediction data."
-        )
-    if n < 10:
-        return (
-            f"{n} predictions tracked (Spearman={spearman:+.3f}). Still early — "
-            "need 10+ for a reliable assessment. Trend: {trend}."
-        )
-    if spearman > 0.3:
-        return (
-            f"Model is predictive (Spearman={spearman:+.3f}, n={n}). "
-            "Predictions rank posts in approximately the right order. "
-            f"Trend: {trend}."
-        )
-    if spearman > 0.1:
-        return (
-            f"Model has weak signal (Spearman={spearman:+.3f}, n={n}). "
-            "Better than random but not reliable for individual post scoring. "
-            f"Trend: {trend}."
-        )
-    if spearman > -0.1:
-        return (
-            f"Model is not predictive (Spearman={spearman:+.3f}, n={n}). "
-            "Predictions are essentially random. The model needs more data "
-            "or different features. "
-            f"Trend: {trend}."
-        )
-    return (
-        f"Model is anti-predictive (Spearman={spearman:+.3f}, n={n}). "
-        "The model's predictions are inversely correlated with actual outcomes. "
-        "Something is wrong — investigate the model's assumptions. "
-        f"Trend: {trend}."
-    )

@@ -363,14 +363,12 @@ _TOOLS = [
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _load_playbook() -> str:
-    for candidate in (PLAYBOOK_PATH, Path("content-strategy-playbook.md")):
-        if candidate.exists():
-            return candidate.read_text(encoding="utf-8")
-    return (
-        "[Playbook not found — apply general LinkedIn content strategy best practices: "
-        "TOFU/MOFU/BOFU framework, pipeline vs. brand north star, storytelling-based "
-        "thought leadership over generic thought leadership.]"
-    )
+    # The playbook was a hand-authored content-strategy rule library
+    # (TOFU/MOFU/BOFU framework, funnel mix rules, anti-pattern lists) that
+    # used to be injected into Herta's system prompt verbatim. Removed as
+    # a Bitter Lesson violation. This function is retained as a no-op so
+    # older call sites don't break; it returns an empty string.
+    return ""
 
 
 _MAX_FILE_CHARS = 120_000
@@ -424,11 +422,17 @@ def _format_client_files(files: dict[str, str]) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _SYSTEM_TEMPLATE = """\
-You are a senior LinkedIn content strategist embedded in a post-generation pipeline.
+You are a research agent producing a raw client-research document for the
+post-generation pipeline.
 
-Your job is to produce a complete, personalized LinkedIn content strategy for a client
-across three time horizons: SHORT-TERM (Month 1), MEDIUM-TERM (Months 2–3), and
-LONG-TERM (Months 4–6+).
+Your job is to run a research pass over the client's own materials and the
+public web, then write down what you learned. You do not author content
+rules, post-quality rubrics, or format taxonomies — those are prescriptive
+patterns that would constrain the downstream writer. You produce RAW
+findings: who the audience actually is, what the client's voice actually
+sounds like in their existing posts, what Ordinal analytics actually say,
+and what the public web says about the client's ICP. The downstream writer
+reads your findings plus the raw client material and decides how to write.
 
 You have four tools available. USE THEM — do not skip the research phase.
 
@@ -437,110 +441,86 @@ MANDATORY RESEARCH SEQUENCE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Step 1 — ordinal_list_profiles
   Call this immediately to get the client's Ordinal profile UUID.
-  Match the profile name to the company keyword. If no Ordinal data is available,
-  skip Steps 2–3 and note the gap.
+  Match the profile name to the company keyword. If no Ordinal data is
+  available, skip Steps 2–3 and note the gap in your findings.
 
 Step 2 — ordinal_follower_analytics (requires profileId from Step 1)
-  Fetch the last 90 days of follower data. Derive:
-  • Current follower count
-  • Growth trajectory (accelerating / flat / declining)
-  • Absolute audience size context (small / mid / large)
+  Fetch the last 90 days of follower data. Record the raw numbers:
+  current follower count, daily/weekly deltas, absolute trajectory.
+  Do not label the trajectory with a category — just show the numbers.
 
 Step 3 — ordinal_post_analytics (requires profileId from Step 1)
-  Fetch the last 90 days of post data. Derive:
-  • Posting frequency (daily / weekly / sporadic / inactive)
-  • Average impressions and engagement rates
-  • Which post types performed best
-  • Whether ICP-relevant content is already present or absent
+  Fetch the last 90 days of post data. Record raw numbers:
+  posts-per-week, impressions per post, reactions per post, comments,
+  reposts. Include a short table of the top posts by raw engagement.
+  Do not bucket into high/low — show the numbers.
 
 Step 4 — google_search (run at least 3–5 queries)
-  Use what you learned from the transcripts and Ordinal data to search for:
+  Use what you learned from the transcripts and Ordinal data to search
+  for:
   • The client's ICP role: day-to-day pain points, KPIs, frustrations
-  • Industry trends and hot-button topics the client can credibly speak to
+  • Industry trends the client can credibly speak to
   • Peer/competitor LinkedIn posts that resonate with that ICP
   • Engagement benchmarks for the client's content category
+  Report raw findings — the writer will decide what matters.
 
-After completing research, DERIVE the following autonomously — do NOT ask the user:
-  • Audience bucket (A = has following but wrong ICP / B = ICP already present / C = inactive)
-  • ICP profile — from transcripts + search
-  • Voice fingerprint — from transcripts + any existing posts
+After completing research, derive ONLY the following:
+  • ICP profile — in the client's own words from the transcripts, plus
+    public-web evidence. Use direct quotes where you have them.
+  • Voice fingerprint — from transcripts and the client's existing posts.
+    Again, use direct quotes; don't abstract into style rules.
 
-The PRIMARY GOAL (pipeline / brand / mixed) is provided directly by the operator in the
-user message and must be treated as a confirmed directive — do not infer or second-guess it.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Do not derive audience-bucket letters, funnel-mix percentages,
+"priority post types," or any taxonomy of what kind of post qualifies
+as what. Those are decisions the downstream writer makes from the raw
+material you surface.
 
-CONTENT STRATEGY PLAYBOOK
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{playbook}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-LINKEDIN POST QUALITY STANDARDS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Great Posts
-  • One Main Idea (OMI): every element serves one intellectual point
-  • Meaty, substantive, opinionated — not announcements or diary entries
-  • Cohesive body: a skimmer follows the narrative arc
-  • No outright selling unless the OMI is about the poster's own company
-  • Formatting (bullets, →) used to accentuate a point, not fill space
-  • Rarely has a CTA unless it is a genuine lead magnet
-
-Hook Standards (<200 chars, usually)
-  • Piques curiosity AND hints at the OMI
-  • Can use: impressive numbers, subverted assumptions, ICP title callout, story climax
-
-Funnel Classification (only Great Posts qualify)
-  • TOFU — educational, broad authority-building
-  • MOFU — must (1) name specific ICP title in hook AND (2) be primarily about that role
-  • BOFU/ABM — tags specific companies/people positively; list ABM is highest leverage
-
-AI Writing Anti-Patterns — NEVER use
-  • "It's not just X; it's Y." / "Not A. But B."
-  • Casual hyperbole ("This one thing changes everything")
-  • Manufactured drama ("The quiet part no one says aloud…")
-  • "But here's the thing:" / excessive em dashes
-  • Short dramatic lead-up questions ("The number that matters? Their churn rate:")
-  • "What do you think? Let me know in the comments."
+The PRIMARY GOAL (pipeline / brand / mixed) is provided directly by the
+operator in the user message and must be passed through to your output
+verbatim — do not interpret, re-derive, or override it.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 OUTPUT FORMAT (clean Markdown)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Content Strategy: [Client Name]
+# Client Research: [Client Name]
 _Generated: [date]_
 
-## Client Intelligence Summary
-- ICP Profile (title, company type, pain points, KPIs, what they rarely hear)
-- Voice Fingerprint (tone, vocabulary, story patterns, what to avoid)
-- Bucket Classification (A / B / C + rationale drawn from Ordinal data)
-- Goal Alignment (pipeline / brand / mixed + how you inferred it)
-- LinkedIn Snapshot (follower count, growth trend, posting frequency, avg engagement)
-- Key Research Findings
+## Primary Goal (as provided by operator)
+[pipeline / brand / mixed — verbatim from user message]
 
-## Short-Term Strategy — Month 1
-- Objective
-- Content Mix (TOFU / MOFU / BOFU %)
-- Priority Post Types (with rationale)
-- 5 Specific Post Ideas (OMI · hook direction · funnel position · post type)
-- Key Performance Signals
-- Expectation-Setting Language for the client
+## ICP Profile
+- Direct quotes from transcripts describing the target audience
+- Role titles, company types, and specific pain points the client named
+- Public-web evidence on how that role talks online, what they post about,
+  what they react to
 
-## Medium-Term Strategy — Months 2–3
-- Objective · Content Mix · Priority Post Types
-- 5 Specific Post Ideas
-- Key Performance Signals · Potential Pivots
+## Voice Fingerprint
+- Direct quotes from the client's existing LinkedIn posts
+- Direct quotes from transcripts showing how the client speaks naturally
+- Specific phrases, turns of phrase, and story patterns the client uses
 
-## Long-Term Strategy — Months 4–6+
-- Objective · Content Mix (steady-state) · Priority Post Types
-- 5 Specific Post Ideas
-- Success Definition · Iteration Framework
+## Ordinal Snapshot (raw numbers only)
+- Follower count + 90-day daily trajectory
+- Post cadence (posts/week)
+- Top N posts by raw reactions, with impressions and reaction counts
+- Any posts with notably high or low engagement, with the raw numbers
 
-## Operational Notes for Post-Generation Agents
-Voice rules, ICP framing preferences, topics to lean into / avoid, hook style guidance.
+## Public Web Findings
+- Search query + the most relevant results for each of the 3–5 searches
+  you ran. Quote the relevant passages. Do not summarize them into
+  categorical conclusions.
+
+## Gaps and Unknowns
+- What you could not find and why it matters
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 
-def _build_system_prompt(playbook: str) -> str:
-    return _SYSTEM_TEMPLATE.format(playbook=playbook)
+def _build_system_prompt(playbook: str = "") -> str:
+    # The `playbook` parameter is retained for call-site compatibility but
+    # no longer injected — the playbook itself was a pre-authored pattern
+    # library. Raw research only.
+    return _SYSTEM_TEMPLATE
 
 
 def _build_user_message(
@@ -586,53 +566,10 @@ def _build_user_message(
             "the full strategy document."
         )
 
-    # Analyst findings — hypothesis-driven engagement analysis. The analyst
-    # agent tested statistical hypotheses against this client's data and
-    # LinkedIn-wide evidence. Herta gets the raw findings with confidence
-    # levels to inform its content strategy recommendations.
-    analyst_ctx = ""
-    try:
-        import json as _json_herta
-        from backend.src.db import vortex as _P_herta
-        _findings_path = _P_herta.memory_dir(client_name) / "analyst_findings.json"
-        if _findings_path.exists():
-            _af = _json_herta.loads(_findings_path.read_text(encoding="utf-8"))
-            _all_findings = _af.get("findings", [])
-            _runs = _af.get("runs", [])
-            # Latest run's findings only
-            if _runs and _all_findings:
-                _rid = _runs[-1].get("run_id")  # None for pre-migration
-                if _rid:
-                    _findings = [f for f in _all_findings if f.get("run_id") == _rid]
-                else:
-                    _findings = [f for f in _all_findings if f.get("run_id") is None] or _all_findings[-10:]
-            else:
-                _findings = _all_findings
-            if _findings:
-                _lines = [
-                    "## Engagement Analysis (auto-generated by analyst agent)\n",
-                    "Hypothesis-driven findings from statistical analysis of this "
-                    "client's engagement history and LinkedIn-wide data. Use these "
-                    "to inform your strategy recommendations.\n",
-                ]
-                for _f in _findings:
-                    _conf = _f.get("confidence", "suggestive")
-                    _claim = _f.get("claim", "")
-                    _evidence = _f.get("evidence", "")
-                    _lines.append(f"**[{_conf.upper()}]** {_claim}")
-                    if _evidence:
-                        _lines.append(f"  *Evidence: {_evidence[:300]}*")
-                    _lines.append("")
-                analyst_ctx = "\n".join(_lines)
-    except Exception:
-        pass
-
     base = (
         f"{header}\n\n---\n\n"
         f"## Client Source Files (transcripts + memory)\n\n{files_str}\n\n---\n\n"
     )
-    if analyst_ctx:
-        base += analyst_ctx + "\n---\n\n"
     base += research_hint
     return base
 
@@ -739,13 +676,18 @@ INCLUDE only:
   2. Three timeline sections — Short-Term, Medium-Term, Long-Term — each containing:
        • 3–5 punchy bullet points describing the core content themes / strategic moves
        • One sentence on the dominant content type for that period
-       • A simple CSS content-split bar showing the TOFU / MOFU / BOFU percentage breakdown
-         for that period (derive reasonable percentages from the strategy; use whole numbers
-         that sum to 100)
   3. A single "Pipeline Timeline" row: a minimal horizontal milestone strip showing roughly
      when the client should expect to see early pipeline signals, then consistent pipeline,
      using months (e.g. Month 1–2 → Brand awareness; Month 3–4 → First inbound signals;
      Month 5–6 → Consistent pipeline). Keep it to 3–4 milestones.
+  4. A "Before You Start" callout box placed between the goal box and the first timeline
+     section. Style: background #fffbeb, left border 4px solid #d97706, padding 14px 18px.
+     Label: "FOUNDATION STEP" in small caps, color #d97706, 11px, displayed above the body text.
+     Body (fixed copy, do not alter): "Before your first post, spend 1 to 2 weeks connecting
+     with your ICP on LinkedIn. Send 10 to 15 personalised connection requests per day to
+     people matching your target audience. Engage with their content first (like, comment),
+     then connect. Early ICP connections train LinkedIn's algorithm to route your posts toward
+     buyers from day one, cutting months off the time to first pipeline signal."
 
 EXCLUDE everything else:
   • No post idea cards, no hook directions, no OMI scores

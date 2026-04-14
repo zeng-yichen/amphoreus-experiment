@@ -1,18 +1,20 @@
-"""Draft scorer — rank candidate posts using the analyst's learned model.
+"""Draft scorer — rank candidate posts using continuous embedding similarity.
 
-Takes a batch of draft posts, extracts features from each (format_tag via
-the observation tagger, char_count, posting_hour), applies the analyst's
-model coefficients, and returns a ranked list with predicted engagement
-scores and explanations.
+Primary scoring path: k-NN in embedding space. The draft is embedded and
+compared to all scored historical posts by cosine similarity. The
+similarity-weighted average reward of the k nearest neighbors is the
+predicted engagement score. No categorical features, no human-readable
+labels — the 1536-dimensional embedding captures everything.
 
-This connects the analyst's statistical output to generation: instead of
-the model sitting in a JSON file as prose, its coefficients are applied
-to actual drafts to produce actionable rankings.
+Secondary scoring path: the analyst's coefficient model (char_count,
+posting_hour, quote-hook bonus). These are legitimate continuous features
+that don't impose a human taxonomy. The old format_tag regression feature
+has been removed — it was a categorical bottleneck.
 
-The scorer does NOT gate or filter. It ranks. The operator sees:
-  "Draft 3 scores highest (+0.42): storytelling, 2100 chars, 9am.
-   Draft 5 scores lowest (-0.31): hot take, 800 chars, 4pm."
-and decides the publishing order.
+Also computes:
+- Exploration value: 1 - max_similarity to any scored post
+- Trajectory alignment: cosine similarity to the reward-weighted centroid
+  from the embedding trajectory model (warns about audience fatigue)
 
 Usage:
     from backend.src.utils.draft_scorer import score_drafts
@@ -46,30 +48,22 @@ class ScoredDraft:
     features: dict             # extracted feature values
     explanation: str           # human-readable "why this score"
     model_source: str          # "analyst_model+embedding_knn" | "embedding_knn" | "no_model"
-    model_ready: bool = False  # True when coefficient model is validated (LOO R² > 0.1, n >= 15)
-
-
-def _model_is_ready(model_spec: dict, n_observations: int) -> bool:
-    """Check if the analyst's model is validated enough to trust its coefficients.
-
-    LOO R² > 0.1 means the model explains at least 10% of out-of-sample variance.
-    n >= 15 means the model has enough data to be non-trivial.
-    Below these thresholds, the coefficient path is noise — fall back to k-NN.
-    """
-    loo_r2 = model_spec.get("loo_r2", -999)
-    return loo_r2 > 0.1 and n_observations >= 15
+    # Continuous provenance — no binary ready/not-ready gate. Downstream
+    # code surfaces these raw numbers and decides how much to trust the
+    # coefficient path based on the actual model fit, not on a hand-tuned
+    # cutoff. Bitter Lesson: feed the raw metadata, let the reader judge.
+    loo_r2: float = -999.0
+    n_observations: int = 0
 
 
 def _compute_training_stats(company: str) -> dict:
     """Compute feature normalization stats from the client's actual observations.
 
-    These are the same statistics the regression used during training (z-normalization
-    and target encoding). By computing them from the real data, we apply the
-    analyst's coefficients in the same feature space they were learned in.
-    No hardcoded means, no assumed standard deviations.
+    Only continuous features: char_count and posting_hour. The old format_tag
+    target encoding has been removed — categorical labels are no longer part
+    of the scoring pipeline.
     """
     import math
-    from collections import defaultdict
 
     try:
         from backend.src.db.local import initialize_db, ruan_mei_load
@@ -83,13 +77,12 @@ def _compute_training_stats(company: str) -> dict:
 
     scored = [
         o for o in state.get("observations", [])
-        if o.get("status") == "scored"
+        if o.get("status") in ("scored", "finalized")
         and o.get("reward", {}).get("immediate") is not None
     ]
     if not scored:
         return {}
 
-    # Char count stats
     char_counts = [
         len(o.get("posted_body") or o.get("post_body") or "")
         for o in scored
@@ -99,7 +92,6 @@ def _compute_training_stats(company: str) -> dict:
         sum((c - char_mean) ** 2 for c in char_counts) / max(len(char_counts) - 1, 1)
     ) if len(char_counts) > 1 else 1.0
 
-    # Posting hour stats
     hours = []
     for o in scored:
         ts = o.get("posted_at", "")
@@ -115,44 +107,145 @@ def _compute_training_stats(company: str) -> dict:
         sum((h - hour_mean) ** 2 for h in hours) / max(len(hours) - 1, 1)
     ) if len(hours) > 1 else 3.0
 
-    # Format tag target encoding: mean reward per format
-    format_rewards_agg: dict = defaultdict(list)
-    all_rewards = []
-    for o in scored:
-        fmt = o.get("format_tag")
-        reward = o.get("reward", {}).get("immediate", 0)
-        all_rewards.append(reward)
-        if fmt:
-            format_rewards_agg[fmt].append(reward)
+    all_rewards = [o.get("reward", {}).get("immediate", 0) for o in scored]
     global_mean = sum(all_rewards) / len(all_rewards) if all_rewards else 0
-
-    format_rewards = {
-        fmt: sum(rs) / len(rs)
-        for fmt, rs in format_rewards_agg.items()
-    }
-
-    # Stats of the target-encoded format values (for z-normalization)
-    if format_rewards:
-        fmt_encoded = [format_rewards.get(o.get("format_tag", ""), global_mean) for o in scored]
-        fmt_mean = sum(fmt_encoded) / len(fmt_encoded)
-        fmt_std = math.sqrt(
-            sum((v - fmt_mean) ** 2 for v in fmt_encoded) / max(len(fmt_encoded) - 1, 1)
-        ) if len(fmt_encoded) > 1 else 1.0
-    else:
-        fmt_mean = 0.0
-        fmt_std = 1.0
 
     return {
         "char_count_mean": round(char_mean, 1),
         "char_count_std": round(char_std, 1),
         "posting_hour_mean": round(hour_mean, 1),
         "posting_hour_std": round(hour_std, 1),
-        "format_rewards": {k: round(v, 4) for k, v in format_rewards.items()},
-        "format_mean": round(fmt_mean, 4),
-        "format_std": round(fmt_std, 4),
         "reward_mean": round(global_mean, 4),
         "observation_count": len(scored),
     }
+
+
+def _score_by_trajectory_offset_knn(
+    company: str,
+    text: str,
+    k: int = 5,
+) -> tuple[Optional[float], str]:
+    """Score a draft by k-NN in trajectory-relative embedding space.
+
+    Instead of asking "which historical posts are similar to this draft?"
+    (absolute k-NN), this asks "which historical posts are in the same
+    *direction* from our current position as this draft?"
+
+    The offset query:
+        query = normalize(draft_embedding - recent_centroid)
+
+    Each historical post is also projected relative to the recent centroid:
+        h_offset = normalize(post_embedding - recent_centroid)
+
+    k-NN is run on these offsets. The result is: "given where we've been
+    recently, which historical transitions does this draft resemble?"
+
+    A contrarian post after a run of case studies looks like a different
+    historical moment than the same post would look after a run of hot takes.
+    The trajectory-relative query surfaces that context; absolute k-NN misses it.
+    """
+    import numpy as np
+
+    traj_path = vortex.memory_dir(company) / "embedding_trajectory.json"
+    if not traj_path.exists():
+        return None, "No trajectory model (need 8+ scored posts)"
+
+    try:
+        traj = json.loads(traj_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None, "Failed to load trajectory model"
+
+    recent_centroid = traj.get("recent_centroid")
+    if not recent_centroid:
+        return None, "No recent centroid in trajectory model"
+
+    from backend.src.utils.post_embeddings import get_post_embeddings, embed_text
+
+    draft_emb = embed_text(text)
+    if draft_emb is None:
+        return None, "Failed to embed draft"
+
+    centroid_np = np.array(recent_centroid, dtype=np.float64)
+    centroid_norm = np.linalg.norm(centroid_np)
+    if centroid_norm > 1e-10:
+        centroid_np = centroid_np / centroid_norm
+
+    draft_np = np.array(draft_emb, dtype=np.float64)
+    draft_norm = np.linalg.norm(draft_np)
+    if draft_norm > 1e-10:
+        draft_np = draft_np / draft_norm
+
+    # Offset: draft direction minus recent trajectory direction
+    offset = draft_np - centroid_np
+    offset_norm = np.linalg.norm(offset)
+    if offset_norm < 1e-10:
+        return None, "Draft is indistinguishable from recent trajectory (no directional signal)"
+    offset = offset / offset_norm
+
+    embeddings = get_post_embeddings(company)
+    if not embeddings:
+        return None, "No post embeddings"
+
+    # Score each historical post by cosine similarity of its offset to draft's offset
+    neighbors: list[tuple[str, float]] = []
+    for h, emb in embeddings.items():
+        emb_np = np.array(emb, dtype=np.float64)
+        emb_norm = np.linalg.norm(emb_np)
+        if emb_norm < 1e-10:
+            continue
+        emb_np = emb_np / emb_norm
+        h_offset = emb_np - centroid_np
+        h_norm = np.linalg.norm(h_offset)
+        if h_norm < 1e-10:
+            continue
+        h_offset = h_offset / h_norm
+        sim = float(np.dot(offset, h_offset))
+        neighbors.append((h, sim))
+
+    neighbors.sort(key=lambda x: x[1], reverse=True)
+    top_neighbors = neighbors[:k]
+
+    try:
+        from backend.src.db.local import initialize_db, ruan_mei_load
+        initialize_db()
+        state = ruan_mei_load(company)
+    except Exception:
+        return None, "Failed to load observations"
+    if state is None:
+        return None, "No observation state"
+
+    obs_by_hash = {
+        o.get("post_hash"): o
+        for o in state.get("observations", [])
+        if o.get("status") in ("scored", "finalized")
+    }
+
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    neighbor_details = []
+    for h, sim in top_neighbors:
+        obs = obs_by_hash.get(h)
+        if not obs:
+            continue
+        reward = obs.get("reward", {}).get("immediate")
+        if reward is None:
+            continue
+        weighted_sum += sim * reward
+        weight_sum += sim
+        body = (obs.get("posted_body") or obs.get("post_body") or "")
+        neighbor_details.append(
+            f"sim={sim:.2f}/reward={reward:+.2f} \"{body[:50].strip()}...\""
+        )
+
+    if weight_sum < 1e-6:
+        return None, "No trajectory-relative neighbors with rewards"
+
+    pred = weighted_sum / weight_sum
+    explanation = (
+        f"Trajectory-offset k-NN {pred:+.3f} (relative to current position): "
+        + "; ".join(neighbor_details[:3])
+    )
+    return pred, explanation
 
 
 def _score_by_embedding_knn(
@@ -200,7 +293,7 @@ def _score_by_embedding_knn(
     obs_by_hash = {
         o.get("post_hash"): o
         for o in state.get("observations", [])
-        if o.get("status") == "scored"
+        if o.get("status") in ("scored", "finalized")
     }
 
     # Similarity-weighted reward average
@@ -219,7 +312,7 @@ def _score_by_embedding_knn(
         body = (obs.get("posted_body") or obs.get("post_body") or "")
         neighbor_details.append(
             f"sim={sim:.2f}/reward={reward:+.2f} "
-            f"({obs.get('format_tag', '?')}) \"{body[:60].strip()}...\""
+            f"\"{body[:60].strip()}...\""
         )
 
     if weight_sum < 1e-6:
@@ -239,41 +332,37 @@ def score_drafts(
     drafts: list[dict],
     default_hour: int = 9,
 ) -> list[ScoredDraft]:
-    """Score and rank a batch of draft posts using BOTH scoring paths.
+    """Score and rank a batch of draft posts using continuous features only.
 
     Two independent predictions per draft:
 
     1. **Coefficient-based** (from the analyst's regression model):
-       Applies learned coefficients to format_tag, char_count, posting_hour.
-       Uses the client's actual observation statistics for normalization.
+       Applies learned coefficients to char_count, posting_hour.
+       No categorical features — operates on continuous dimensions.
 
     2. **Embedding-based** (k-NN in continuous vector space):
        Embeds the draft, finds the k most similar scored posts by cosine
        similarity, returns their similarity-weighted reward average.
-       No category labels needed — operates in continuous space.
 
     The final score is the average of both paths (when both are available).
-    If only one path produces a score, that score is used alone. The
-    explanation shows both scores so the operator sees agreement/disagreement.
     """
     if not drafts:
         return []
 
     model_spec, model_source = _load_model(company)
 
-    # Model readiness gate: if the coefficient model isn't validated
-    # (LOO R² < 0.1 or n < 15), skip the coefficient path entirely
-    # and fall back to k-NN only. Coefficients from a noise model
-    # produce misleading scores.
-    training_stats = {}
-    coeff_ready = False
+    # No binary readiness gate — always compute the coefficient path when a
+    # model exists, and surface raw provenance (loo_r2, n_observations) so
+    # downstream readers decide how much to trust it from the numbers rather
+    # than from a hand-tuned cutoff.
+    training_stats: dict = {}
+    training_stats_full: dict = {}
     if model_source == "analyst_model":
         training_stats_full = _compute_training_stats(company)
-        coeff_ready = _model_is_ready(model_spec, training_stats_full.get("observation_count", 0))
-        if coeff_ready:
-            training_stats = training_stats_full
-        else:
-            model_source = "embedding_knn"  # downgrade to k-NN only
+        training_stats = training_stats_full
+
+    loo_r2_val = float(model_spec.get("loo_r2", -999.0))
+    n_obs_val = int(training_stats_full.get("observation_count", 0))
 
     scored: list[ScoredDraft] = []
 
@@ -284,46 +373,64 @@ def score_drafts(
                 rank=0, text=text, predicted_score=0.0,
                 exploration_value=0.0,
                 features={}, explanation="Empty draft",
-                model_source="no_model", model_ready=False,
+                model_source="no_model",
+                loo_r2=loo_r2_val, n_observations=n_obs_val,
             ))
             continue
 
         hour = draft.get("scheduled_hour", default_hour)
         features = _extract_features(text, hour)
 
-        # Path 1: coefficient-based
+        # Path 1: coefficient-based (analyst's regression on continuous features)
         coeff_score, coeff_explanation = _apply_model(
             features, model_spec, model_source,
             training_stats=training_stats,
         )
 
-        # Path 2: embedding k-NN
+        # Path 2: absolute embedding k-NN
         knn_score, knn_explanation = _score_by_embedding_knn(company, text)
 
-        # Combine: average both paths when available
-        if model_source != "no_model" and knn_score is not None:
-            combined = (coeff_score + knn_score) / 2
-            source = "analyst_model+embedding_knn"
-            explanation = (
-                f"Combined {combined:+.3f} = "
-                f"coeff {coeff_score:+.3f} + knn {knn_score:+.3f} / 2\n"
-                f"  Coeff: {coeff_explanation}\n"
-                f"  k-NN: {knn_explanation}"
+        # Path 3: trajectory-offset k-NN
+        # Asks "which historical posts are in the same direction from our
+        # current position?" rather than "which posts are similar in absolute
+        # content space?" Conditions the score on sequential context.
+        traj_score, traj_explanation = _score_by_trajectory_offset_knn(company, text)
+
+        # Combine: average all available paths
+        path_scores: list[float] = []
+        active_sources: list[str] = []
+        explanation_parts: list[str] = []
+
+        if model_source != "no_model":
+            path_scores.append(coeff_score)
+            active_sources.append("analyst_model")
+            explanation_parts.append(f"  Coeff: {coeff_explanation}")
+        if knn_score is not None:
+            path_scores.append(knn_score)
+            active_sources.append("embedding_knn")
+            explanation_parts.append(f"  k-NN: {knn_explanation}")
+        if traj_score is not None:
+            path_scores.append(traj_score)
+            active_sources.append("trajectory_knn")
+            explanation_parts.append(f"  Trajectory: {traj_explanation}")
+
+        if path_scores:
+            combined = sum(path_scores) / len(path_scores)
+            source = "+".join(active_sources)
+            scores_str = " + ".join(
+                f"{s:+.3f}" for s in path_scores
             )
-        elif model_source != "no_model":
-            combined = coeff_score
-            source = "analyst_model"
-            explanation = coeff_explanation
-        elif knn_score is not None:
-            combined = knn_score
-            source = "embedding_knn"
-            explanation = knn_explanation
+            explanation = (
+                f"Combined {combined:+.3f} = avg({scores_str})\n"
+                + "\n".join(explanation_parts)
+            )
         else:
             combined = 0.0
             source = "no_model"
             explanation = "No scoring model available."
 
         features["knn_score"] = knn_score
+        features["traj_score"] = traj_score
         features["coeff_score"] = coeff_score if model_source != "no_model" else None
 
         # Exploration value: how much would the system learn from publishing
@@ -341,7 +448,8 @@ def score_drafts(
             features=features,
             explanation=explanation,
             model_source=source,
-            model_ready=coeff_ready,
+            loo_r2=loo_r2_val,
+            n_observations=n_obs_val,
         ))
 
     # Rank by predicted engagement (highest first).
@@ -385,64 +493,26 @@ def _compute_exploration_value(company: str, text: str) -> float:
 
 
 def _load_model(company: str) -> tuple[dict, str]:
-    """Load the latest analyst model for a client.
+    """Coefficient-model path is retired (2026-04-11).
 
-    Returns (model_spec, source_label). Falls back to a basic heuristic
-    if no analyst model exists.
+    Previously this loaded a regression model the analyst wrote to
+    analyst_findings.json. The analyst has been deleted as a Bitter
+    Lesson violation. The draft scorer now relies on embedding k-NN
+    + trajectory-offset k-NN paths exclusively.
     """
-    findings_path = vortex.memory_dir(company) / "analyst_findings.json"
-    if not findings_path.exists():
-        return {}, "no_model"
-
-    try:
-        data = json.loads(findings_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}, "no_model"
-
-    # Find the latest model entry
-    runs = data.get("runs", [])
-    findings = data.get("findings", [])
-
-    if not runs or not findings:
-        return {}, "no_model"
-
-    # Walk backwards through runs to find the most recent model
-    for run in reversed(runs):
-        rid = run.get("run_id", "")
-        run_models = [
-            f for f in findings
-            if f.get("type") == "model" and f.get("run_id") == rid
-        ]
-        if run_models:
-            spec = run_models[-1].get("model_spec", {})
-            if spec and spec.get("coefficients"):
-                return spec, "analyst_model"
-
     return {}, "no_model"
 
 
 def _extract_features(text: str, posting_hour: int) -> dict:
-    """Extract the features the analyst's model needs from a draft."""
+    """Extract continuous features from a draft. No categorical labels."""
     features: dict = {
         "char_count": len(text),
         "posting_hour": posting_hour,
-        "format_tag": "unknown",
         "has_quote_hook": False,
     }
 
-    # Extract format_tag via the observation tagger
-    try:
-        from backend.src.utils.observation_tagger import tag_post
-        tags = tag_post(text)
-        if tags and tags.get("format_tag"):
-            features["format_tag"] = tags["format_tag"]
-    except Exception:
-        pass
-
-    # Detect quote-led hook (verbatim quote in first 200 chars)
     opening = text[:200]
     if '"' in opening or '\u201c' in opening or '\u201d' in opening:
-        # Check if it's a substantial quote (not just a single quoted word)
         quote_matches = re.findall(r'["\u201c](.+?)["\u201d]', opening)
         if any(len(q) > 15 for q in quote_matches):
             features["has_quote_hook"] = True
@@ -456,23 +526,10 @@ def _apply_model(
     model_source: str,
     training_stats: Optional[dict] = None,
 ) -> tuple[float, str]:
-    """Apply the analyst's regression model directly to produce a score.
+    """Apply the analyst's regression model to continuous features only.
 
-    No hardcoded bands, no assumed mean/std, no hand-engineered heuristic
-    layer. The analyst spent 80 turns building a regression with real
-    coefficients from real data. This function applies those coefficients.
-
-    For format_tag: uses target encoding (mean reward per format) computed
-    from the client's actual observations, same encoding the regression
-    used during training.
-
-    For numeric features (char_count, posting_hour): z-normalizes using
-    the client's actual feature distributions, same normalization the
-    regression used during training.
-
-    The quote-hook bonus is the ONE non-regression component: it comes
-    from the analyst's model_spec.heuristic_layer, not from hardcoded
-    values. If the analyst didn't include a hook bonus, none is applied.
+    Uses char_count and posting_hour (z-normalized from training data)
+    plus the analyst's optional quote-hook bonus. No categorical features.
     """
     if model_source == "no_model":
         return 0.0, "No analyst model available. Drafts are unscored."
@@ -481,32 +538,12 @@ def _apply_model(
     intercept = model_spec.get("intercept", 0.0)
     stats = training_stats or {}
 
-    format_tag = features.get("format_tag", "unknown")
     char_count = features.get("char_count", 1500)
     posting_hour = features.get("posting_hour", 9)
 
     score = intercept
     explanation_parts = []
 
-    # Format contribution — target-encoded from training data
-    format_coeff = coefficients.get("format_tag", 0)
-    if format_coeff != 0:
-        format_rewards = stats.get("format_rewards", {})
-        global_mean = stats.get("reward_mean", 0)
-        # Target encoding: replace format name with its mean reward from training
-        target_val = format_rewards.get(format_tag, global_mean)
-        # Z-normalize using the format feature's distribution from training
-        fmt_mean = stats.get("format_mean", 0)
-        fmt_std = stats.get("format_std", 1)
-        fmt_z = (target_val - fmt_mean) / fmt_std if fmt_std > 1e-6 else 0
-        fmt_contribution = format_coeff * fmt_z
-        score += fmt_contribution
-        if abs(fmt_contribution) > 0.01:
-            explanation_parts.append(
-                f"format '{format_tag}' (avg reward {target_val:+.2f}): {fmt_contribution:+.3f}"
-            )
-
-    # Char count contribution — z-normalized from training data
     char_coeff = coefficients.get("char_count", 0)
     if char_coeff != 0:
         char_mean = stats.get("char_count_mean", 2000)
@@ -519,7 +556,6 @@ def _apply_model(
                 f"length {char_count} chars (vs avg {char_mean:.0f}): {char_contribution:+.3f}"
             )
 
-    # Posting hour contribution — z-normalized from training data
     hour_coeff = coefficients.get("posting_hour", 0)
     if hour_coeff != 0:
         hour_mean = stats.get("posting_hour_mean", 12)
@@ -532,14 +568,10 @@ def _apply_model(
                 f"posting hour {posting_hour}:00 (vs avg {hour_mean:.0f}:00): {hour_contribution:+.3f}"
             )
 
-    # Quote-hook bonus — from the analyst's model_spec, NOT hardcoded.
-    # The analyst decides whether to include a hook bonus and how large it
-    # should be. If the model_spec doesn't have one, none is applied.
     heuristic = model_spec.get("heuristic_layer", {})
     hook_bonus_str = heuristic.get("scoring_guidance", {}).get("hook_bonus", "")
     if features.get("has_quote_hook") and hook_bonus_str:
         try:
-            # Parse "+0.4 if verbatim customer quote..." → 0.4
             hook_bonus = float(hook_bonus_str.split()[0].replace("+", ""))
         except (ValueError, IndexError):
             hook_bonus = 0
@@ -547,7 +579,6 @@ def _apply_model(
             score += hook_bonus
             explanation_parts.append(f"quote hook (analyst bonus): +{hook_bonus:.2f}")
 
-    # Build explanation
     loo_r2 = model_spec.get("loo_r2", "?")
     if explanation_parts:
         explanation = f"Score {score:+.3f} = " + " + ".join(explanation_parts)
@@ -592,16 +623,14 @@ def score_and_explain_batch(company: str, posts: list[dict]) -> str:
 
     for s in scored:
         hook = s.text[:80].replace("\n", " ").strip()
-        explore_label = ""
-        if s.exploration_value > 0.5:
-            explore_label = " 🔬 HIGH EXPLORATION"
-        elif s.exploration_value > 0.3:
-            explore_label = " 🔬 moderate exploration"
+        # Raw numbers only — no categorical high/moderate/low label. Readers
+        # (model or human) decide what "high exploration" means from the
+        # continuous score.
         lines.append(
-            f"**#{s.rank}** | `{s.predicted_score:+.3f}` | "
-            f"exploration `{s.exploration_value:.2f}`{explore_label} | "
-            f"*{s.features.get('format_tag', '?')}*, "
-            f"{s.features.get('char_count', '?')} chars"
+            f"**#{s.rank}** | predicted=`{s.predicted_score:+.3f}` | "
+            f"exploration=`{s.exploration_value:.2f}` | "
+            f"{s.features.get('char_count', '?')} chars | "
+            f"loo_r2=`{s.loo_r2:+.3f}` n_obs=`{s.n_observations}`"
         )
         lines.append(f"> {hook}...")
         lines.append(f"  {s.explanation}")
@@ -612,19 +641,12 @@ def score_and_explain_batch(company: str, posts: list[dict]) -> str:
     worst = scored[-1]
     spread = best.predicted_score - worst.predicted_score
     lines.append(
-        f"**Spread:** {spread:.3f} "
-        f"(#{best.rank} '{best.features.get('format_tag')}' vs "
-        f"#{worst.rank} '{worst.features.get('format_tag')}')"
+        f"**Spread:** {spread:.3f} (#{best.rank} vs #{worst.rank})"
     )
-
-    # Exploration recommendation
     most_novel = max(scored, key=lambda s: s.exploration_value)
-    if most_novel.exploration_value > 0.3 and most_novel.rank > 1:
-        lines.append(
-            f"\n**Exploration opportunity:** Draft #{most_novel.rank} "
-            f"(exploration={most_novel.exploration_value:.2f}) is the most novel — "
-            f"no similar posts in history. Publishing it would teach the model "
-            f"more than the higher-ranked drafts."
-        )
+    lines.append(
+        f"**Most novel:** #{most_novel.rank} "
+        f"(exploration={most_novel.exploration_value:.2f})"
+    )
 
     return "\n".join(lines)

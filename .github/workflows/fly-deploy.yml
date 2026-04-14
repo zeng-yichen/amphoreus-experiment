@@ -1,0 +1,108 @@
+# Fly.io auto-deploy on push to main.
+#
+# DORMANT BY DEFAULT: this workflow will do nothing until the following
+# repository secret is set:
+#
+#     FLY_API_TOKEN   # create with: fly tokens create deploy -x 8760h
+#
+# Once the secret exists, every push to main will deploy both apps. If the
+# secret is missing, the workflow is a no-op (the deploy jobs will skip).
+#
+# Scope:
+# - backend  → amphoreus.fly.dev   (backend/fly.toml, backend/Dockerfile)
+# - frontend → cyrene.fly.dev      (frontend/fly.toml, frontend/Dockerfile)
+#
+# Manual trigger: the `workflow_dispatch` entry lets you kick a deploy from
+# the GitHub UI without pushing a commit — useful for rolling back to a
+# previous commit by checking out that SHA and re-running.
+
+name: Fly Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - ".github/workflows/fly-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which app(s) to deploy"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - backend
+          - frontend
+
+# Concurrency: one deploy at a time per app. A new push cancels an in-flight
+# deploy on the same branch — Fly's rolling strategy handles the cutover.
+concurrency:
+  group: fly-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-backend:
+    name: Deploy backend (amphoreus)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      github.event.inputs.target == 'both' ||
+      github.event.inputs.target == 'backend'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check FLY_API_TOKEN is set
+        run: |
+          if [ -z "${{ secrets.FLY_API_TOKEN }}" ]; then
+            echo "::warning::FLY_API_TOKEN secret is not set — skipping deploy."
+            echo "To enable: fly tokens create deploy -x 8760h  → paste into repo secrets"
+            exit 0
+          fi
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+        if: ${{ secrets.FLY_API_TOKEN != '' }}
+
+      - name: flyctl deploy (backend)
+        if: ${{ secrets.FLY_API_TOKEN != '' }}
+        run: |
+          flyctl deploy \
+            --config backend/fly.toml \
+            --dockerfile backend/Dockerfile \
+            --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  deploy-frontend:
+    name: Deploy frontend (cyrene)
+    runs-on: ubuntu-latest
+    # Only deploy frontend after backend succeeds, so a bad API shape can't
+    # leave the frontend pointing at nonexistent endpoints.
+    needs: deploy-backend
+    if: >-
+      always() &&
+      (needs.deploy-backend.result == 'success' || needs.deploy-backend.result == 'skipped') &&
+      (github.event_name == 'push' ||
+       github.event.inputs.target == 'both' ||
+       github.event.inputs.target == 'frontend')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check FLY_API_TOKEN is set
+        run: |
+          if [ -z "${{ secrets.FLY_API_TOKEN }}" ]; then
+            echo "::warning::FLY_API_TOKEN secret is not set — skipping deploy."
+            exit 0
+          fi
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+        if: ${{ secrets.FLY_API_TOKEN != '' }}
+
+      - name: flyctl deploy (frontend)
+        if: ${{ secrets.FLY_API_TOKEN != '' }}
+        working-directory: frontend
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

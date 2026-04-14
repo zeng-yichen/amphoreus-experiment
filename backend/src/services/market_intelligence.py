@@ -51,7 +51,7 @@ _DEFAULT_MAX_POSTS = 50
 _DEFAULT_SCRAPE_INTERVAL = 6
 _DEFAULT_ROTATION_INTERVAL = 14
 _DEFAULT_CORE_RATIO = 0.70
-_APIFY_PROFILE_POSTS_ACTOR = "apimaestro~linkedin-profile-post-scraper"
+_APIFY_PROFILE_POSTS_ACTOR = "apimaestro~linkedin-profile-posts"
 
 
 class MarketIntelAdaptiveConfig:
@@ -263,7 +263,7 @@ def seed_creator_registry(company: str) -> dict:
     try:
         from backend.src.agents.ruan_mei import RuanMei
         rm = RuanMei(company)
-        scored = [o for o in rm._state.get("observations", []) if o.get("status") == "scored"]
+        scored = [o for o in rm._state.get("observations", []) if o.get("status") in ("scored", "finalized")]
         scored.sort(key=lambda o: o.get("reward", {}).get("immediate", 0), reverse=True)
         top_analyses = [o.get("descriptor", {}).get("analysis", "")[:150] for o in scored[:5]]
         top_topics = "\n".join(f"- {a}" for a in top_analyses if a)
@@ -417,13 +417,40 @@ def collect_market_intel(vertical: str) -> list[dict]:
             posts = resp.json()
             if isinstance(posts, list):
                 for p in posts:
+                    stats = p.get("stats") or {}
+                    author = p.get("author") or {}
+                    posted_at_obj = p.get("posted_at") or {}
                     all_posts.append({
                         "text": (p.get("text") or p.get("commentary") or p.get("content") or "").strip(),
-                        "reactions": p.get("likeCount") or p.get("reactions") or 0,
-                        "comments": p.get("commentCount") or p.get("comments") or 0,
-                        "reposts": p.get("shareCount") or p.get("reposts") or 0,
-                        "posted_at": p.get("postedAt") or p.get("publishedAt") or "",
-                        "creator_name": p.get("authorName") or p.get("author", {}).get("name", ""),
+                        "reactions": (
+                            stats.get("total_reactions")
+                            or p.get("likeCount")
+                            or p.get("reactions")
+                            or 0
+                        ),
+                        "comments": (
+                            stats.get("comments")
+                            or p.get("commentCount")
+                            or p.get("comments")
+                            or 0
+                        ),
+                        "reposts": (
+                            stats.get("reposts")
+                            or p.get("shareCount")
+                            or p.get("reposts")
+                            or 0
+                        ),
+                        "posted_at": (
+                            (posted_at_obj.get("date") if isinstance(posted_at_obj, dict) else "")
+                            or p.get("postedAt")
+                            or p.get("publishedAt")
+                            or ""
+                        ),
+                        "creator_name": (
+                            (f"{author.get('first_name', '')} {author.get('last_name', '')}".strip() if author else "")
+                            or p.get("authorName")
+                            or ""
+                        ),
                         "creator_url": url,
                         "creator_followers": p.get("authorFollowers") or 0,
                     })
@@ -611,7 +638,7 @@ def _replenish_pool(vertical: str, registry: dict) -> None:
 def extract_market_signals(vertical: str) -> dict:
     """Extract trending topics, hook shifts, and whitespace from weekly scrape.
 
-    Uses LOLA's sentence-transformers model for embedding-based topic clustering.
+    Uses OpenAI text-embedding-3-small for embedding-based topic clustering.
     """
     # Load this week's and last week's posts
     v_dir = _vertical_dir(vertical)
@@ -681,7 +708,7 @@ def extract_market_signals(vertical: str) -> dict:
 def _detect_trending_topics(this_week: list[dict], last_week: list[dict]) -> list[dict]:
     """Embed posts, cluster by similarity, detect topic velocity changes."""
     try:
-        from backend.src.agents.lola import _embed_texts, _cosine_similarity
+        from backend.src.utils.post_embeddings import embed_texts as _embed_texts, cosine_similarity as _cosine_similarity
     except ImportError:
         return []
 
@@ -838,7 +865,7 @@ def _detect_whitespace(company: str, trending_topics: list[dict]) -> list[dict]:
     try:
         from backend.src.agents.ruan_mei import RuanMei
         rm = RuanMei(company)
-        scored = [o for o in rm._state.get("observations", []) if o.get("status") == "scored"]
+        scored = [o for o in rm._state.get("observations", []) if o.get("status") in ("scored", "finalized")]
     except Exception:
         return []
 
@@ -850,7 +877,7 @@ def _detect_whitespace(company: str, trending_topics: list[dict]) -> list[dict]:
 
     # Embed client's recent posts and trending topics, compare in embedding space
     try:
-        from backend.src.agents.lola import _embed_texts
+        from backend.src.utils.post_embeddings import embed_texts as _embed_texts
     except ImportError:
         return []
 
@@ -1107,7 +1134,7 @@ def _check_strategy_triggers(vertical: str, signals: dict, registry: dict) -> li
                 company, topic[:60],
             )
 
-            # Auto-plan series if LOLA arm is hot
+            # Auto-plan series (deprecated — was LOLA-based)
             try:
                 from backend.src.services.series_engine import plan_series, get_active_series
                 active = get_active_series(company)
@@ -1124,55 +1151,9 @@ def _check_strategy_triggers(vertical: str, signals: dict, registry: dict) -> li
 
 
 def auto_plan_series_from_lola(company: str) -> dict | None:
-    """Auto-plan a series when a LOLA arm hits 3+ consecutive above-median posts.
+    """DEPRECATED: LOLA arm-based series planning is no longer used.
 
-    Called during ordinal_sync or on-demand. No human gate.
+    Content intelligence is now handled by RuanMei.recommend_context().
+    Kept as a no-op stub so existing callers don't crash.
     """
-    try:
-        from backend.src.agents.lola import LOLA
-        from backend.src.services.series_engine import plan_series, get_active_series
-    except ImportError:
-        return None
-
-    lola = LOLA(company)
-    arms = lola._arms()
-
-    if not arms:
-        return None
-
-    # Find arms with strong momentum
-    topic_arms = [a for a in arms if a.arm_type == "topic" and a.n_pulls >= 3 and not a.retired]
-    if not topic_arms:
-        return None
-
-    # Median reward across all pulled arms
-    all_rewards = [a.mean_reward for a in arms if a.n_pulls > 0]
-    if not all_rewards:
-        return None
-    median_reward = sorted(all_rewards)[len(all_rewards) // 2]
-
-    for arm in topic_arms:
-        if arm.mean_reward <= median_reward:
-            continue
-
-        # Check if there's already an active series on this topic
-        active = get_active_series(company)
-        active_themes = {s.get("theme", "").lower() for s in active}
-        if arm.description.lower()[:30] in " ".join(active_themes):
-            continue
-
-        # Check consecutive above-median (using last 3 observations)
-        # We approximate by checking the arm's recent performance
-        if arm.last_reward > median_reward and arm.prev_reward > median_reward:
-            logger.info(
-                "[market_intel] Auto-planning series for %s: arm '%s' (avg %.3f > median %.3f)",
-                company, arm.label, arm.mean_reward, median_reward,
-            )
-            return plan_series(
-                company,
-                theme=arm.description,
-                topic_arm=arm.label,
-                num_posts=4,
-            )
-
     return None

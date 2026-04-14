@@ -1,155 +1,59 @@
 """LLM-native ICP scorer for post engagers (bitter-lesson aligned).
 
-Semantically evaluates engager headlines against a free-text ICP
-description and anti-description using Claude Haiku.
+Semantically evaluates engager headlines against raw client transcripts
+using Claude Sonnet. Returns a continuous per-engager score in [0, 1]
+plus the mean (`icp_match_rate`).
 
-Scoring is continuous 0.0-1.0 per engager (preserves full gradient):
-  1.0 = perfect ICP match
-  0.5 = adjacent/plausible
-  0.0 = anti-ICP or completely off-target
+No segment buckets, no hand-tuned category thresholds, no curated ICP
+definition JSON. Downstream consumers that want to reason about
+"how ICP-ish" an engager is read the raw continuous score directly.
 
-The scorer returns both a scalar mean and a segment breakdown dict
-(derived from the continuous scores for backward compatibility).
-
-Per-client ICP definition lives at ``memory/{company}/icp_definition.json``::
-
-    {
-        "description": "Free-text description of ideal engager profiles...",
-        "anti_description": "Free-text description of off-target profiles..."
-    }
+Retired 2026-04-11: the `icp_definition.json` path (a curated prose
+summary of who the audience is) has been removed as a Bitter Lesson
+violation. The scorer now always derives audience context from the
+client's transcripts directly via `_load_icp_context`.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-def _load_icp(company: str) -> Optional[dict]:
-    from backend.src.db.vortex import icp_definition_path
-    p = icp_definition_path(company)
-    if not p.exists():
-        return None
-    try:
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.warning("[icp_scorer] Failed to load ICP for %s: %s", company, e)
-        return None
+def score_engagers_segmented(company: str, headlines: list[dict | str]) -> dict:
+    """Score engagers with continuous 0-1 relevance scores.
 
-
-_DEFAULT_ICP_SEGMENT_THRESHOLDS = {"exact": 0.75, "adjacent": 0.40, "neutral": 0.20}
-_MIN_OBS_FOR_ADAPTIVE_ICP_SEGMENTS = 15
-
-
-def _get_segment_thresholds(company: str) -> dict:
-    """Return ICP segment boundaries — percentile-based when enough data exists.
-
-    With ≥15 observations that have icp_match_rate, uses the 25th/50th/75th
-    percentiles of historical per-post match rates as boundaries.
-    Falls back to fixed 0.75/0.40/0.20 when insufficient data.
-    """
-    # Check cache
-    try:
-        from backend.src.db import vortex as P
-        cache_path = P.memory_dir(company) / "icp_thresholds.json"
-        if cache_path.exists():
-            import json as _json
-            cached = _json.loads(cache_path.read_text(encoding="utf-8"))
-            if cached.get("observation_count", 0) >= _MIN_OBS_FOR_ADAPTIVE_ICP_SEGMENTS:
-                return cached
-    except Exception:
-        pass
-
-    try:
-        from backend.src.agents.ruan_mei import RuanMei
-        rm = RuanMei(company)
-        icp_scores = [
-            o.get("icp_match_rate", o.get("reward", {}).get("icp_reward"))
-            for o in rm._state.get("observations", [])
-            if o.get("status") == "scored"
-            and (o.get("icp_match_rate") is not None or o.get("reward", {}).get("icp_reward") is not None)
-        ]
-        icp_scores = [s for s in icp_scores if s is not None and 0.0 <= s <= 1.0]
-    except Exception:
-        icp_scores = []
-
-    if len(icp_scores) < _MIN_OBS_FOR_ADAPTIVE_ICP_SEGMENTS:
-        return dict(_DEFAULT_ICP_SEGMENT_THRESHOLDS)
-
-    icp_scores.sort()
-    n = len(icp_scores)
-    p25 = icp_scores[int(n * 0.25)]
-    p50 = icp_scores[int(n * 0.50)]
-    p75 = icp_scores[int(n * 0.75)]
-
-    result = {
-        "exact": round(p75, 3),
-        "adjacent": round(p50, 3),
-        "neutral": round(p25, 3),
-        "observation_count": n,
-    }
-
-    # Cache
-    try:
-        import json as _json
-        from backend.src.db import vortex as P
-        cache_path = P.memory_dir(company) / "icp_thresholds.json"
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache_path.with_suffix(".tmp")
-        tmp.write_text(_json.dumps(result, indent=2), encoding="utf-8")
-        tmp.rename(cache_path)
-        logger.info("[icp_scorer] Learned segment thresholds for %s: exact=%.2f adj=%.2f neutral=%.2f (n=%d)",
-                     company, p75, p50, p25, n)
-    except Exception:
-        pass
-
-    return result
-
-
-def score_engagers_segmented(company: str, headlines: list[str]) -> dict:
-    """Score engagers with continuous 0-1 relevance scores and return breakdown.
-
-    Segment boundaries are learned from the client's historical ICP score
-    distribution (percentile-based) when ≥15 observations exist. Falls back
-    to fixed 0.75/0.40/0.20 boundaries for new clients.
+    The function name is a holdover from the segmented version; it now
+    returns raw scores only. No bucketed counts, no category labels, no
+    hand-tuned thresholds — consumers read the per-engager scores list
+    and the `icp_match_rate` mean directly and decide what matters.
 
     Returns:
         {
             "score": float,          # mean relevance in [0, 1]
             "scores": list[float],   # per-engager continuous scores
-            "segments": {            # derived from continuous scores
-                "exact_icp": int,
-                "adjacent": int,
-                "neutral": int,
-                "anti_icp": int,
-                "total": int,
-            },
             "icp_match_rate": float, # continuous mean, in [0, 1]
         }
     """
     empty = {
         "score": 0.0,
         "scores": [],
-        "segments": {"exact_icp": 0, "adjacent": 0, "neutral": 0, "anti_icp": 0, "total": 0},
         "icp_match_rate": 0.0,
     }
 
     if not headlines:
         return empty
 
-    icp = _load_icp(company)
-    if not icp:
-        return empty
-
-    description = icp.get("description", "")
-    anti_description = icp.get("anti_description", "")
-
-    if not description and not anti_description:
+    # Audience context is derived from the client's transcripts directly.
+    # No curated ICP description — let the model form its own view from
+    # the client's own words. Irontomb owns the transcript resolver;
+    # re-using it keeps the scorer and simulator aligned on audience
+    # context so a post scored high by ICP also faces the same audience
+    # framing in Irontomb's panel.
+    from backend.src.agents.irontomb import _load_icp_context
+    audience_context = _load_icp_context(company)
+    if not audience_context:
         return empty
 
     # Build engager block — supports both string headlines and enriched dicts
@@ -163,6 +67,8 @@ def score_engagers_segmented(company: str, headlines: list[str]) -> dict:
                 parts.append(f"company: {h['current_company']}")
             if h.get("title"):
                 parts.append(f"title: {h['title']}")
+            if h.get("location"):
+                parts.append(f"location: {h['location']}")
             if h.get("name"):
                 parts.append(f"name: {h['name']}")
             engager_lines.append(f"{i+1}. {' | '.join(parts)}")
@@ -171,25 +77,21 @@ def score_engagers_segmented(company: str, headlines: list[str]) -> dict:
     hl_block = "\n".join(engager_lines)
 
     prompt = (
-        "You are scoring LinkedIn post engagers against an Ideal Customer Profile (ICP).\n\n"
-        f"ICP DESCRIPTION (people we WANT engaging):\n{description}\n\n"
-    )
-    if anti_description:
-        prompt += f"ANTI-ICP (people we do NOT want):\n{anti_description}\n\n"
-    prompt += (
+        "You are scoring LinkedIn post engagers against the client's actual "
+        "target audience. Below is the raw source material — transcripts "
+        "and context about who the client is, who they talk to, and who "
+        "they want to reach. Read it to form your own view of the ICP, "
+        "then score each engager against that view.\n\n"
+        f"{audience_context}\n\n"
         f"ENGAGER PROFILES:\n{hl_block}\n\n"
-        "For each numbered engager, output a relevance score from 0.0 to 1.0.\n"
-        "Use ALL available fields (headline, company, title) to make your assessment.\n"
-        "When only a vague headline is available, score conservatively (0.3-0.5).\n\n"
-        "Score range:\n"
-        "  1.0 = perfect ICP match (title, industry, seniority all fit)\n"
-        "  0.7 = strong match (most ICP criteria fit)\n"
-        "  0.5 = adjacent (related role/industry, plausible buyer)\n"
-        "  0.3 = weak/neutral (can't determine, or tangentially related)\n"
-        "  0.0 = anti-ICP (job seeker, recruiter, bot, content marketer)\n\n"
-        "Output ONLY a comma-separated list of scores.\n"
-        "Example for 4 headlines: 0.9,0.5,0.3,0.0\n"
-        "Output ONLY the scores, nothing else."
+        "For each numbered engager, output a continuous relevance score from "
+        "0.0 to 1.0. 1.0 means the engager closely matches the target "
+        "audience you derived from the source material; 0.0 means they are "
+        "clearly off-target. Use all available fields (headline, company, "
+        "title, location) to make your assessment. Score continuously — do "
+        "not round to a fixed set of points.\n\n"
+        "Output ONLY a comma-separated list of scores. No explanation.\n"
+        "Example for 4 headlines: 0.91,0.54,0.32,0.08"
     )
 
     try:
@@ -204,7 +106,7 @@ def score_engagers_segmented(company: str, headlines: list[str]) -> dict:
         scores = _parse_continuous_scores(raw)
         if not scores:
             return empty
-        return _compute_result(scores, company)
+        return _compute_result(scores)
     except Exception as e:
         logger.warning("[icp_scorer] LLM scoring failed for %s: %s", company, e)
         return empty
@@ -213,12 +115,11 @@ def score_engagers_segmented(company: str, headlines: list[str]) -> dict:
 def score_engagers(company: str, headlines: list[str]) -> float:
     """Backward-compatible: return a single scalar ICP score in [-1, 1].
 
-    Maps the continuous [0, 1] mean to [-1, 1] for RuanMei compatibility:
-    0.0 → -1.0, 0.5 → 0.0, 1.0 → 1.0
+    Maps the continuous [0, 1] mean to [-1, 1] for RuanMei composite
+    reward compatibility: 0.0 → -1.0, 0.5 → 0.0, 1.0 → 1.0.
     """
     result = score_engagers_segmented(company, headlines)
     raw = result["score"]
-    # Linear map: 0→-1, 0.5→0, 1.0→1.0
     return round(raw * 2 - 1, 4)
 
 
@@ -232,7 +133,7 @@ def _parse_continuous_scores(raw: str) -> list[float]:
             v = float(p)
             scores.append(max(0.0, min(1.0, v)))
         except ValueError:
-            # Handle legacy E/A/N/X labels for backward compat
+            # Handle legacy E/A/N/X labels for backward compat with older logs
             if p.upper() == "E" or p in ("+1", "1"):
                 scores.append(1.0)
             elif p.upper() == "A":
@@ -244,57 +145,39 @@ def _parse_continuous_scores(raw: str) -> list[float]:
     return scores
 
 
-def _compute_result(scores: list[float], company: str = "") -> dict:
-    """Compute aggregate result from per-engager continuous scores.
+def _compute_result(scores: list[float]) -> dict:
+    """Compute the aggregate result from per-engager continuous scores.
 
-    Segment boundaries are learned from client history when available.
+    Returns the mean (`icp_match_rate`) and the raw per-engager scores.
+    No segment buckets — consumers that want to reason about "how ICP-ish"
+    an engager is read the continuous score directly.
     """
     total = len(scores)
     if total == 0:
         return {
             "score": 0.0,
             "scores": [],
-            "segments": {"exact_icp": 0, "adjacent": 0, "neutral": 0, "anti_icp": 0, "total": 0},
             "icp_match_rate": 0.0,
         }
 
     mean_score = sum(scores) / total
-
-    # Segment boundaries: learned from client history or defaults
-    thresholds = _get_segment_thresholds(company) if company else dict(_DEFAULT_ICP_SEGMENT_THRESHOLDS)
-    exact_t = thresholds.get("exact", 0.75)
-    adjacent_t = thresholds.get("adjacent", 0.40)
-    neutral_t = thresholds.get("neutral", 0.20)
-
-    segments = {"exact_icp": 0, "adjacent": 0, "neutral": 0, "anti_icp": 0}
-    for s in scores:
-        if s >= exact_t:
-            segments["exact_icp"] += 1
-        elif s >= adjacent_t:
-            segments["adjacent"] += 1
-        elif s >= neutral_t:
-            segments["neutral"] += 1
-        else:
-            segments["anti_icp"] += 1
-
-    # icp_match_rate: raw continuous mean (not segment-based).
-    # The mean score IS the match rate — no categorical boundaries involved.
-    # Segments are derived for display only.
     return {
         "score": round(mean_score, 4),
         "scores": [round(s, 3) for s in scores],
-        "segments": {**segments, "total": total},
         "icp_match_rate": round(mean_score, 4),
     }
 
 
 def icp_match_rate(company: str, headlines: list[str]) -> dict:
-    """Diagnostic breakdown of ICP scoring for a post's engagers."""
+    """Diagnostic breakdown of ICP scoring for a post's engagers.
+
+    Returns raw per-engager scores and the mean — no bucketed counts.
+    """
     result = score_engagers_segmented(company, headlines)
     return {
-        "total": result["segments"]["total"],
+        "total": len(result["scores"]),
         "score": result["score"],
         "icp_match_rate": result["icp_match_rate"],
-        "segments": result["segments"],
+        "scores": result["scores"],
         "method": "llm-continuous",
     }

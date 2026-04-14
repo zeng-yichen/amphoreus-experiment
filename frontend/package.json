@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "deploy": "fly deploy --remote-only",
+    "deploy:backend": "cd .. && fly deploy --config backend/fly.toml --dockerfile backend/Dockerfile --remote-only",
+    "deploy:all": "npm run deploy:backend && npm run deploy"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.1.0",

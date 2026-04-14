@@ -5,15 +5,24 @@ Delegates the agentic loop to Pi (pi.dev CLI), which handles context
 compaction, session persistence, and tool execution natively.  Falls back
 to a direct Anthropic API loop if Pi is not installed.
 
-The agent explores the client workspace (transcripts, published posts,
-content strategy, ABM profiles, feedback, revisions), drafts posts grounded
+The agent explores the client workspace (transcripts, voice examples,
+published posts, auto-captured draft→posted diffs), drafts posts grounded
 in transcripts, self-reviews against a "magic moment" quality bar, and
 outputs structured JSON.  Posts are then fact-checked by Cyrene Terrae.
+
+Inputs Stelle consumes directly: files under ``transcripts/`` (raw
+client-origin text), observation data via tool calls (post deltas +
+engagement), and her own published-posts history. Operator-curated
+artifacts (ABM lists, feedback files, revision pairs) and other agents'
+briefs (Cyrene's strategic brief) are NOT read into her context —
+anything she needs beyond transcripts + observations comes through a
+tool call (web search, LinkedIn corpus search, observation queries).
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import os
@@ -33,9 +42,9 @@ from backend.src.db import vortex as P
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("stelle")
+logger = logging.getLogger(__name__)
 
-_client = Anthropic()
+_client = Anthropic(timeout=300.0)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -45,9 +54,10 @@ PARALLEL_API_KEY = os.getenv("PARALLEL_API_KEY", "")
 _PI_AVAILABLE = shutil.which("pi") is not None
 
 MAX_AGENT_TURNS = 60
-MAX_TOOL_OUTPUT_CHARS = 80_000
+MAX_TOOL_OUTPUT_CHARS = 50_000
 MAX_FETCH_CHARS = 12_000
-MAX_BASH_OUTPUT_CHARS = 30_000
+MAX_BASH_OUTPUT_CHARS = 50_000
+
 
 # ---------------------------------------------------------------------------
 # Retry logic for LLM API calls
@@ -76,298 +86,6 @@ def _call_with_retry(fn, *, max_retries: int = 3, base_delay: float = 2.0, max_d
 
 
 # ---------------------------------------------------------------------------
-# System prompt — Pi-native AGENTS.md (primary path)
-# ---------------------------------------------------------------------------
-
-_PI_AGENTS_TEMPLATE = """\
-# Ghostwriter
-
-You ghostwrite LinkedIn posts for the client. Your workspace:
-
-- `memory/config.md` — what you know about the client. Bounded at 4000 \
-chars. Manage with `./memory.sh`.
-- `memory/story-inventory.md` — cross-session record of stories already \
-told (published or drafted) and candidate stories not yet used. Read this \
-before drafting to avoid repeating angles the client has already published.
-- `memory/profile.md` — client's LinkedIn profile, company facts, ICP \
-segments, active initiatives, recent context.
-- `memory/strategy.md` — content strategy, angles, cadence, guardrails.
-- `memory/constraints.md` — voice/tone rules, brand safety, approval \
-requirements.
-- `memory/source-material/` — raw interview transcripts. Every claim traces \
-here.
-- `memory/references/` — articles, URLs, and reference material the client \
-considers relevant. Treat these as supplementary source material — mine \
-them for insights, angles, and supporting evidence just like transcripts.
-- `memory/published-posts/` — Client's published posts with engagement \
-metrics. Quality assured and exhibits their true voice.
-- `memory/voice-examples/` — The client's **top posts by engagement**. \
-These are the gold standard for voice, tone, and structure. Study these \
-first and match this level of quality.
-- `memory/draft-posts/` — Draft posts of unknown or unfinished quality — \
-could exhibit AI tendencies.
-- `memory/feedback/edits/` — writer's corrections to your past drafts \
-(before/after diffs). Study these BEFORE writing.
-- `memory/plan.md` — content calendar (if it exists).
-- `scratch/` — your working space.
-- `context/research/` — deep research on client and company.
-- `context/org/` — company context — industry, positioning, competitors.
-- `abm_profiles/` — ABM target briefings.
-- `revisions/` — before/after revision pairs.
-
-Read all files. Study `memory/voice-examples/` first — that is the voice \
-to match. Then read `memory/published-posts/` for broader patterns.
-
-## The Magic Moment
-
-The client reads your posts and feels "you told my story better than I \
-could've told it myself."
-
-The anti-magic moment: "this isn't so different from what I could've \
-gotten from ChatGPT." That's failure.
-
-**Every post you ship should pass the magic moment test.** If a post \
-doesn't, keep working on it until it does.
-
-You have time to iterate. Don't ship a post until you'd honestly show it \
-to the client and say "this captures your story better than you could've \
-told it."
-
-## Writing Quality
-
-Simple, natural, personal — as if the writer is actually talking to the \
-reader.
-
-Read each post aloud. If you want to stop before the end of a sentence, \
-that sentence failed. Fix how it sounds and you'll fix the idea. Sound \
-and truth converge.
-
-The easy way to improve: cut what isn't working and rebuild from what's left.
-
-**The one rule**: Every post starts from a specific moment in the \
-transcripts — something the client said, admitted, realized, or \
-experienced. The industry insight grows out of that moment, never the \
-other way around. If you cannot point to the exact transcript line that \
-sparked the post, the post has no foundation. Do not write it.
-
-## Process
-
-1. If `memory/plan.md` doesn't exist, create it first. Read every \
-transcript and published post, mine them for candidate angles, cross-check \
-against `memory/draft-posts/` and `memory/published-posts/` to avoid \
-collisions, and write the plan.
-1a. Re-read the plan you just wrote. For each pair of posts, ask: do \
-these share the same core insight? If yes, kill one and replace it with \
-a genuinely different angle from the transcripts. Two posts can share a \
-topic domain but must have different underlying insights. Repeat until \
-every post in the plan is distinct.
-1b. Read `memory/story-inventory.md`. If it is empty or missing, build \
-it now: scan every transcript and published/draft post, and write a list \
-of every story, anecdote, or specific moment you find — one bullet per \
-story, with file + timestamp + one-sentence description, and whether it \
-has been used. If the inventory already exists, consult it before picking \
-angles: do not draft a post around a story already marked as used. \
-Do not mark stories as used yourself — the publisher marks them after \
-confirmed Ordinal push.
-2. Pick the next unwritten topic from the plan. Identify the specific \
-source material (file + timestamps) you'll draw from.
-3. Draft in `scratch/`. Read it back. Check it against \
-`memory/config.md` and `memory/constraints.md`. Revise until it's right.
-4. Submit the final version: `./draft.sh "your full post text" \
-YYYY-MM-DDTHH:MM` (date from the plan, if any).
-5. Repeat steps 2-4 for all planned posts.
-6. When every post is drafted, write the final result JSON to \
-`output/result.json`.
-
-## Memory tool
-
-`./memory.sh` manages `memory/config.md` (4000 char limit):
-- `./memory.sh status` — check current usage
-- `./memory.sh add "new fact"` — append (fails if over limit)
-- `./memory.sh replace "old substring" "new content"` — update existing
-- `./memory.sh remove "substring"` — delete an entry
-
-When memory is above 80%, consolidate entries before adding new ones.
-
-## Banned phrases
-
-Words: "game-changer", "leverage", "unlock", "empower", "navigate", \
-"deep dive", "buckle up"
-
-Patterns (any variation counts — don't paraphrase around these):
-- "nobody is talking about" / "nobody tells you" / "what people don't say"
-- "Here's the thing" / "Here's what I've learned" / "Let me be honest" / \
-"The truth is" / "The reality is"
-- "It's not X, it's Y" / "It's not about X, it's about Y" — don't use \
-reductive framing as a thesis
-- "In today's..." / "In the world of..." / "In an era of..."
-- "There is a gap between X and Y" as the main point — instead, just say \
-what's true
-- "let that sink in"
-
-## LinkedIn feed
-
-On mobile, only ~140 characters are visible before the "see more" fold. \
-On desktop, ~210 characters.
-
-## Hard constraints
-
-- 1300-3000 characters.
-- Every claim traces to a source file. No fabrication.
-- No em-dashes. No emojis unless the client's published posts use them.
-- No markdown formatting in posts (no #, **, etc.)
-- Censor profanity: "sh*t" not "shit".
-
-## Tools
-
-- `./draft.sh "post text" YYYY-MM-DDTHH:MM` — submit a new draft
-- `./edit.sh <draft-filename> "revised text"` — update an existing draft
-- `./memory.sh` — manage config.md (see Memory tool section)
-
-## Web Research
-
-To search the web (Parallel API):
-```bash
-python3 tools/web_search.py "your search query here"
-```
-
-To extract content from a URL:
-```bash
-python3 tools/fetch_url.py "https://example.com/article"
-```
-
-To search for images (Serper Images API):
-```bash
-python3 tools/image_search.py "professional office teamwork" 10
-```
-
-## LinkedIn Post Database
-
-Search 200K+ real LinkedIn posts with engagement metrics to study what \
-formats, hooks, and angles drive the highest engagement across the industry:
-```bash
-python3 tools/query_posts.py "topic or keyword"
-```
-
-Search a specific creator's posts by username to study their style, hooks, \
-and top performers:
-```bash
-python3 tools/query_posts.py --creator "username"
-```
-
-Use this to benchmark your drafts against what actually performs. Study the \
-hooks, structures, and storytelling patterns of top-engagement posts in the \
-client's space.
-
-## Semantic Post Search
-
-Search the post database by meaning, not just keywords:
-```bash
-python3 tools/semantic_search_posts.py "building trust through vulnerability in leadership"
-```
-
-This finds conceptually similar posts even when they use different words. \
-Use alongside keyword search for deeper research — especially for abstract \
-topics like tone, narrative structure, or emotional resonance.
-
-## Ordinal Analytics
-
-Get real LinkedIn performance data — follower growth, post engagement, \
-and posting cadence:
-```bash
-python3 tools/ordinal_analytics.py profiles                # list scheduling profiles
-python3 tools/ordinal_analytics.py followers <profileId>   # follower count + growth
-python3 tools/ordinal_analytics.py posts <profileId>       # post impressions + engagement
-python3 tools/ordinal_analytics.py cadence <profileId>     # posting frequency + gap analysis
-```
-
-Check posting cadence before writing — if the client hasn't posted in a \
-while, prioritize timely/newsy hooks. Use follower and post analytics to \
-understand what actually drives growth for this specific client.
-
-## Draft Validation
-
-Self-check a draft BEFORE submitting via `draft.sh`:
-```bash
-python3 tools/validate_draft.py "Your full post text here"
-python3 tools/validate_draft.py --file memory/draft-posts/my-draft.md
-python3 tools/validate_draft.py --attempt 2 --file memory/draft-posts/my-draft.md
-```
-
-Returns JSON with `needs_correction` (bool), `issues` array, and `attempt` \
-number. Checks AI slop patterns, banned phrases, character count, and \
-structural problems. If `needs_correction` is true, revise and re-validate \
-with `--attempt N` (increment each time). After attempt 2, all issues are \
-downgraded to info and `needs_correction` becomes false (escape hatch) — \
-this prevents infinite revision loops. Track your attempt number!
-
-**Content strategy from data**: Analyze the client's published posts in \
-`memory/published-posts/`. Each file includes engagement metrics (reactions, \
-comments, reposts, engagement score, outlier flags). Identify which topics, \
-formats, angles, and hooks drive the strongest engagement. Use these patterns \
-as your de facto content strategy — write more of what resonates, less of \
-what falls flat. If no `memory/strategy.md` exists, intuit one entirely from \
-the engagement data — you have everything you need. If a strategy document \
-does exist, treat it as an intent layer (e.g. pivots, ABM targets, \
-compliance) that can override the data, but default to what the numbers show.
-
-## Output
-
-When you're done, also write a JSON file to `output/result.json`:
-
-```json
-{{
-  "posts": [
-    {{
-      "hook": "First sentence or opening line (required, <=200 chars)",
-      "hook_variants": ["Alternative hook 1", "Alternative hook 2"],
-      "text": "Full post text (required, <=3000 chars)",
-      "origin": "What sparked this post (required)",
-      "citations": [
-        {{"claim": "exact number or factual assertion", "source": "where you found it"}}
-      ],
-      "image_suggestion": "Description of a complementary image, or null"
-    }}
-  ],
-  "verification": "Prove you used all available material. List what you \
-extracted from each workspace source (transcripts, notes, drafts). \
-List what you skipped and why. Show this is complete, not lazy.",
-  "meta": {{
-    "reasoning": "Your approach and decisions",
-    "missing_resources": ["Resources that would have helped"]
-  }}
-}}
-```
-
-## Hook Variants
-
-For each post, generate 2-3 alternative opening lines (`hook_variants` in \
-the output JSON). The client picks the best one. Make each variant a \
-genuinely different angle on the same post — not just word swaps.
-
-## Planning mode
-
-When asked to create a content plan:
-1. Read all memory files including feedback.
-2. Mine transcripts for every usable story.
-3. Check `memory/published-posts/` and `memory/draft-posts/` — don't \
-repeat what's already been written.
-4. Assign stories to post slots.
-5. Write plan to `memory/plan.md`.
-6. Self-dedup: re-read the plan. If any two posts share the same core \
-insight (even if framed differently), kill one and replace it with a \
-different angle. The plan should have zero overlap.
-
-Plan format per post: date, story, source transcript + timestamp, key \
-material.
-
-When asked to write the next post from a plan:
-1. Read `memory/plan.md`, find first `- [ ] Status: unwritten`.
-2. Write that post following steps above.
-3. Mark `- [x] Status: written`.
-
-{dynamic_directives}
-"""
 
 # ---------------------------------------------------------------------------
 # System prompt — direct API loop (fallback when Pi is unavailable)
@@ -398,16 +116,20 @@ metrics. Quality assured and exhibits their true voice.
 - `memory/voice-examples/` — The client's **top posts by engagement**. \
 These are the gold standard for voice, tone, and structure. Study these \
 first and match this level of quality.
-- `memory/draft-posts/` — Draft posts of unknown or unfinished quality — \
-could exhibit AI tendencies.
-- `memory/feedback/edits/` — writer's corrections to your past drafts \
-(before/after diffs). Study these BEFORE writing.
+- `memory/draft-posts/` — **Authoritative pushed-but-not-yet-live drafts.** \
+Pre-populated at workspace setup from Ordinal's /posts endpoint, filtered \
+to non-Posted statuses. These are drafts that have already been committed \
+to Ordinal and will publish on LinkedIn imminently. READ ONLY — do not \
+write to this directory. These count for dedup; your own in-run drafts \
+do NOT count for dedup until they are pushed to Ordinal by the publisher \
+after your run completes.
+- `memory/feedback/edits/` — auto-captured draft→posted diffs for your \
+own past work (what you wrote vs. what the client actually published). \
+Pure delta data, no editorial commentary. Study these BEFORE writing.
 - `memory/plan.md` — content calendar (if it exists).
 - `scratch/` — your working space.
 - `context/research/` — deep research on client and company.
 - `context/org/` — company context — industry, positioning, competitors.
-- `abm_profiles/` — ABM target briefings.
-- `revisions/` — before/after revision pairs.
 
 Read all files. Study `memory/voice-examples/` first — that is the voice \
 to match. Then read `memory/published-posts/` for broader patterns.
@@ -444,11 +166,53 @@ sparked the post, the post has no foundation. Do not write it.
 
 - `list_directory` / `read_file` / `search_files` — explore the workspace
 - `write_file` / `edit_file` — write scratch notes, draft posts, content plans
-- `web_search` — search the web (Parallel API — returns ranked excerpts)
-- `web_research` — deep research on a topic (Parallel API — synthesized analysis)
+- `web_search` — search the web (Parallel API — returns ranked excerpts). \
+  Use for industry context, real-time news, regulatory updates, or any \
+  external information you need.
 - `fetch_url` — extract content from a URL
-- `bash` — run shell commands (curl, jq, scripts, etc.)
-- `subagent` — spawn a fast, cheap sub-agent for focused research tasks
+- `bash` — run shell commands (curl, jq, scripts, etc.). Every command \
+  starts with your workspace as the current directory — do NOT `cd` \
+  anywhere first. Just use relative paths like `tools/validate_draft.py` \
+  or `memory/plan.md`. The workspace is the only filesystem you have.
+- `query_observations` — inspect the client's scored post history with \
+  the FULL per-post learning signal: your draft (`post_body`) vs the \
+  client-edited published version (`posted_body`) — read the two texts side \
+  by side to see exactly what the client changed, engagement metrics \
+  (reactions/comments/reposts/impressions), `icp_match_rate` (mean of \
+  per-reactor icp_score), and `reactors` (per-post list of who reacted with \
+  their raw continuous icp_score). Four signals to study together: the \
+  (draft, published) diff, metrics, audience quality, audience identity. No \
+  pre-digested patterns — read the raw data.
+- `query_top_engagers` — aggregated top engagers across all scored posts, \
+  ranked by ICP fit × engagement count. Use for the overall audience composition. \
+  For per-post reactor lists, use query_observations (it includes `reactors` \
+  inline on each observation).
+- `search_linkedin_corpus` — search the 200K+ LinkedIn post corpus (keyword \
+  or semantic mode). Find high-engagement reference posts in adjacent niches.
+- `execute_python` — run arbitrary Python for sanity-checking intuitions \
+  against large samples. `obs` (the client's scored observations) is \
+  pre-loaded; numpy/scipy/sklearn/pandas are pre-imported. Use for \
+  exploration, not for deriving rules to mechanically follow.
+- `simulate_flame_chase_journey` — **mandatory AT LEAST 3 TIMES per \
+  draft before submission. NO EXCEPTIONS. `write_result` is \
+  programmatically guarded: if you submit with fewer than 3 × n_posts \
+  total simulate calls, it WILL be rejected and you'll be sent back \
+  to iterate.** Send a draft through Irontomb, the adversarial \
+  audience simulator. Irontomb is turn-based: on each call she reads \
+  the draft, retrieves comparable past posts from this client's \
+  scored history (real drafts + real published versions + real T+7d \
+  engagement + real reactor identities), then predicts audience \
+  reaction grounded in the real numbers she pulled. Returns five \
+  predictions — `engagement_prediction` (reactions per 1000 \
+  impressions), plus four booleans (`would_stop_scrolling`, \
+  `would_react`, `would_comment`, `would_share`) — anchored in \
+  retrieved evidence, not generic priors. Optional `inner_voice` \
+  debug field. NO fix_suggestion, NO critique. You diagnose failure \
+  yourself. Minimum 3 calls per post, normal 5-8, cap 12. A draft \
+  whose predicted engagement is well below what comparable past \
+  posts actually received is a losing draft — revise until the \
+  prediction is at or above historical performance. If you hit 12 \
+  rounds and can't move the prediction, reconsider the topic.
 - `write_result` — submit your final posts (ends the session)
 - `query_posts` — search 200K+ real LinkedIn posts by keyword, ranked by \
   engagement. Use to study what formats, hooks, and angles perform best in \
@@ -463,8 +227,9 @@ sparked the post, the post has no foundation. Do not write it.
   `posts <id>` (post engagement), `cadence <id>` (posting frequency + gaps). \
   Check cadence before writing — if the client hasn't posted recently, \
   prioritize timely/newsy hooks.
-- `validate_draft` — self-check a draft for AI patterns, banned phrases, \
-  and structural issues BEFORE submitting. Returns JSON with issues. If \
+- `python3 tools/validate_draft.py "text"` — self-check a draft for AI \
+  patterns, banned phrases, and structural issues BEFORE submitting. Also \
+  accepts `--file path/to/draft.md`. Returns JSON with issues. If \
   `needs_correction` is true, revise and re-validate with `--attempt N`. \
   After attempt 2, escape hatch activates (issues downgraded, proceeds).
 
@@ -472,26 +237,66 @@ sparked the post, the post has no foundation. Do not write it.
 
 1. If `memory/plan.md` doesn't exist, create it first. Read every \
 transcript and published post, mine them for candidate angles, cross-check \
-against `memory/draft-posts/` and `memory/published-posts/` to avoid \
-collisions, and write the plan.
+against `memory/published-posts/` (LinkedIn-live) and `memory/draft-posts/` \
+(Ordinal-pushed, not yet live) to avoid collisions, and write the plan. \
+**Do NOT read your own prior-run scratch files as dedup source** — only \
+posts that are actually in Ordinal or on LinkedIn count. A draft you saved \
+locally last run that was never pushed does not exist for dedup purposes.
 1a. Re-read the plan you just wrote. For each pair of posts, ask: do \
 these share the same core insight? If yes, kill one and replace it with \
 a genuinely different angle from the transcripts. Two posts can share a \
 topic domain but must have different underlying insights. Repeat until \
 every post in the plan is distinct.
 1b. Read `memory/story-inventory.md`. If it is empty or missing, build \
-it now: scan every transcript and published/draft post, and write a list \
-of every story, anecdote, or specific moment you find — one bullet per \
-story, with file + timestamp + one-sentence description, and whether it \
-has been used. If the inventory already exists, consult it before picking \
-angles: do not draft a post around a story already marked as used. \
-Do not mark stories as used yourself — the publisher marks them after \
-confirmed Ordinal push.
+it now: scan every transcript and every authoritative post (published \
+on LinkedIn OR pushed to Ordinal), and write a list of every story, \
+anecdote, or specific moment you find — one bullet per story, with file \
++ timestamp + one-sentence description, and whether it has been used. \
+**Authoritative posts only**: `memory/published-posts/` and \
+`memory/draft-posts/` (which is pre-populated from Ordinal). Never scan \
+your own scratch writes as "used" — your in-run drafts don't exist until \
+the publisher pushes them after your run. If the inventory already exists, \
+consult it before picking angles: do not draft a post around a story \
+already marked as used. Do not mark stories as used yourself — the \
+publisher marks them after confirmed Ordinal push.
 2. Pick the next unwritten topic from the plan. Identify the specific \
 source material (file + timestamps) you'll draw from.
 3. Draft in `scratch/`. Read it back. Revise until it's right.
-4. Save each final draft to `memory/draft-posts/`.
-5. When every post is complete, call `write_result` with the final JSON.
+4. **Fight Irontomb — AT LEAST 3 TIMES PER POST, PROGRAMMATICALLY \
+ENFORCED.** Call `simulate_flame_chase_journey` on every draft. This \
+is not optional and not prompt-suggestive — `write_result` has a \
+hard guard that rejects any submission where total simulate calls \
+< 3 × n_posts. If you submit 7 posts with only 8 total simulate \
+calls, the tool will reject you and send you back to iterate. Plan \
+accordingly. For each call, Irontomb enters a short turn loop: she \
+reads your draft, searches this client's scored post history for \
+comparable past posts, reads their real engagement, then emits a \
+prediction anchored in what actually happened to posts like yours. \
+Read her `engagement_prediction` (reactions per 1000 impressions) \
+and compare it to this client's real historical performance via \
+`query_observations`. If her prediction is well below what \
+comparable past posts earned, your draft is weak relative to the \
+client's own track record. Diagnose yourself (Irontomb gives you \
+NO fix_suggestion — the `inner_voice` field is optional debug text, \
+not a prescription). Revise. Call again. Keep iterating. **Minimum \
+3 rounds per post, normal 5-8, cap 12.** If 12 rounds in you still \
+can't move the prediction to at or above this client's historical \
+median, the ANGLE is weak. Reconsider the topic, draft a genuinely \
+different post. Do not submit a losing draft under any circumstances.
+5. Save each final (simulator-approved) draft to `scratch/final/` — \
+NOT to `memory/draft-posts/`. That directory is authoritative for \
+Ordinal-pushed content and is read-only during your run. Your scratch \
+writes only "become real" when the publisher pushes them after your \
+session completes. Within a single run, `scratch/final/` is also where \
+you read back your own earlier drafts to avoid self-collision across \
+posts in the same batch.
+6. When every post is complete, call `write_result` with the final JSON. \
+**The order of posts in the `posts` array IS the publication order.** \
+Put the post you want published first at index 0. Decide the sequence \
+based on what you observed during the run — which drafts Irontomb \
+predicted highest for, which hooks are most timely, which topics \
+should lead vs follow. No hand-engineered rotation rules; use your \
+judgment from the data you studied.
 
 ## Output
 
@@ -508,7 +313,9 @@ When you're done, call the `write_result` tool with a JSON string:
       "citations": [
         {{{{"claim": "exact number or factual assertion", "source": "where you found it"}}}}
       ],
-      "image_suggestion": "Description of a complementary image, or null"
+      "image_suggestion": "Description of a complementary image, or null",
+      "publication_order": 1,
+      "scheduling_rationale": "Why this post should go out at this position"
     }}}}
   ],
   "verification": "Prove you used all available material. List what you \
@@ -527,22 +334,6 @@ For each post, generate 2-3 alternative opening lines (`hook_variants` in \
 the output JSON). The client picks the best one. Make each variant a \
 genuinely different angle on the same post — not just word swaps.
 
-## Banned phrases
-
-Words: "game-changer", "leverage", "unlock", "empower", "navigate", \
-"deep dive", "buckle up"
-
-Patterns (any variation counts — don't paraphrase around these):
-- "nobody is talking about" / "nobody tells you" / "what people don't say"
-- "Here's the thing" / "Here's what I've learned" / "Let me be honest" / \
-"The truth is" / "The reality is"
-- "It's not X, it's Y" / "It's not about X, it's about Y" — don't use \
-reductive framing as a thesis
-- "In today's..." / "In the world of..." / "In an era of..."
-- "There is a gap between X and Y" as the main point — instead, just say \
-what's true
-- "let that sink in"
-
 ## LinkedIn feed
 
 On mobile, only ~140 characters are visible before the "see more" fold. \
@@ -550,29 +341,23 @@ On desktop, ~210 characters.
 
 ## Hard constraints
 
-- 1300-3000 characters.
+- Up to 3000 characters (LinkedIn platform cap).
 - Every claim traces to a source file. No fabrication.
-- No em-dashes. No emojis unless the client's published posts use them.
 - No markdown formatting in posts (no #, **, etc.)
-- Censor profanity: "sh*t" not "shit".
 
-**Content strategy from data**: Analyze the client's published posts in \
-`memory/published-posts/`. Each file includes engagement metrics (reactions, \
-comments, reposts, engagement score, outlier flags). Identify which topics, \
-formats, angles, and hooks drive the strongest engagement. Use these patterns \
-as your de facto content strategy — write more of what resonates, less of \
-what falls flat. If no `memory/strategy.md` exists, intuit one entirely from \
-the engagement data — you have everything you need. If a strategy document \
-does exist, treat it as an intent layer (e.g. pivots, ABM targets, \
-compliance) that can override the data, but default to what the numbers show.
+Everything else — length, cadence, diction, voice — is learnable from the \
+client's own published posts, voice examples, and engagement history. Do \
+not apply global stylistic rules. If a phrase is a problem for this client, \
+you'll see it in the raw (draft, published) deltas and in the per-reactor \
+data.
 
 ## Planning mode
 
 When asked to create a content plan:
-1. Read all memory files including feedback.
+1. Read the memory files listed above (transcripts, voice examples, profile, published posts, plan, research, org context).
 2. Mine transcripts for every usable story.
-3. Check `memory/published-posts/` and `memory/draft-posts/` — don't \
-repeat what's already been written.
+3. Check the EXISTING POSTS list injected into your prompt — don't \
+repeat any topic, angle, or hook that's already been written or scheduled.
 4. Assign stories to post slots.
 5. Write plan to `memory/plan.md`.
 6. Self-dedup: re-read the plan. If any two posts share the same core \
@@ -687,34 +472,6 @@ _TOOLS = [
         },
     },
     {
-        "name": "web_research",
-        "description": (
-            "Deep web research via Parallel API. Same as web_search but uses "
-            "'one-shot' mode for more comprehensive, synthesized results. Use "
-            "when you need thorough background on a topic rather than quick facts."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "objective": {
-                    "type": "string",
-                    "description": "Natural-language description of what to research",
-                },
-                "search_queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional keyword queries to guide the search",
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Max results to return (default 10)",
-                    "default": 10,
-                },
-            },
-            "required": ["objective"],
-        },
-    },
-    {
         "name": "fetch_url",
         "description": (
             "Extract content from a URL via Parallel API. Returns markdown-formatted "
@@ -796,28 +553,221 @@ _TOOLS = [
         },
     },
     {
-        "name": "subagent",
+        "name": "query_observations",
         "description": (
-            "Spawn a fast, cheap sub-agent (Claude Haiku) for focused exploration "
-            "or research. The sub-agent has access to web_search and returns a "
-            "text response. Use for tasks like: 'Research recent news about X', "
-            "'Summarize this topic for background context', 'Find the latest "
-            "stats on Y'. The sub-agent cannot access workspace files."
+            "Inspect this client's scored post history. Returns every scored "
+            "post with the FULL set of per-post learning signals:\n\n"
+            "  post_body        — your original draft (what you handed the client)\n"
+            "  posted_body      — the LinkedIn-live version (what the client "
+            "actually shipped after their edits). Read these two texts side "
+            "by side — the diff is the client's preference signal. Don't "
+            "just look at whether they differ; look at WHAT they changed: "
+            "which phrases got cut, which got rewritten, which structural "
+            "moves survived. This is the strongest preference data you have.\n"
+            "  reward           — composite reward + raw_metrics "
+            "{impressions, reactions, comments, reposts} + icp_reward\n"
+            "  icp_match_rate   — mean of the per-reactor icp_score for this "
+            "post (continuous, 0.0–1.0). This is the AUDIENCE QUALITY signal — "
+            "a post with 5 reactions from high-icp_score reactors beats a post "
+            "with 30 reactions from low-icp_score ones.\n"
+            "  reactors         — list of every individual who left a reaction: "
+            "name, headline, title, current_company, location, icp_score. This "
+            "is the AUDIENCE IDENTITY signal — know WHO is reading and WHO is "
+            "engaging so you can write directly to them.\n"
+            "  topic_tag / format_tag / posted_at\n\n"
+            "Four signals to study together: the (draft, published) pair for "
+            "client preferences, engagement metrics for reach, icp_match_rate "
+            "for audience quality, and reactors for audience identity. Read "
+            "all four and decide how to weigh them for this specific client — "
+            "there is no universal rule about whether high reach or high "
+            "icp_match_rate matters more. The client's history is your only "
+            "evidence.\n\n"
+            "No pre-extracted patterns — you read the raw data and decide what "
+            "matters. Filters: min_reward, max_reward, limit. Set "
+            "summary_only=True for aggregate stats."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "task": {
-                    "type": "string",
-                    "description": "The task for the sub-agent to complete",
-                },
-                "context": {
-                    "type": "string",
-                    "description": "Optional context to provide the sub-agent",
-                    "default": "",
+                "min_reward": {"type": "number", "description": "Only observations with reward.immediate >= this value."},
+                "max_reward": {"type": "number", "description": "Only observations with reward.immediate <= this value."},
+                "limit": {"type": "integer", "description": "Max observations to return (default: all matching)."},
+                "summary_only": {"type": "boolean", "description": "If true, return aggregate stats."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "query_top_engagers",
+        "description": (
+            "Get the AGGREGATED top engagers for this client across every "
+            "scored post. Returns name, headline, title, company, location, "
+            "mean ICP score, engagement count, posts_engaged (list of "
+            "ordinal_post_ids they reacted to), and ranking_score "
+            "(mean_icp_score × log(1+engagement_count)).\n\n"
+            "Use to understand the overall audience composition — who are "
+            "the high-ICP repeat engagers, what their roles/companies look "
+            "like, which posts they gravitated toward. This anchors your "
+            "writing in a real audience instead of the hypothetical ICP.\n\n"
+            "NOTE: for per-post reactor breakdown (who reacted to THIS "
+            "specific post), use query_observations instead — each "
+            "observation now includes a full `reactors` list with ICP "
+            "scores per reactor."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max engagers to return (default 20, max 50).",
+                    "default": 20,
                 },
             },
-            "required": ["task"],
+            "required": [],
+        },
+    },
+    {
+        "name": "search_linkedin_corpus",
+        "description": (
+            "Search the 200K+ LinkedIn post corpus via Pinecone + Supabase. "
+            "Two modes: 'keyword' (exact text match) or 'semantic' (meaning-"
+            "based via OpenAI embeddings). Use to find real high-engagement "
+            "posts in adjacent niches, study what's working in the broader "
+            "LinkedIn ecosystem, or sanity-check your intuitions about what "
+            "patterns land. Returns post text, engagement metrics, and "
+            "creator info."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query (keywords or natural-language description)."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["keyword", "semantic"],
+                    "description": "'keyword' for exact text search, 'semantic' for meaning-based vector search.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results (default 20).",
+                    "default": 20,
+                },
+            },
+            "required": ["query", "mode"],
+        },
+    },
+    {
+        "name": "execute_python",
+        "description": (
+            "Run Python code in a sandboxed subprocess. Pre-loaded globals:\n"
+            "  • obs — scored observations (full post text, reward, metrics)\n"
+            "  • embeddings — {post_hash: [1536 floats]} (OpenAI embeddings)\n"
+            "  • emb_matrix — np.array shape (N, 1536), rows aligned to emb_hashes\n"
+            "  • emb_hashes — list[str] of post_hash keys\n"
+            "  • emb_by_obs — embeddings aligned to obs order (None for missing)\n"
+            "Pre-imported: numpy (np), scipy, scipy.stats, sklearn, pandas "
+            "(pd), json, math, statistics. No network. 60s timeout.\n\n"
+            "Use for sanity-checking intuitions against the data — NOT for "
+            "deriving rules to mechanically follow. For example: "
+            "'across my scored posts, does reaction rate correlate with "
+            "length?' or 'which past posts are closest in embedding "
+            "space to this draft?' Your JUDGMENT about how to use the "
+            "signal is what matters; the stats are just one input."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python code to execute. Use print() to return results.",
+                },
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "simulate_flame_chase_journey",
+        "description": (
+            "MANDATORY before submitting any post. Send a draft through "
+            "Irontomb, the adversarial audience simulator grounded in "
+            "this client's real historical engagement data.\n\n"
+            "## What Irontomb does\n\n"
+            "Irontomb is a turn-based agent. On each simulate call, she:\n"
+            "  1. Reads your draft\n"
+            "  2. Uses her own retrieval tools to search this client's "
+            "scored post history for past posts that are actually "
+            "comparable to your draft — by topic, angle, or keywords. "
+            "She pulls them with their real Stelle drafts, real "
+            "client-published versions, real T+7d engagement metrics "
+            "(impressions / reactions / comments / reposts), and real "
+            "reactor identities with their ICP scores.\n"
+            "  3. Optionally deep-reads one or two of the most relevant "
+            "past posts in full.\n"
+            "  4. Forms a prediction anchored in what those specifically-"
+            "comparable past posts actually achieved — not in generic "
+            "LinkedIn priors.\n"
+            "  5. Calls submit_reaction and returns her prediction to you.\n\n"
+            "This is adaptive calibration: the calibration data she uses "
+            "for YOUR draft is specific to YOUR draft's topic and angle, "
+            "not some fixed set of recent posts regardless of relevance.\n\n"
+            "## Result shape\n\n"
+            "  engagement_prediction : float    # reactions per 1000 impressions\n"
+            "  would_stop_scrolling  : bool     # typical audience member\n"
+            "  would_react           : bool\n"
+            "  would_comment         : bool\n"
+            "  would_share           : bool\n"
+            "  inner_voice           : str      # OPTIONAL, debug only — NOT\n"
+            "                                   # a critique, NOT a fix suggestion\n"
+            "  _draft_hash           : str\n"
+            "  _turns_used           : int      # how many turns Irontomb spent\n"
+            "  _retrieval_calls      : list[str] # which tools she invoked\n"
+            "  _n_scored_obs_available : int    # historical pool size\n"
+            "  _cost_usd             : float\n\n"
+            "## No fix suggestion, no critique\n\n"
+            "Irontomb does NOT tell you what to change. She shows you "
+            "the numeric prediction and expects you to diagnose failure "
+            "yourself by comparing against this client's real historical "
+            "performance (which you can inspect directly via "
+            "query_observations). Hand-fed fix suggestions encode a "
+            "theory of reader psychology that real readers don't actually "
+            "produce; Irontomb refuses to pretend. The `inner_voice` "
+            "field is optional one-sentence stream-of-consciousness — "
+            "debugging only, not a prescription. Weight it accordingly.\n\n"
+            "## The loop you are running\n\n"
+            "Draft → simulate → read `engagement_prediction` → compare "
+            "against this client's real historical median (use "
+            "query_observations on your own side to see the full scored "
+            "history) → if your draft's prediction is below what "
+            "comparable past posts actually earned, revise based on your "
+            "own theory → simulate again → repeat. Minimum 3 rounds per "
+            "post, normal 5-8, cap 12. Iterate until the prediction sits "
+            "at or above historical performance for comparable past "
+            "posts. If 12 rounds in you still can't move it, the ANGLE "
+            "itself is weak — stop polishing and reconsider the topic.\n\n"
+            "## Diagnosis is your job\n\n"
+            "Irontomb gives you NO fix_suggestion and NO diagnostic "
+            "patterns. Compare her `engagement_prediction` to this "
+            "client's real historical performance (use "
+            "`query_observations` to see what past posts actually "
+            "achieved). Form your own theory about why the prediction "
+            "is where it is. Revise based on your theory. Simulate "
+            "again. The data is the same data Irontomb used — you can "
+            "read it yourself and draw your own conclusions.\n\n"
+            "## Why this is mandatory\n\n"
+            "Real engagement takes 2 weeks to arrive. Irontomb takes "
+            "seconds per call and pennies per draft. Skipping her means "
+            "publishing blind — exactly the failure mode this tool "
+            "exists to prevent. A draft that can't beat Irontomb's "
+            "prediction won't beat real readers."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_text": {
+                    "type": "string",
+                    "description": "The full text of the post draft to evaluate.",
+                },
+            },
+            "required": ["draft_text"],
         },
     },
     {
@@ -1048,13 +998,19 @@ def _exec_fetch_url(args: dict) -> str:
         except Exception as e:
             logger.warning("[Stelle] Parallel extract failed, falling back to httpx: %s", e)
 
+    # Fallback: stdlib HTML-to-text extractor. Strips nav/script/footer/etc,
+    # preserves block structure via line breaks. Readable plain text, not raw HTML.
     try:
-        resp = httpx.get(url, follow_redirects=True, timeout=15.0)
-        resp.raise_for_status()
-        text = resp.text
-        if len(text) > MAX_FETCH_CHARS:
-            text = text[:MAX_FETCH_CHARS] + f"\n\n... [truncated at {MAX_FETCH_CHARS} chars]"
-        return text
+        from backend.src.utils.fetch_url import fetch_url as _fetch_readable
+        r = _fetch_readable(url, max_chars=MAX_FETCH_CHARS)
+        if r.get("status", 0) >= 400 or r.get("status", 0) == 0:
+            return f"Error fetching URL ({r.get('status')}): {r.get('text','')}"
+        title = r.get("title") or ""
+        body = r.get("text") or ""
+        header = f"URL: {r.get('url', url)}\n" + (f"Title: {title}\n" if title else "")
+        if r.get("truncated"):
+            body = body + f"\n\n... [truncated at {MAX_FETCH_CHARS} chars]"
+        return header + "\n" + body if header else body
     except Exception as e:
         return f"Error fetching URL: {e}"
 
@@ -1151,12 +1107,10 @@ _TOOL_HANDLERS = {
     "read_file": lambda root, args: _exec_read_file(root, args),
     "search_files": lambda root, args: _exec_search_files(root, args),
     "web_search": lambda root, args: _exec_web_search(args),
-    "web_research": lambda root, args: _exec_web_search({**args, "mode": "one-shot"}),
     "fetch_url": lambda root, args: _exec_fetch_url(args),
     "write_file": lambda root, args: _exec_write_file(root, args),
     "edit_file": lambda root, args: _exec_edit_file(root, args),
     "bash": lambda root, args: _exec_bash(root, args),
-    "subagent": lambda root, args: _exec_subagent(args),
 }
 
 
@@ -1226,20 +1180,11 @@ def _validate_draft_with_llm(post_text: str, company_keyword: str) -> dict:
     result = {"needs_correction": False, "issues": []}
 
     # --- Character count ---
+    # LinkedIn's platform cap is the only hard limit. No hand-tuned floor:
+    # length is learnable from the client's own published posts, and Stelle
+    # already reads them.
     char_count = len(post_text)
-
-    # Use learned char limit if available (from _build_overrides)
-    char_min, char_max = 1300, 3000
-    try:
-        overrides = _build_overrides(company_keyword)
-        if overrides.get("char_limit_min"):
-            char_min = overrides["char_limit_min"]
-        if overrides.get("char_limit_max"):
-            char_max = overrides["char_limit_max"]
-    except Exception:
-        pass
-
-    if char_count > 3000:  # LinkedIn platform limit (not ours — theirs)
+    if char_count > 3000:
         result["needs_correction"] = True
         result["issues"].append({
             "type": "char_count",
@@ -1247,14 +1192,6 @@ def _validate_draft_with_llm(post_text: str, company_keyword: str) -> dict:
             "severity": "critical",
             "offending_text": "",
             "suggested_fix": f"Cut {char_count - 2800} characters",
-        })
-    elif char_count < char_min:
-        result["issues"].append({
-            "type": "char_count",
-            "description": f"Post is {char_count} chars — below {'learned' if char_min != 1300 else 'default'} minimum {char_min} for this client",
-            "severity": "info",
-            "offending_text": "",
-            "suggested_fix": f"This client's accepted posts are typically {char_min}-{char_max} chars",
         })
 
     return result
@@ -1574,12 +1511,137 @@ def _fetch_ordinal_drafts(company_keyword: str, exclude_dates: set[str] | None =
     return all_posts
 
 
+def _fetch_all_ordinal_hooks(company_keyword: str) -> str:
+    """Fetch hooks/titles of ALL posts in Ordinal (any status) for topic dedup.
+
+    Returns a formatted string injected into Stelle's user prompt so she
+    knows every topic already written, scheduled, or in-review and avoids
+    duplication. No LLM call — just an API fetch + text formatting.
+    """
+    api_key = _get_ordinal_api_key(company_keyword)
+    if not api_key:
+        return ""
+
+    base_url = "https://app.tryordinal.com/api/v1"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    entries: list[str] = []
+    cursor: str | None = None
+
+    try:
+        while True:
+            params: dict[str, Any] = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+
+            resp = httpx.get(
+                f"{base_url}/posts",
+                params=params,
+                headers=headers,
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            for p in data.get("posts", []):
+                status = (p.get("status") or "").strip()
+                li = p.get("linkedIn") or p.get("linkedin") or {}
+                text = (li.get("copy") or li.get("text") or "").strip()
+                title = (p.get("title") or "").strip()
+                hook = text.split("\n")[0][:120] if text else title[:120]
+                if not hook:
+                    continue
+
+                date_str = ""
+                for date_key in ("publishDate", "publishAt", "createdAt"):
+                    val = p.get(date_key)
+                    if val:
+                        date_str = str(val)[:10]
+                        break
+
+                entries.append(f"- [{status}] {date_str}: {hook}")
+
+            if not data.get("hasMore") or not data.get("nextCursor"):
+                break
+            cursor = data["nextCursor"]
+
+    except Exception as e:
+        logger.warning("[Stelle] Ordinal hook fetch for dedup failed: %s", e)
+        return ""
+
+    # Also include locally generated posts not yet pushed to Ordinal.
+    try:
+        from backend.src.db.local import list_local_posts
+        local_posts = list_local_posts(company=company_keyword, limit=100)
+        local_hooks = set()
+        for lp in local_posts:
+            hook = (lp.get("title") or "").strip()
+            if not hook:
+                content = (lp.get("content") or "").strip()
+                hook = content.split("\n")[0][:120] if content else ""
+            if not hook:
+                continue
+            if hook in local_hooks:
+                continue
+            local_hooks.add(hook)
+            status = lp.get("status", "draft")
+            entries.append(f"- [{status}] (local): {hook[:120]}")
+    except Exception as e:
+        logger.debug("[Stelle] Local post dedup fetch failed: %s", e)
+
+    if not entries:
+        return ""
+
+    logger.info("[Stelle] Fetched %d existing post hooks for dedup (%s)", len(entries), company_keyword)
+    return (
+        "\n\nEXISTING POSTS (all posts in Ordinal and locally generated). "
+        "DO NOT duplicate any of these topics, angles, or hooks. "
+        "Every post you write must cover genuinely new ground:\n"
+        + "\n".join(entries)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Research files from Supabase (Gap 8)
 # ---------------------------------------------------------------------------
 
+def _resolve_supabase_ids(username: str) -> tuple[str, str, str]:
+    """Look up user_id, company_id, and display name from Supabase users table."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return "", "", ""
+    _SB_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    try:
+        resp = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/users",
+            params={
+                "select": "id,company_id,first_name,last_name",
+                "linkedin_url": f"ilike.%{username}%",
+                "limit": "1",
+            },
+            headers=_SB_HEADERS,
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+        if rows:
+            user_id = rows[0].get("id", "") or ""
+            company_id = rows[0].get("company_id", "") or ""
+            first = (rows[0].get("first_name") or "").strip()
+            last = (rows[0].get("last_name") or "").strip()
+            display_name = f"{first} {last}".strip()
+            logger.info("[Stelle] Resolved Supabase IDs for @%s: user=%s company=%s name=%r",
+                        username, user_id, company_id, display_name)
+            return user_id, company_id, display_name
+    except Exception as e:
+        logger.warning("[Stelle] Supabase user lookup failed for @%s: %s", username, e)
+    return "", "", ""
+
+
 def _fetch_research_files(company_keyword: str) -> list[dict]:
-    """Fetch parallel_research_results for person and company from Supabase."""
+    """Fetch parallel_research_results for person and company from Supabase, scoped to client."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return []
 
@@ -1588,20 +1650,34 @@ def _fetch_research_files(company_keyword: str) -> list[dict]:
     if not username_path.exists():
         return []
 
+    username = username_path.read_text().strip()
+    if not username:
+        return []
+
+    user_id, company_id, _display_name = _resolve_supabase_ids(username)
+
     _SB_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
 
     for research_type in ("person", "company"):
         try:
-            filter_key = "user_id" if research_type == "person" else "company_id"
+            params: dict[str, str] = {
+                "select": "output,basis,created_at",
+                "research_type": f"eq.{research_type}",
+                "error": "is.null",
+                "order": "created_at.desc",
+                "limit": "1",
+            }
+            if research_type == "person" and user_id:
+                params["user_id"] = f"eq.{user_id}"
+            elif research_type == "company" and company_id:
+                params["company_id"] = f"eq.{company_id}"
+            else:
+                logger.info("[Stelle] No Supabase ID for %s research — skipping", research_type)
+                continue
+
             resp = httpx.get(
                 f"{SUPABASE_URL}/rest/v1/parallel_research_results",
-                params={
-                    "select": "output,basis,created_at",
-                    "research_type": f"eq.{research_type}",
-                    "error": "is.null",
-                    "order": "created_at.desc",
-                    "limit": "1",
-                },
+                params=params,
                 headers=_SB_HEADERS,
                 timeout=30.0,
             )
@@ -1629,6 +1705,10 @@ def _setup_workspace(company_keyword: str) -> Path:
     Uses a persistent workspace under data/workspaces/ instead of a temp dir
     so that snapshots, rollback, and feedback all share the same root.
     Symlinks and Supabase-sourced files are rebuilt on each run.
+
+    Under the stripped architecture (2026-04-10), no RuanMei-derived artifact
+    (memory/strategy.md) is written into the workspace. Stelle operates on
+    raw workspace inputs only.
     """
     from backend.src.db import vortex as _P
     workspace = _P.workspace_dir(company_keyword)
@@ -1640,6 +1720,18 @@ def _setup_workspace(company_keyword: str) -> Path:
     ctx = workspace / "context"
     if ctx.exists():
         shutil.rmtree(ctx)
+    # Also wipe scratch/ at run start. Without this, stale draft files from
+    # prior runs (posts that were never pushed to Ordinal) linger and can:
+    #   1. Collide with new drafts that get the same slug-based filename
+    #   2. Pollute scratch/final/ so Stelle reads ghost drafts as her own
+    #      in-progress output when avoiding self-collision across posts
+    #   3. Feed _extract_result_from_scratch stale files if write_result
+    #      fails and the fallback fires
+    # Anything unpushed "does not exist" per the new dedup model, so wiping
+    # scratch at setup start enforces that invariant at the filesystem level.
+    scratch = workspace / "scratch"
+    if scratch.exists():
+        shutil.rmtree(scratch)
     for d in ("abm_profiles", "revisions"):
         p = workspace / d
         if p.is_symlink():
@@ -1689,42 +1781,56 @@ def _setup_workspace(company_keyword: str) -> Path:
     for ve in voice_examples:
         (voice_dir / ve["filename"]).write_text(ve["content"], encoding="utf-8")
 
-    # memory/draft-posts/ — draft.sh writes here; seed from past_posts
+    # memory/draft-posts/ — READ-ONLY pre-populated from Ordinal's /posts endpoint
+    # (authoritative "pushed-but-not-yet-live" drafts). Stelle's in-run outputs
+    # go to scratch/final/, NOT here. This directory is the dedup source; her
+    # own writes don't "exist" until the publisher pushes them after the run.
     draft_posts_dir = mem / "draft-posts"
     draft_posts_dir.mkdir()
-    past_src = client_mem / "past_posts"
-    if past_src.exists():
-        for f in sorted(past_src.iterdir()):
-            if f.is_file() and f.suffix in (".txt", ".md"):
-                os.symlink(f.resolve(), draft_posts_dir / f.name)
+    try:
+        ordinal_drafts = _fetch_ordinal_drafts(company_keyword, exclude_dates=_published_dates)
+        for od in ordinal_drafts:
+            (draft_posts_dir / od["filename"]).write_text(od["content"], encoding="utf-8")
+    except Exception as e:
+        logger.debug("[Stelle] Ordinal draft prefill skipped: %s", e)
 
-    # memory/feedback/edits/ — client feedback + auto-saved edit diffs
+    # memory/feedback/edits/ — auto-saved draft→posted edit diffs only.
+    # Operator-typed client feedback files are NOT symlinked in — they
+    # encode the operator's interpretation of client reactions, which is
+    # prescriptive and out-of-policy. Client-direct content belongs in
+    # transcripts/.
     feedback_dir = mem / "feedback"
     feedback_dir.mkdir()
     edits_dir = feedback_dir / "edits"
     edits_dir.mkdir()
-    fb_src = client_mem / "feedback"
-    if fb_src.exists():
-        for f in sorted(fb_src.iterdir()):
-            if f.is_file() and f.suffix in (".txt", ".md"):
-                os.symlink(f.resolve(), feedback_dir / f.name)
 
-    # memory/profile.md — LinkedIn profile data
+    # context/research/ — fetch BEFORE profile.md so we can fallback
+    research_files = _fetch_research_files(company_keyword)
+    research_dir = ctx / "research"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    _person_research_content: str = ""
+    for rf in research_files:
+        (research_dir / rf["filename"]).write_text(rf["content"], encoding="utf-8")
+        if rf["filename"] == "person.md":
+            _person_research_content = rf["content"]
+
+    # memory/profile.md — LinkedIn profile data (APIMaestro, or person.md fallback)
     profile_summary = _fetch_linkedin_profile(company_keyword)
     if profile_summary:
         (mem / "profile.md").write_text(profile_summary, encoding="utf-8")
+    elif _person_research_content:
+        (mem / "profile.md").write_text(
+            "# Client Profile (from deep research)\n\n" + _person_research_content[:8000],
+            encoding="utf-8",
+        )
+        logger.info("[Stelle] Using person.md research as profile.md fallback")
 
-    # memory/strategy.md — content strategy
-    cs_src = client_mem / "content_strategy"
-    strategy_parts: list[str] = []
-    if cs_src.exists():
-        for f in sorted(cs_src.iterdir()):
-            if f.is_file() and f.suffix in (".txt", ".md"):
-                strategy_parts.append(f.read_text(encoding="utf-8", errors="replace"))
-    if strategy_parts:
-        (mem / "strategy.md").write_text("\n\n---\n\n".join(strategy_parts), encoding="utf-8")
+    # memory/strategy.md — retired under stripped architecture.
+    # RuanMei's content_brief.json is no longer injected into Stelle's
+    # workspace as a prescriptive strategy document. Stelle writes from
+    # raw transcripts and voice examples instead.
 
-    # memory/constraints.md — voice/tone rules from accepted posts
+    # memory/constraints.md — voice/tone rules from accepted posts (placeholder if empty)
     accepted_src = client_mem / "accepted"
     if accepted_src.exists() and any(accepted_src.iterdir()):
         constraint_lines = ["Voice and tone reference from accepted posts:\n"]
@@ -1732,6 +1838,11 @@ def _setup_workspace(company_keyword: str) -> Path:
             if f.is_file() and f.suffix in (".txt", ".md"):
                 constraint_lines.append(f"--- {f.name} ---\n{f.read_text(encoding='utf-8', errors='replace')}\n")
         (mem / "constraints.md").write_text("\n".join(constraint_lines), encoding="utf-8")
+    else:
+        (mem / "constraints.md").write_text(
+            "No accepted posts yet. Infer voice and tone from voice-examples/.",
+            encoding="utf-8",
+        )
 
     # memory/config.md — bounded agent memory, persisted across sessions
     persistent_config = client_mem / "config.md"
@@ -1754,28 +1865,21 @@ def _setup_workspace(company_keyword: str) -> Path:
         os.symlink(persistent_inventory.resolve(), ws_inventory)
 
     # ----- context/ hierarchy (our additions beyond Jacquard) -----
-    ctx = workspace / "context"
-    ctx.mkdir()
+    # ctx dir and ctx/research/ already created above (before profile.md)
+    ctx.mkdir(exist_ok=True)
 
-    # context/org/ — company context
+    # context/org/ — company context from research
     org_dir = ctx / "org"
-    org_dir.mkdir()
-    if cs_src.exists():
-        for f in sorted(cs_src.iterdir()):
-            if f.is_file() and f.suffix in (".txt", ".md"):
-                os.symlink(f.resolve(), org_dir / f.name)
+    org_dir.mkdir(exist_ok=True)
+    company_research = research_dir / "company.md"
+    if company_research.exists():
+        os.symlink(company_research.resolve(), org_dir / "company.md")
 
-    # context/research/ — from Supabase parallel_research_results
-    research_files = _fetch_research_files(company_keyword)
-    research_dir = ctx / "research"
-    research_dir.mkdir()
-    for rf in research_files:
-        (research_dir / rf["filename"]).write_text(rf["content"], encoding="utf-8")
-
-    # context/topic-velocity.md — recent industry signal from Serper
-    tv_src = client_mem / "topic_velocity.md"
-    if tv_src.exists():
-        os.symlink(tv_src.resolve(), ctx / "topic-velocity.md")
+    # context/topic-velocity.md — intentionally NOT symlinked. Previously
+    # Perplexity-generated trending-topic summary auto-injected into
+    # Stelle's context, which violated the "transcripts/ + deltas +
+    # engagement only" input policy. If Stelle needs trending-topic
+    # context during drafting she reaches for the web_search tool.
 
     # ----- Other top-level dirs -----
     for subdir in ("abm_profiles", "revisions"):
@@ -1788,7 +1892,13 @@ def _setup_workspace(company_keyword: str) -> Path:
     scratch_dir = workspace / "scratch"
     scratch_dir.mkdir(exist_ok=True)
     (scratch_dir / "drafts").mkdir(exist_ok=True)
+    (scratch_dir / "final").mkdir(exist_ok=True)
     (workspace / "output").mkdir(exist_ok=True)
+
+    # Write tool scripts (validate_draft.py, web_search.py, query_posts.py,
+    # ordinal_analytics.py, semantic_search_posts.py, image_search.py, etc.)
+    # into workspace/tools/ so Stelle can invoke them via bash.
+    _write_tool_scripts(workspace)
 
     logger.info(
         "[Stelle] Workspace staged at %s (%d published posts, %d voice examples, %d research files)",
@@ -1805,195 +1915,22 @@ def _setup_workspace(company_keyword: str) -> Path:
 _OVERRIDE_MIN_EDITS_FOR_CHAR_LIMIT = 5
 
 
-def _build_overrides(company_keyword: str) -> dict:
-    """Check feedback history and RuanMei insights for learnable overrides.
-
-    Returns dict with keys like "char_limit" that replace hard-coded defaults
-    when enough data supports it. Logs when an override activates.
-    """
-    overrides: dict[str, Any] = {}
-
-    # --- 1. Character limit override ---
-    # If the feedback engine has 5+ edit deltas where the human editor
-    # consistently makes posts longer/shorter, adjust the range.
-    try:
-        from backend.src.agents.ruan_mei import RuanMei
-        rm = RuanMei(company_keyword)
-        scored = [
-            o for o in rm._state.get("observations", [])
-            if o.get("status") == "scored"
-            and (o.get("posted_body") or "").strip()
-        ]
-        # Use posted_body (final accepted text) char counts
-        accepted_lengths = [len(o["posted_body"].strip()) for o in scored if o.get("posted_body", "").strip()]
-
-        if len(accepted_lengths) >= _OVERRIDE_MIN_EDITS_FOR_CHAR_LIMIT:
-            accepted_lengths.sort()
-            median_len = accepted_lengths[len(accepted_lengths) // 2]
-            learned_min = max(400, int(median_len * 0.7))
-            learned_max = max(learned_min + 200, int(median_len * 1.3))
-            # Only override if the learned range differs meaningfully from default
-            if learned_min != 1300 or learned_max != 3000:
-                overrides["char_limit"] = f"{learned_min}-{learned_max}"
-                overrides["char_limit_min"] = learned_min
-                overrides["char_limit_max"] = learned_max
-                overrides["char_limit_median"] = median_len
-                overrides["char_limit_sample_size"] = len(accepted_lengths)
-                logger.info(
-                    "[Stelle] Override active for %s: char_limit=%s (median=%d, n=%d)",
-                    company_keyword, overrides["char_limit"], median_len, len(accepted_lengths),
-                )
-    except Exception as e:
-        logger.debug("[Stelle] Char limit override check failed for %s: %s", company_keyword, e)
-
-    # --- 2. Cadence override ---
-    # If RuanMei insights show a specific cadence pattern, inject as system-level.
-    try:
-        from backend.src.agents.ruan_mei import RuanMei
-        rm = RuanMei(company_keyword)
-        scored = [o for o in rm._state.get("observations", []) if o.get("status") == "scored"]
-        if len(scored) >= 10:
-            # Compute actual posting cadence from data
-            timestamps = []
-            for o in scored:
-                ts = o.get("posted_at") or o.get("recorded_at", "")
-                if ts:
-                    try:
-                        from datetime import datetime as _dt, timezone as _tz
-                        dt = _dt.fromisoformat(ts.replace("Z", "+00:00"))
-                        timestamps.append(dt)
-                    except Exception:
-                        pass
-            if len(timestamps) >= 5:
-                timestamps.sort()
-                gaps = [(timestamps[i+1] - timestamps[i]).days for i in range(len(timestamps)-1)]
-                gaps = [g for g in gaps if g > 0]  # filter same-day
-                if gaps:
-                    median_gap = sorted(gaps)[len(gaps) // 2]
-                    if median_gap <= 2:
-                        cadence_note = f"This client posts frequently (median {median_gap} days between posts). Maintain this momentum."
-                    elif median_gap <= 4:
-                        cadence_note = f"This client posts ~{7 // median_gap}x per week (median gap: {median_gap} days). Match this rhythm."
-                    elif median_gap <= 7:
-                        cadence_note = f"This client posts weekly (median gap: {median_gap} days)."
-                    else:
-                        cadence_note = f"This client posts infrequently (median gap: {median_gap} days). Each post matters more — prioritize quality."
-                    overrides["cadence_note"] = cadence_note
-                    logger.info(
-                        "[Stelle] Override active for %s: cadence (median_gap=%d days)",
-                        company_keyword, median_gap,
-                    )
-    except Exception as e:
-        logger.debug("[Stelle] Cadence override check failed for %s: %s", company_keyword, e)
-
-    return overrides
-
-
-def _apply_overrides_to_prompt(prompt: str, overrides: dict) -> str:
-    """Replace hard-coded values in system prompt with learned overrides."""
-    if not overrides:
-        return prompt
-
-    # Character limit override
-    char_limit = overrides.get("char_limit")
-    if char_limit:
-        prompt = prompt.replace("- 1300-3000 characters.", f"- {char_limit} characters.")
-
-    # Cadence override — inject as a system-level directive
-    cadence_note = overrides.get("cadence_note")
-    if cadence_note:
-        # Insert cadence insight right after the hard constraints section
-        cadence_block = f"\n## Posting Cadence (learned from data)\n\n{cadence_note}\n"
-        # Insert before the Tools section
-        if "## Tools" in prompt:
-            prompt = prompt.replace("## Tools", cadence_block + "## Tools", 1)
-        elif "## Process" in prompt:
-            prompt = prompt.replace("## Process", cadence_block + "## Process", 1)
-
-    return prompt
-
-
 # ---------------------------------------------------------------------------
 # Dynamic directives
 # ---------------------------------------------------------------------------
 
 def _build_dynamic_directives(company_keyword: str) -> str:
-    """Assemble per-client context appended to Stelle's system prompt template.
+    """Deprecated. Returns empty string.
 
-    Section order is intentional. Learned writing rules are front-loaded so
-    the LLM sees the empirically-distilled directives before the much longer
-    content strategy document (~16k chars for innovocommerce). At 21k+ chars
-    of combined context, attention dilutes toward the end — the small,
-    evidence-backed rules deserve the top slot.
-
-    Strategy brief context is NOT injected here. It's injected into the user
-    prompt via ``build_stelle_strategy_context`` in ``generate_one_shot``. The
-    split is deliberate: per-generation recommendations belong in the user
-    message (ephemeral, specific to this invocation); persistent client
-    identity belongs in the system prompt.
+    Previously injected ABM targets, client feedback, and before/after
+    revisions into Stelle's system prompt. All three are operator-curated
+    interpretations of the client, which encodes prescriptive framing and
+    violates the "client-direct content only" principle. Anything the
+    client has actually said belongs in ``transcripts/`` where Stelle
+    reads raw text; post deltas + engagement arrive through observation
+    queries; everything else is a tool call.
     """
-    sections = []
-
-    # 1. Learned writing rules (front-loaded) — small, distilled, high-signal.
-    try:
-        from backend.src.utils.feedback_distiller import build_stelle_directives_section
-        _learned = build_stelle_directives_section(company_keyword)
-        if _learned:
-            sections.append(_learned)
-    except Exception:
-        pass
-
-    # 2. Content strategy — the human strategist's intent layer. Large but
-    #    authoritative; can override what the engagement data suggests.
-    cs_dir = P.content_strategy_dir(company_keyword)
-    if cs_dir.exists():
-        for f in sorted(cs_dir.iterdir()):
-            if f.is_file() and f.suffix in (".txt", ".md"):
-                sections.append(f"## Content Strategy\n\n{f.read_text(encoding='utf-8', errors='replace')}")
-
-    # 3. ABM targets.
-    abm = P.abm_dir(company_keyword)
-    if abm.exists():
-        for f in sorted(abm.iterdir()):
-            if f.is_file() and f.suffix in (".txt", ".md"):
-                text = f.read_text(encoding="utf-8", errors="replace").strip()
-                if text:
-                    sections.append(
-                        f"## ABM Targets\n\n"
-                        f"Some posts should strategically mention these companies/products. "
-                        f"Weave mentions in naturally — never force them.\n\n{text}"
-                    )
-
-    # 4. Client feedback on previous drafts.
-    fb_dir = P.feedback_dir(company_keyword)
-    if fb_dir.exists():
-        fb_texts = []
-        for f in sorted(fb_dir.iterdir()):
-            if f.is_file() and f.suffix in (".txt", ".md"):
-                fb_texts.append(f.read_text(encoding="utf-8", errors="replace"))
-        if fb_texts:
-            sections.append(
-                f"## Client Feedback on Previous Drafts\n\n"
-                f"Learn from this feedback — avoid the same mistakes.\n\n"
-                + "\n---\n".join(fb_texts)
-            )
-
-    # 5. Before/after revision pairs.
-    rev_dir = P.revisions_dir(company_keyword)
-    if rev_dir.exists():
-        rev_texts = []
-        for f in sorted(rev_dir.iterdir()):
-            if f.is_file() and f.suffix in (".txt", ".md"):
-                rev_texts.append(f.read_text(encoding="utf-8", errors="replace"))
-        if rev_texts:
-            sections.append(
-                f"## Before/After Revisions\n\n"
-                f"Study the delta between pipeline drafts and human-revised versions. "
-                f"Internalize the patterns.\n\n"
-                + "\n---\n".join(rev_texts)
-            )
-
-    return "\n\n".join(sections) if sections else ""
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -2023,18 +1960,14 @@ if [ -z "$POST" ]; then
 fi
 CLEAN_POST=$(echo "$POST" | sed '/^<!-- \[/d' | cat -s)
 CHARS=${#CLEAN_POST}
-if [ "$CHARS" -lt 1300 ]; then
-  echo "REJECTED: ${CHARS} characters (minimum 1300)."
-  exit 1
-fi
 if [ "$CHARS" -gt 3000 ]; then
-  echo "REJECTED: ${CHARS} characters (maximum 3000)."
+  echo "REJECTED: ${CHARS} characters exceeds LinkedIn's 3000-character platform cap."
   exit 1
 fi
 SLUG=$(echo "$CLEAN_POST" | head -1 | head -c 60 | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9 ]//g' | tr ' ' '-' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
 DATE=$(date +%Y-%m-%d)
-mkdir -p memory/draft-posts
-FILENAME="memory/draft-posts/${DATE}-${SLUG}.md"
+mkdir -p scratch/final
+FILENAME="scratch/final/${DATE}-${SLUG}.md"
 if [ -n "$SCHEDULED_DATE" ]; then
   printf "<!-- scheduled: %s -->\n%s" "$SCHEDULED_DATE" "$POST" > "$FILENAME"
   echo "PUBLISHED: ${CHARS} characters. Scheduled: ${SCHEDULED_DATE}. Saved to ${FILENAME}."
@@ -2057,12 +1990,8 @@ if [ -z "$DRAFT_FILE" ] || [ -z "$POST" ]; then
 fi
 CLEAN_POST=$(echo "$POST" | sed '/^<!-- \[/d' | cat -s)
 CHARS=${#CLEAN_POST}
-if [ "$CHARS" -lt 1300 ]; then
-  echo "REJECTED: ${CHARS} characters (minimum 1300)."
-  exit 1
-fi
 if [ "$CHARS" -gt 3000 ]; then
-  echo "REJECTED: ${CHARS} characters (maximum 3000)."
+  echo "REJECTED: ${CHARS} characters exceeds LinkedIn's 3000-character platform cap."
   exit 1
 fi
 if [ -f "$DRAFT_FILE" ]; then
@@ -2685,8 +2614,8 @@ structural issues that don't need an LLM: character count and deterministic
 banned-phrase detection.
 
 Usage: python3 validate_draft.py "Your full post text here"
-       python3 validate_draft.py --file memory/draft-posts/my-draft.md
-       python3 validate_draft.py --attempt 2 --file memory/draft-posts/my-draft.md
+       python3 validate_draft.py --file scratch/final/my-draft.md
+       python3 validate_draft.py --attempt 2 --file scratch/final/my-draft.md
 
 After attempt 2, issues are downgraded to info (escape hatch).
 """
@@ -2733,24 +2662,18 @@ def main():
     issues = []
     char_count = len(post_text)
 
-    # --- Character count (structural, always checked) ---
+    # --- Character count (LinkedIn platform cap only) ---
+    # No hand-tuned length floor: length is learnable from the client's own
+    # published posts and the writer already reads them before drafting.
     if char_count > 3000:
         issues.append({"type": "char_count", "severity": "critical",
-            "description": f"Post is {char_count} chars — exceeds 3000 char limit",
+            "description": f"Post is {char_count} chars — exceeds LinkedIn's 3000 char platform cap",
             "suggested_fix": f"Cut {char_count - 2800} characters"})
-    elif char_count < 400:
-        issues.append({"type": "char_count", "severity": "critical",
-            "description": f"Post is only {char_count} chars — too short for engagement",
-            "suggested_fix": "Add more substance: examples, details, data, or a story. Target 1300+"})
-    elif char_count < 800:
-        issues.append({"type": "char_count", "severity": "warning",
-            "description": f"Post is only {char_count} chars — unusually short",
-            "suggested_fix": f"Consider adding ~{800 - char_count} chars of substance"})
 
-    # No content quality checks here — AI patterns, banned phrases, and
-    # writing style are the constitutional verifier's domain. It runs
-    # post-generation with learned principle weights that adapt to what
-    # actually affects engagement for each client.
+    # No content quality checks here — style, cadence, and voice are
+    # learnable from the client's own published posts and from the ICP
+    # simulator's feedback loop. This validator only enforces the LinkedIn
+    # platform cap and nothing else.
 
     if escape_hatch:
         downgraded = []
@@ -2828,331 +2751,49 @@ if __name__ == "__main__":
 '''
 
 
+def _write_if_changed(path: Path, content: str) -> None:
+    """Write file only if content differs from what's on disk.
+
+    Avoids touching mtime on unchanged files, which prevents
+    uvicorn --reload / watchfiles from triggering a server restart
+    when Stelle writes tool scripts into the workspace.
+    """
+    try:
+        if path.exists() and path.read_text(encoding="utf-8") == content:
+            return
+    except Exception:
+        pass
+    path.write_text(content, encoding="utf-8")
+
+
 def _write_tool_scripts(workspace_root: Path) -> None:
     """Write helper scripts for web search, URL extraction, post search, analytics, validation, image search, and draft/edit/memory."""
     tools_dir = workspace_root / "tools"
     tools_dir.mkdir(exist_ok=True)
-    (tools_dir / "web_search.py").write_text(_WEB_SEARCH_SCRIPT, encoding="utf-8")
-    (tools_dir / "fetch_url.py").write_text(_FETCH_URL_SCRIPT, encoding="utf-8")
-    (tools_dir / "query_posts.py").write_text(_QUERY_POSTS_SCRIPT, encoding="utf-8")
-    (tools_dir / "ordinal_analytics.py").write_text(_ORDINAL_ANALYTICS_SCRIPT, encoding="utf-8")
-    (tools_dir / "semantic_search_posts.py").write_text(_SEMANTIC_SEARCH_SCRIPT, encoding="utf-8")
-    (tools_dir / "validate_draft.py").write_text(_VALIDATE_DRAFT_SCRIPT, encoding="utf-8")
-    (tools_dir / "image_search.py").write_text(_IMAGE_SEARCH_SCRIPT, encoding="utf-8")
+    _write_if_changed(tools_dir / "web_search.py", _WEB_SEARCH_SCRIPT)
+    _write_if_changed(tools_dir / "fetch_url.py", _FETCH_URL_SCRIPT)
+    _write_if_changed(tools_dir / "query_posts.py", _QUERY_POSTS_SCRIPT)
+    _write_if_changed(tools_dir / "ordinal_analytics.py", _ORDINAL_ANALYTICS_SCRIPT)
+    _write_if_changed(tools_dir / "semantic_search_posts.py", _SEMANTIC_SEARCH_SCRIPT)
+    _write_if_changed(tools_dir / "validate_draft.py", _VALIDATE_DRAFT_SCRIPT)
+    _write_if_changed(tools_dir / "image_search.py", _IMAGE_SEARCH_SCRIPT)
 
     draft_sh = workspace_root / "draft.sh"
-    draft_sh.write_text(_DRAFT_SH_SCRIPT, encoding="utf-8")
+    _write_if_changed(draft_sh, _DRAFT_SH_SCRIPT)
     draft_sh.chmod(0o755)
 
     edit_sh = workspace_root / "edit.sh"
-    edit_sh.write_text(_EDIT_SH_SCRIPT, encoding="utf-8")
+    _write_if_changed(edit_sh, _EDIT_SH_SCRIPT)
     edit_sh.chmod(0o755)
 
     memory_sh = workspace_root / "memory.sh"
-    memory_sh.write_text(_MEMORY_SH_SCRIPT, encoding="utf-8")
+    _write_if_changed(memory_sh, _MEMORY_SH_SCRIPT)
     memory_sh.chmod(0o755)
-
-
-def _write_agents_md(workspace_root: Path, company_keyword: str) -> None:
-    """Write AGENTS.md to workspace root for Pi to discover."""
-    directives = _build_dynamic_directives(company_keyword)
-    overrides = _build_overrides(company_keyword)
-    content = _PI_AGENTS_TEMPLATE.format(dynamic_directives=directives)
-    content = _apply_overrides_to_prompt(content, overrides)
-    (workspace_root / "AGENTS.md").write_text(content, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
 # Pi-based agentic loop (primary — matches Jacquard architecture)
 # ---------------------------------------------------------------------------
-
-def _run_pi_agent(
-    workspace_root: Path,
-    user_prompt: str,
-    company_keyword: str,
-    event_callback: Any = None,
-    model: str = "claude-opus-4-6",
-) -> tuple[dict | None, list[dict]]:
-    """Run the ghostwriter via Pi CLI with automatic context compaction."""
-    session_log: list[dict[str, Any]] = []
-    session_start = time.time()
-
-    _write_agents_md(workspace_root, company_keyword)
-    _write_tool_scripts(workspace_root)
-
-    session_dir = P.memory_dir(company_keyword) / ".pi-sessions"
-    session_dir.mkdir(parents=True, exist_ok=True)
-
-    has_sessions = any(session_dir.glob("*.jsonl"))
-
-    provider = "anthropic"
-    if "/" in model:
-        provider, model = model.split("/", 1)
-
-    pi_cmd = [
-        "pi",
-        "--mode", "json",
-        "-p",
-        "--provider", provider,
-        "--model", model,
-        "--thinking", "high",
-        "--session-dir", str(session_dir),
-        "--tools", "read,bash,edit,write,grep,find,ls",
-    ]
-    if has_sessions:
-        pi_cmd.append("--continue")
-    pi_cmd.append(user_prompt)
-
-    env = os.environ.copy()
-    env["ANTHROPIC_API_KEY"] = os.getenv("ANTHROPIC_API_KEY", "")
-    env["PARALLEL_API_KEY"] = PARALLEL_API_KEY
-    env["SUPABASE_URL"] = SUPABASE_URL
-    env["SUPABASE_KEY"] = SUPABASE_KEY
-    env["APIMAESTRO_API_KEY"] = APIMAESTRO_KEY
-    env["APIMAESTRO_HOST"] = APIMAESTRO_HOST
-    env["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "")
-    env["PINECONE_API_KEY"] = os.getenv("PINECONE_API_KEY", "")
-    env["SERPER_API_KEY"] = os.getenv("SERPER_API_KEY", "")
-    env["SERPER_BASE_URL"] = os.getenv("SERPER_BASE_URL", "https://google.serper.dev/search")
-    ordinal_key = _get_ordinal_api_key(company_keyword)
-    if ordinal_key:
-        env["ORDINAL_API_KEY"] = ordinal_key
-
-    session_log.append({
-        "type": "session_start",
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "runner": "pi",
-        "pi_version": "0.63.1",
-        "has_prior_session": has_sessions,
-        "workspace": str(workspace_root),
-    })
-
-    pi_timeout = 900  # 15 minutes max for a full generation run
-
-    logger.info("[Stelle/Pi] Starting Pi agent (session_dir=%s, continue=%s)...", session_dir, has_sessions)
-    print(f"[Stelle] Running Pi agent for {company_keyword} (timeout={pi_timeout}s)...")
-
-    jsonl_out = workspace_root / "output" / "pi_events.jsonl"
-
-    events_seen = 0
-    compaction_count = 0
-    total_input_tokens = 0
-    total_output_tokens = 0
-    total_cost = 0.0
-    all_lines: list[str] = []
-    exit_code = -1
-
-    def _process_event(event: dict) -> None:
-        nonlocal events_seen, compaction_count, total_input_tokens, total_output_tokens, total_cost
-        events_seen += 1
-        etype = event.get("type", "")
-
-        if etype == "message_update":
-            ae = event.get("assistantMessageEvent", {})
-            ae_type = ae.get("type", "")
-            msg = event.get("message", ae.get("message", {}))
-
-            if ae_type == "text_delta":
-                delta = ae.get("textDelta", "")
-                if delta and event_callback:
-                    event_callback("text_delta", {"text": delta})
-
-            elif ae_type == "thinking_delta":
-                delta = ae.get("thinkingDelta", "")
-                if delta and event_callback:
-                    event_callback("thinking", {"text": delta})
-
-            elif ae_type.startswith("toolcall"):
-                for block in msg.get("content", []):
-                    if block.get("type") == "toolCall":
-                        name = block.get("name", "")
-                        args = block.get("arguments", {})
-                        summary = ""
-                        if isinstance(args, dict):
-                            summary = args.get("path", args.get("command", str(args)))[:80]
-                        logger.info("[Stelle/Pi] tool: %s(%s)", name, summary)
-                        print(f"[Stelle/Pi] tool: {name}({summary})")
-                        if event_callback:
-                            event_callback("tool_call", {"name": name, "arguments": summary})
-
-            usage = msg.get("usage", {})
-            if usage:
-                total_input_tokens = max(total_input_tokens, usage.get("input", 0))
-                total_output_tokens += usage.get("output", 0)
-                cost = usage.get("cost", {})
-                if isinstance(cost, dict):
-                    total_cost = max(total_cost, cost.get("total", 0))
-
-        elif etype == "tool_result":
-            result_text = str(event.get("result", ""))[:500]
-            if event_callback:
-                event_callback("tool_result", {"name": event.get("tool", ""), "result": result_text, "is_error": False})
-
-        elif etype == "turn_end":
-            msg = event.get("message", {})
-            usage = msg.get("usage", {})
-            if usage:
-                cost_info = usage.get("cost", {})
-                in_tok = usage.get("input", 0)
-                out_tok = usage.get("output", 0)
-                cache_tok = usage.get("cacheRead", 0)
-                cost_val = cost_info.get("total", 0) if isinstance(cost_info, dict) else 0
-                logger.info(
-                    "[Stelle/Pi] turn end — in=%d out=%d cache_read=%d cost=$%.4f",
-                    in_tok, out_tok, cache_tok, cost_val,
-                )
-                print(f"[Stelle/Pi] turn end — in={in_tok} out={out_tok} cache={cache_tok} cost=${cost_val:.4f}")
-                if event_callback:
-                    event_callback("status", {"message": f"Turn complete — in={in_tok} out={out_tok} cache={cache_tok} cost=${cost_val:.4f}"})
-
-        elif etype == "auto_compaction_start":
-            compaction_count += 1
-            logger.info("[Stelle/Pi] Context compaction #%d", compaction_count)
-            print(f"[Stelle/Pi] Context compaction #{compaction_count}")
-            if event_callback:
-                event_callback("compaction", {"message": f"Context compaction #{compaction_count}"})
-
-        elif etype == "auto_retry_start":
-            logger.info("[Stelle/Pi] Retry %s/%s...", event.get("attempt", "?"), event.get("maxAttempts", "?"))
-            print(f"[Stelle/Pi] Retry {event.get('attempt', '?')}/{event.get('maxAttempts', '?')}...")
-            if event_callback:
-                event_callback("status", {"message": f"Retry {event.get('attempt', '?')}/{event.get('maxAttempts', '?')}..."})
-
-        elif etype == "error":
-            err_msg = event.get("message", str(event))[:300]
-            logger.error("[Stelle/Pi] Error: %s", err_msg)
-            print(f"[Stelle/Pi] ERROR: {err_msg}")
-            if event_callback:
-                event_callback("error", {"message": err_msg})
-
-        session_log.append({
-            "type": "pi_event",
-            "event_type": etype,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "summary": str(event)[:500],
-        })
-
-    try:
-        proc = subprocess.Popen(
-            pi_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            cwd=str(workspace_root),
-            env=env,
-            text=True,
-            bufsize=1,
-        )
-
-        import threading
-
-        stderr_chunks: list[str] = []
-
-        def _read_stderr():
-            assert proc.stderr is not None
-            for line in proc.stderr:
-                stderr_chunks.append(line)
-
-        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
-        stderr_thread.start()
-
-        file_poll_stop = threading.Event()
-
-        def _poll_files():
-            known: set[str] = set()
-            for p in workspace_root.rglob("*"):
-                if p.is_file():
-                    known.add(str(p))
-            while not file_poll_stop.is_set():
-                file_poll_stop.wait(3.0)
-                if file_poll_stop.is_set():
-                    break
-                current: set[str] = set()
-                for p in workspace_root.rglob("*"):
-                    if p.is_file():
-                        current.add(str(p))
-                new_files = current - known
-                if new_files and event_callback:
-                    relative = [str(Path(f).relative_to(workspace_root)) for f in sorted(new_files)]
-                    event_callback("status", {"message": f"Files changed: {', '.join(relative[:10])}"})
-                known = current
-
-        file_poll_thread = threading.Thread(target=_poll_files, daemon=True)
-        file_poll_thread.start()
-
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            all_lines.append(line)
-            try:
-                event = json.loads(line)
-                _process_event(event)
-            except json.JSONDecodeError:
-                logger.debug("[Stelle/Pi] Non-JSON line: %s", line[:200])
-
-        proc.wait(timeout=30)
-        exit_code = proc.returncode
-        file_poll_stop.set()
-        file_poll_thread.join(timeout=2)
-        stderr_thread.join(timeout=5)
-        stderr_output = "".join(stderr_chunks)
-
-    except subprocess.TimeoutExpired:
-        logger.error("[Stelle/Pi] Pi timed out after %ds", pi_timeout)
-        print(f"[Stelle] Pi timed out after {pi_timeout}s")
-        session_log.append({"type": "timeout", "timeout_seconds": pi_timeout})
-        file_poll_stop.set()
-        if proc:
-            proc.kill()
-        stderr_output = ""
-    except FileNotFoundError:
-        logger.error("[Stelle/Pi] Pi CLI not found — is it installed?")
-        return None, session_log
-
-    if all_lines:
-        try:
-            jsonl_out.write_text("\n".join(all_lines), encoding="utf-8")
-        except Exception:
-            pass
-
-    total_elapsed = time.time() - session_start
-
-    session_log.append({
-        "type": "session_end",
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "exit_code": exit_code,
-        "events_seen": events_seen,
-        "compaction_count": compaction_count,
-        "total_input_tokens": total_input_tokens,
-        "total_output_tokens": total_output_tokens,
-        "total_cost_usd": round(total_cost, 4),
-        "total_elapsed_seconds": round(total_elapsed, 1),
-    })
-
-    logger.info(
-        "[Stelle/Pi] Pi finished: exit=%d, events=%d, compactions=%d, "
-        "in=%d out=%d cost=$%.4f elapsed=%.1fs",
-        exit_code, events_seen, compaction_count,
-        total_input_tokens, total_output_tokens, total_cost, total_elapsed,
-    )
-    print(
-        f"[Stelle/Pi] Done: {events_seen} events, {compaction_count} compactions, "
-        f"cost=${total_cost:.4f}, elapsed={total_elapsed:.0f}s"
-    )
-
-    if exit_code != 0:
-        logger.error("[Stelle/Pi] Pi exited with code %d. stderr: %s", exit_code, stderr_output[:500])
-
-    result = _extract_pi_result(workspace_root)
-
-    if result is None:
-        logger.warning("[Stelle/Pi] No result.json found — trying to extract from scratch/drafts/")
-        result = _extract_result_from_scratch(workspace_root)
-
-    return result, session_log
-
 
 def _extract_pi_result(workspace_root: Path) -> dict | None:
     """Read the agent's output/result.json file."""
@@ -3191,10 +2832,19 @@ def _extract_citation_comments(text: str) -> list[str]:
 
 
 def _extract_result_from_scratch(workspace_root: Path) -> dict | None:
-    """Fallback: reconstruct result JSON from draft files in memory/draft-posts/ or scratch/drafts/."""
+    """Fallback: reconstruct result JSON from Stelle's in-run scratch outputs.
+
+    Priority order:
+      1. scratch/final/ — canonical in-run output location (new default)
+      2. scratch/drafts/ — legacy scratch location
+      3. memory/draft-posts/ — last resort; this directory is supposed to hold
+         Ordinal-pushed drafts only, but older runs wrote here so we still
+         look as a fallback for crash recovery
+    """
     search_dirs = [
-        workspace_root / "memory" / "draft-posts",
+        workspace_root / "scratch" / "final",
         workspace_root / "scratch" / "drafts",
+        workspace_root / "memory" / "draft-posts",
     ]
 
     posts: list[dict] = []
@@ -3237,125 +2887,909 @@ def _serialize_content_block(block: Any) -> dict:
     return {"type": block.type}
 
 
+_COMPACTION_RESERVE_TOKENS = 16_384
+_COMPACTION_KEEP_RECENT = 20_000
+_COMPACTION_CONTEXT_WINDOW = 200_000
+_TOOL_RESULT_MAX_CHARS = 2_000
+
+_SUMMARIZATION_SYSTEM = (
+    "You are a context summarization assistant. Your task is to read a "
+    "conversation between a user and an AI coding assistant, then produce "
+    "a structured summary following the exact format specified. "
+    "Do NOT continue the conversation. Do NOT respond to any questions "
+    "in the conversation. ONLY output the structured summary."
+)
+
+_SUMMARIZATION_PROMPT = """\
+The messages above are a conversation to summarize. Create a structured context \
+checkpoint summary that another LLM will use to continue the work.
+
+Use this EXACT format:
+
+## Goal
+[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned by user]
+- [Or "(none)" if none were mentioned]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Current work]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Ordered list of what should happen next]
+
+## Critical Context
+- [Any data, examples, or references needed to continue]
+- [Or "(none)" if not applicable]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages."""
+
+_UPDATE_SUMMARIZATION_PROMPT = """\
+The messages above are NEW conversation messages to incorporate into the \
+existing summary provided in <previous-summary> tags.
+
+Update the existing structured summary with new information. RULES:
+- PRESERVE all existing information from the previous summary
+- ADD new progress, decisions, and context from the new messages
+- UPDATE the Progress section: move items from "In Progress" to "Done" when completed
+- UPDATE "Next Steps" based on what was accomplished
+- PRESERVE exact file paths, function names, and error messages
+- If something is no longer relevant, you may remove it
+
+Use this EXACT format:
+
+## Goal
+[Preserve existing goals, add new ones if the task expanded]
+
+## Constraints & Preferences
+- [Preserve existing, add new ones discovered]
+
+## Progress
+### Done
+- [x] [Include previously done items AND newly completed items]
+
+### In Progress
+- [ ] [Current work - update based on progress]
+
+### Blocked
+- [Current blockers - remove if resolved]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+
+## Next Steps
+1. [Update based on current state]
+
+## Critical Context
+- [Preserve important context, add new if needed]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages."""
+
+_TURN_PREFIX_SUMMARIZATION_PROMPT = """\
+This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
+
+Summarize the prefix to provide context for the retained suffix:
+
+## Original Request
+[What did the user ask for in this turn?]
+
+## Early Progress
+- [Key decisions and work done in the prefix]
+
+## Context for Suffix
+- [Information needed to understand the retained recent work]
+
+Be concise. Focus on what's needed to understand the kept suffix."""
+
+
+def _estimate_message_tokens(msg: dict) -> int:
+    """Rough token estimate for a message (chars/4 heuristic)."""
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return len(content) // 4
+    if isinstance(content, list):
+        total = 0
+        for block in content:
+            if isinstance(block, dict):
+                for v in block.values():
+                    if isinstance(v, str):
+                        total += len(v)
+            elif hasattr(block, "text"):
+                total += len(getattr(block, "text", ""))
+            elif hasattr(block, "thinking"):
+                total += len(getattr(block, "thinking", ""))
+        return total // 4
+    return 0
+
+
+def _truncate_for_summary(text: str, max_chars: int = _TOOL_RESULT_MAX_CHARS) -> str:
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}\n\n[... {len(text) - max_chars} more characters truncated]"
+
+
+def _serialize_messages_for_summary(messages: list[dict], end_idx: int) -> str:
+    """Serialize messages[0:end_idx] into text for the summarization LLM."""
+    parts: list[str] = []
+    for msg in messages[:end_idx]:
+        role = msg.get("role", "?")
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            parts.append(f"[{role.capitalize()}]: {content}")
+        elif isinstance(content, list):
+            text_parts: list[str] = []
+            thinking_parts: list[str] = []
+            tool_calls: list[str] = []
+            tool_results: list[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    btype = block.get("type", "")
+                    if btype == "tool_result":
+                        text = str(block.get("content", ""))
+                        tool_results.append(f"[Tool result]: {_truncate_for_summary(text)}")
+                    elif btype == "text":
+                        text_parts.append(block.get("text", ""))
+                elif hasattr(block, "type"):
+                    if block.type == "text":
+                        text_parts.append(block.text)
+                    elif block.type == "thinking":
+                        thinking_parts.append(getattr(block, "thinking", ""))
+                    elif block.type == "tool_use":
+                        args_str = json.dumps(block.input, ensure_ascii=False)
+                        tool_calls.append(f"{block.name}({args_str[:500]})")
+            if thinking_parts:
+                parts.append(f"[Assistant thinking]: {' '.join(thinking_parts)}")
+            if text_parts:
+                parts.append(f"[{role.capitalize()}]: {' '.join(text_parts)}")
+            if tool_calls:
+                parts.append(f"[Assistant tool calls]: {'; '.join(tool_calls)}")
+            for tr in tool_results:
+                parts.append(tr)
+    return "\n\n".join(parts)
+
+
+def _extract_file_ops(messages: list[dict], end_idx: int) -> tuple[set[str], set[str]]:
+    """Extract files read and written/edited from tool calls in messages[0:end_idx]."""
+    read_files: set[str] = set()
+    modified_files: set[str] = set()
+    for msg in messages[:end_idx]:
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not hasattr(block, "type") or block.type != "tool_use":
+                continue
+            args = block.input if isinstance(block.input, dict) else {}
+            path = args.get("path") or args.get("file_path") or ""
+            if not path:
+                continue
+            if block.name in ("read", "read_file"):
+                read_files.add(path)
+            elif block.name in ("write", "write_file", "edit", "str_replace_editor"):
+                modified_files.add(path)
+    read_only = read_files - modified_files
+    return read_only, modified_files
+
+
+def _format_file_ops(read_files: set[str], modified_files: set[str]) -> str:
+    sections: list[str] = []
+    if read_files:
+        sections.append(f"<read-files>\n{chr(10).join(sorted(read_files))}\n</read-files>")
+    if modified_files:
+        sections.append(f"<modified-files>\n{chr(10).join(sorted(modified_files))}\n</modified-files>")
+    return ("\n\n" + "\n\n".join(sections)) if sections else ""
+
+
+_OVERFLOW_PATTERNS = [
+    re.compile(r"prompt is too long", re.IGNORECASE),
+    re.compile(r"exceeds the context window", re.IGNORECASE),
+    re.compile(r"input token count.*exceeds the maximum", re.IGNORECASE),
+    re.compile(r"context[_ ]length[_ ]exceeded", re.IGNORECASE),
+    re.compile(r"too many tokens", re.IGNORECASE),
+    re.compile(r"token limit exceeded", re.IGNORECASE),
+    re.compile(r"reduce the length of the messages", re.IGNORECASE),
+    re.compile(r"maximum context length is \d+ tokens", re.IGNORECASE),
+]
+
+
+def _is_context_overflow(error: Exception) -> bool:
+    msg = str(error)
+    return any(p.search(msg) for p in _OVERFLOW_PATTERNS)
+
+
+class _CompactionState:
+    """Tracks compaction state across the session for incremental merging."""
+
+    __slots__ = ("previous_summary", "read_files", "modified_files", "compaction_count")
+
+    def __init__(self) -> None:
+        self.previous_summary: str | None = None
+        self.read_files: set[str] = set()
+        self.modified_files: set[str] = set()
+        self.compaction_count: int = 0
+
+
+def _inject_cache_breakpoint(messages: list[dict]) -> None:
+    """Add cache_control to the last block of the last user message (in-place).
+
+    This makes Anthropic cache everything from system prompt through this point.
+    On subsequent turns, the prefix is a cache read at 0.1x cost.
+    """
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = [
+                {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}},
+            ]
+        elif isinstance(content, list) and content:
+            last_block = content[-1]
+            if isinstance(last_block, dict):
+                last_block["cache_control"] = {"type": "ephemeral"}
+        break
+
+
+def _strip_cache_breakpoints(messages: list[dict]) -> None:
+    """Remove cache_control markers from all messages (in-place).
+
+    Called after API response so stale breakpoints don't accumulate.
+    """
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+
+
+def _clean_messages_for_api(messages: list[dict]) -> list[dict]:
+    """Return a cleaned copy of messages: drop error/aborted assistant turns."""
+    cleaned: list[dict] = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get("role") == "assistant":
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                is_error = False
+                for block in content:
+                    if hasattr(block, "type") and block.type == "text":
+                        text = getattr(block, "text", "")
+                        if text.startswith("Error:") or text.startswith("error:"):
+                            is_error = True
+                            break
+                if is_error and i + 1 < len(messages):
+                    i += 1
+                    continue
+        cleaned.append(msg)
+        i += 1
+    return cleaned
+
+
+def _should_compact(last_usage: dict | None, messages: list[dict]) -> bool:
+    """Decide whether to compact based on real API usage or heuristic."""
+    if last_usage:
+        context_tokens = (
+            last_usage.get("input_tokens", 0)
+            + last_usage.get("output_tokens", 0)
+            + last_usage.get("cache_read_input_tokens", 0)
+            + last_usage.get("cache_creation_input_tokens", 0)
+        )
+        trailing = sum(
+            _estimate_message_tokens(m)
+            for m in messages[-2:]
+        )
+        return (context_tokens + trailing) > (_COMPACTION_CONTEXT_WINDOW - _COMPACTION_RESERVE_TOKENS)
+    return sum(_estimate_message_tokens(m) for m in messages) > (
+        _COMPACTION_CONTEXT_WINDOW - _COMPACTION_RESERVE_TOKENS
+    )
+
+
+def _find_turn_start(messages: list[dict], idx: int) -> int:
+    """Walk backwards from idx to find the user message that started this turn."""
+    for i in range(idx - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            return i
+    return -1
+
+
+def _generate_summary(
+    text: str,
+    previous_summary: str | None,
+    max_tokens: int,
+) -> str:
+    """Call the summarization model. Supports initial and incremental summaries."""
+    if previous_summary:
+        prompt_text = (
+            f"<conversation>\n{text[:80000]}\n</conversation>\n\n"
+            f"<previous-summary>\n{previous_summary}\n</previous-summary>\n\n"
+            f"{_UPDATE_SUMMARIZATION_PROMPT}"
+        )
+    else:
+        prompt_text = (
+            f"<conversation>\n{text[:80000]}\n</conversation>\n\n"
+            f"{_SUMMARIZATION_PROMPT}"
+        )
+    resp = _client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        system=_SUMMARIZATION_SYSTEM,
+        messages=[{"role": "user", "content": prompt_text}],
+    )
+    return resp.content[0].text
+
+
+def _generate_turn_prefix_summary(text: str, max_tokens: int) -> str:
+    """Summarize the prefix of a split turn."""
+    prompt_text = (
+        f"<conversation>\n{text[:40000]}\n</conversation>\n\n"
+        f"{_TURN_PREFIX_SUMMARIZATION_PROMPT}"
+    )
+    resp = _client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        system=_SUMMARIZATION_SYSTEM,
+        messages=[{"role": "user", "content": prompt_text}],
+    )
+    return resp.content[0].text
+
+
+def _compact_messages(
+    messages: list[dict],
+    session_log: list[dict],
+    state: _CompactionState,
+    last_usage: dict | None = None,
+    force: bool = False,
+) -> list[dict]:
+    """Summarize old messages, keep recent ones. Supports split-turn and incremental merging."""
+    if not force and not _should_compact(last_usage, messages):
+        return messages
+
+    tokens_before = sum(_estimate_message_tokens(m) for m in messages)
+    summary_max_tokens = int(0.8 * _COMPACTION_RESERVE_TOKENS)
+
+    keep_tokens = 0
+    cut_idx = len(messages)
+    for i in range(len(messages) - 1, -1, -1):
+        keep_tokens += _estimate_message_tokens(messages[i])
+        if keep_tokens >= _COMPACTION_KEEP_RECENT:
+            cut_idx = i
+            break
+
+    if cut_idx <= 1:
+        return messages
+
+    is_split_turn = False
+    turn_start_idx = -1
+
+    if messages[cut_idx].get("role") == "user":
+        pass
+    else:
+        turn_start_idx = _find_turn_start(messages, cut_idx)
+        if turn_start_idx >= 0 and turn_start_idx > 0:
+            is_split_turn = True
+        else:
+            while cut_idx < len(messages) and messages[cut_idx].get("role") != "user":
+                cut_idx += 1
+            if cut_idx >= len(messages) - 1:
+                return messages
+
+    read_f, mod_f = _extract_file_ops(messages, cut_idx)
+    state.read_files |= read_f
+    state.modified_files |= mod_f
+
+    try:
+        if is_split_turn and turn_start_idx >= 0:
+            history_end = turn_start_idx
+            history_text = _serialize_messages_for_summary(messages, history_end) if history_end > 0 else ""
+            prefix_text = _serialize_messages_for_summary(
+                messages[turn_start_idx:cut_idx], cut_idx - turn_start_idx,
+            )
+
+            if history_text:
+                history_summary = _generate_summary(history_text, state.previous_summary, summary_max_tokens)
+            else:
+                history_summary = state.previous_summary or "No prior history."
+
+            prefix_max = int(0.5 * _COMPACTION_RESERVE_TOKENS)
+            prefix_summary = _generate_turn_prefix_summary(prefix_text, prefix_max)
+
+            summary = f"{history_summary}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix_summary}"
+        else:
+            old_text = _serialize_messages_for_summary(messages, cut_idx)
+            summary = _generate_summary(old_text, state.previous_summary, summary_max_tokens)
+
+    except Exception as e:
+        logger.warning("[Stelle] Compaction summary failed: %s — skipping", e)
+        return messages
+
+    summary += _format_file_ops(state.read_files, state.modified_files)
+    state.previous_summary = summary
+    state.compaction_count += 1
+
+    compacted = [
+        {"role": "user", "content": f"[Session checkpoint #{state.compaction_count}]\n\n{summary}"},
+        {"role": "assistant", "content": [{"type": "text", "text": "Understood. I have the full context from the checkpoint. Continuing."}]},
+    ] + messages[cut_idx:]
+
+    tokens_after = sum(_estimate_message_tokens(m) for m in compacted)
+    pct = (1 - tokens_after / tokens_before) * 100 if tokens_before else 0
+    split_label = " (split-turn)" if is_split_turn else ""
+    logger.info(
+        "[Stelle] Compaction #%d%s: %d→%d tokens (%.0f%% reduction, %d messages summarized)",
+        state.compaction_count, split_label, tokens_before, tokens_after, pct, cut_idx,
+    )
+    session_log.append({
+        "type": "compaction",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "compaction_number": state.compaction_count,
+        "tokens_before": tokens_before,
+        "tokens_after": tokens_after,
+        "messages_summarized": cut_idx,
+        "messages_kept": len(messages) - cut_idx,
+        "files_read": len(state.read_files),
+        "files_modified": len(state.modified_files),
+        "split_turn": is_split_turn,
+    })
+    return compacted
+
+
 def _run_agent_loop(
     system_prompt: str,
     user_prompt: str,
     workspace_root: Path,
+    event_callback: Any = None,
+    company_keyword: str | None = None,
 ) -> tuple[dict | None, list[dict]]:
-    messages: list[dict[str, Any]] = [
-        {"role": "user", "content": user_prompt},
-    ]
-    session_log: list[dict[str, Any]] = []
-    session_start = time.time()
-
-    session_log.append({
-        "type": "session_start",
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "system_prompt_chars": len(system_prompt),
-        "user_prompt": user_prompt,
-    })
-
-    result_json: str | None = None
-    turn = 0
-
-    while turn < MAX_AGENT_TURNS:
-        turn += 1
-        t0 = time.time()
-        logger.info("[Stelle] Turn %d — calling Claude...", turn)
-
+    # Load scored observations once per run for the new tools that need them
+    # (query_observations and execute_python). These are the client's entire
+    # scored post history — full text, rewards, engagement metrics, audience
+    # delta, ICP breakdown, and per-post reactor identities.
+    scored_observations: list[dict] = []
+    if company_keyword:
         try:
-            with _client.messages.stream(
-                model="claude-opus-4-6",
-                max_tokens=128000,
-                thinking={"type": "adaptive"},
-                system=system_prompt,
-                tools=_TOOLS,
-                messages=messages,
-            ) as stream:
-                response = stream.get_final_message()
+            from backend.src.db.local import (
+                initialize_db, ruan_mei_load, get_engagers_for_post,
+            )
+            initialize_db()
+            state = ruan_mei_load(company_keyword)
+            if state:
+                scored_observations = [
+                    o for o in state.get("observations", [])
+                    if o.get("status") in ("scored", "finalized")
+                ]
+                # Enrich each observation with its reactor identity list.
+                # The observation dict already carries:
+                #   post_body         — Stelle's original draft (after edit capture fix)
+                #   posted_body       — the client-edited LinkedIn-live version
+                #   reward.raw_metrics — impressions/reactions/comments/reposts
+                #   reward.icp_reward — composite ICP-weighted reward
+                #   icp_match_rate    — mean of per-reactor icp_score (continuous, 0..1)
+                # And we JOIN in here:
+                #   reactors          — list of {urn, name, headline, current_company,
+                #                        title, location, icp_score} for every reactor
+                #                        captured for this post. Raw continuous scores,
+                #                        no bucketed categoricals.
+                # This gives Stelle a single query that returns the full audience+delta
+                # picture per post.
+                for obs in scored_observations:
+                    oid = (obs.get("ordinal_post_id") or "").strip()
+                    if not oid:
+                        obs["reactors"] = []
+                        continue
+                    try:
+                        rows = get_engagers_for_post(oid)
+                        obs["reactors"] = [
+                            {
+                                "urn": r.get("engager_urn", ""),
+                                "name": r.get("name") or "",
+                                "headline": r.get("headline") or "",
+                                "current_company": r.get("current_company") or "",
+                                "title": r.get("title") or "",
+                                "location": r.get("location") or "",
+                                "icp_score": r.get("icp_score"),
+                                "engagement_type": r.get("engagement_type", "reaction"),
+                            }
+                            for r in rows
+                        ]
+                    except Exception as _e:
+                        obs["reactors"] = []
         except Exception as e:
-            logger.error("[Stelle] API error on turn %d: %s", turn, e)
-            session_log.append({
-                "type": "error",
-                "turn": turn,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "error": str(e),
-            })
-            if turn < 3:
-                time.sleep(5)
-                continue
-            raise
+            logger.debug("[Stelle] Could not load scored observations: %s", e)
 
-        elapsed = time.time() - t0
 
-        usage_raw = response.usage
-        usage = {
-            "input_tokens": getattr(usage_raw, "input_tokens", 0),
-            "output_tokens": getattr(usage_raw, "output_tokens", 0),
-            "cache_creation_input_tokens": getattr(usage_raw, "cache_creation_input_tokens", 0),
-            "cache_read_input_tokens": getattr(usage_raw, "cache_read_input_tokens", 0),
-        }
+    # Irontomb calibration is handled via raw examples in the system
+    # prompt — all scored posts are pre-loaded as calibration data.
+    # No separate warmup loop needed.
 
-        tool_calls = []
-        thinking_parts = []
-        text_parts = []
-        for block in response.content:
-            if block.type == "tool_use":
-                tool_calls.append({"name": block.name, "id": block.id, "input": block.input})
-            elif block.type == "thinking":
-                thinking_parts.append(getattr(block, "thinking", ""))
-            elif block.type == "text":
-                text_parts.append(block.text)
+    # Iteration discipline counter — tracks how many times
+    # simulate_flame_chase_journey has been called in this run. Used by the
+    # write_result validator to reject submissions where the total simulate
+    # call count is below the floor (3 × n_posts). Lives in a mutable list so
+    # the closure handler and the validator can share state.
+    simulate_call_count: list[int] = [0]
+    # Track every simulate result so write_result can check predictions.
+    # Each entry: {"draft_hash": str, "result": dict}
+    simulate_results: list[dict] = []
 
-        session_log.append({
-            "type": "turn",
-            "turn": turn,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "elapsed_seconds": round(elapsed, 1),
-            "model": response.model,
-            "stop_reason": response.stop_reason,
-            "usage": usage,
-            "tool_calls": tool_calls or None,
-            "thinking": "\n".join(thinking_parts) if thinking_parts else None,
-            "text": "\n".join(text_parts) if text_parts else None,
-            "content_blocks": len(response.content),
-        })
+    try:
+        # Build a per-run tool dispatch table. Starts from the module-level
+        # _TOOL_HANDLERS and adds the 4 new tools bound to this run's company
+        # + scored observations.
+        run_handlers: dict[str, Any] = dict(_TOOL_HANDLERS)
 
-        logger.info(
-            "[Stelle] Turn %d done in %.1fs — stop_reason=%s, blocks=%d, in=%d out=%d",
-            turn, elapsed, response.stop_reason, len(response.content),
-            usage["input_tokens"], usage["output_tokens"],
+        from backend.src.agents.analyst import (
+            _tool_query_observations as _analyst_query_obs,
+            _tool_search_linkedin_bank as _analyst_search_bank,
+            _tool_execute_python as _analyst_exec_py,
         )
 
-        messages.append({"role": "assistant", "content": response.content})
+        # Fields we strip from observations before returning to Stelle. These
+        # are hand-authored categorical tags (topic_tag, format_tag,
+        # source_segment_type) and derived scalars that bake in someone's
+        # theory of what distinctions matter. The raw texts, raw metrics, and
+        # raw reactor list already carry the signal. The tags remain on disk
+        # for human dashboards but are not surfaced to the writer.
+        _STELLE_STRIPPED_FIELDS = (
+            "topic_tag", "format_tag", "source_segment_type",
+            "edit_similarity", "active_directives", "constitutional_score",
+            "constitutional_results", "cyrene_composite", "cyrene_dimensions",
+            "cyrene_dimension_set", "cyrene_iterations", "cyrene_weights_tier",
+            "alignment_score", "icp_segments",
+        )
 
-        if response.stop_reason == "end_turn":
+        def _stelle_scrub_obs(obs: dict) -> dict:
+            return {k: v for k, v in obs.items() if k not in _STELLE_STRIPPED_FIELDS}
+
+        def _stelle_query_observations_handler(_root: Path, args: dict) -> str:
+            # Drop filter params that target stripped tag fields — if Stelle
+            # passes them, they're silently ignored. Her tool schema no
+            # longer advertises them, so she shouldn't pass them anyway.
+            scrubbed_args = {k: v for k, v in args.items()
+                             if k not in ("topic_filter", "format_filter")}
+            scrubbed_obs = [_stelle_scrub_obs(o) for o in scored_observations]
+            return _analyst_query_obs(scrubbed_args, scrubbed_obs)
+
+        def _stelle_query_top_engagers_handler(_root: Path, args: dict) -> str:
+            if not company_keyword:
+                return json.dumps({"error": "company not set"})
+            limit = min(args.get("limit", 20), 50)
+            try:
+                from backend.src.db.local import get_top_icp_engagers
+                engagers = get_top_icp_engagers(company_keyword, limit=limit)
+                return json.dumps({
+                    "count": len(engagers),
+                    "engagers": engagers,
+                }, default=str)
+            except Exception as e:
+                return json.dumps({"error": f"Failed to load engagers: {str(e)[:200]}"})
+
+        def _stelle_search_corpus_handler(_root: Path, args: dict) -> str:
+            return _analyst_search_bank(args)
+
+        def _stelle_execute_python_handler(_root: Path, args: dict) -> str:
+            # Pipe embeddings into the subprocess so Stelle can operate
+            # on raw continuous vectors (cosine sim, nearest-neighbor,
+            # PCA) instead of categorical tags.
+            try:
+                from backend.src.utils.post_embeddings import get_post_embeddings
+                _emb = get_post_embeddings(company_keyword)
+            except Exception:
+                _emb = None
+            return _analyst_exec_py(args, scored_observations, embeddings=_emb)
+
+        def _stelle_simulate_flame_chase_handler(_root: Path, args: dict) -> str:
+            """Dispatch a draft to Irontomb for audience simulation.
+
+            Stateless turn-based retrieval loop inside Irontomb: each call
+            loads fresh calibration examples from the client's most recent
+            real engagement history, runs the turn loop, returns the
+            prediction. Every call increments simulate_call_count; the
+            write_result validator enforces a minimum of 3 calls per post
+            before accepting submission.
+            """
+            if not company_keyword:
+                return json.dumps({"_error": "company not set"})
+            draft = args.get("draft_text", "")
+            simulate_call_count[0] += 1
+            try:
+                from backend.src.agents.irontomb import simulate_flame_chase_journey
+                result = simulate_flame_chase_journey(company_keyword, draft)
+                simulate_results.append({
+                    "draft_hash": result.get("_draft_hash", ""),
+                    "result": result,
+                })
+                return json.dumps(result, default=str)
+            except Exception as _e:
+                logger.warning("[Stelle] Irontomb simulate failed: %s", _e)
+                return json.dumps({"_error": f"simulate failed: {str(_e)[:200]}"})
+
+        run_handlers["query_observations"] = _stelle_query_observations_handler
+        run_handlers["query_top_engagers"] = _stelle_query_top_engagers_handler
+        run_handlers["search_linkedin_corpus"] = _stelle_search_corpus_handler
+        run_handlers["execute_python"] = _stelle_execute_python_handler
+        run_handlers["simulate_flame_chase_journey"] = _stelle_simulate_flame_chase_handler
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": user_prompt},
+        ]
+        session_log: list[dict[str, Any]] = []
+        session_start = time.time()
+        compaction_state = _CompactionState()
+        last_api_usage: dict | None = None
+        overflow_recovered = False
+
+        session_log.append({
+            "type": "session_start",
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "system_prompt_chars": len(system_prompt),
+            "user_prompt": user_prompt,
+        })
+
+        system_with_cache = [
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}},
+        ]
+
+        result_json: str | None = None
+        turn = 0
+
+        while turn < MAX_AGENT_TURNS:
+            turn += 1
+            t0 = time.time()
+            logger.info("[Stelle] Turn %d — calling Claude...", turn)
+
+            _inject_cache_breakpoint(messages)
+
+            try:
+                with _client.messages.stream(
+                    model="claude-opus-4-6",
+                    max_tokens=128000,
+                    thinking={"type": "adaptive"},
+                    output_config={"effort": "high"},
+                    system=system_with_cache,
+                    tools=_TOOLS,
+                    messages=messages,
+                ) as stream:
+                    response = stream.get_final_message()
+            except Exception as e:
+                logger.error("[Stelle] API error on turn %d: %s", turn, e)
+                session_log.append({
+                    "type": "error",
+                    "turn": turn,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "error": str(e),
+                })
+
+                if _is_context_overflow(e) and not overflow_recovered:
+                    logger.warning("[Stelle] Context overflow detected — emergency compaction")
+                    if event_callback:
+                        event_callback("status", {"message": "Context overflow — running emergency compaction..."})
+                    overflow_recovered = True
+                    if messages and messages[-1].get("role") == "assistant":
+                        messages.pop()
+                    messages = _compact_messages(
+                        messages, session_log, compaction_state, last_api_usage, force=True,
+                    )
+                    turn -= 1
+                    time.sleep(1)
+                    continue
+
+                if turn < 3:
+                    time.sleep(5)
+                    continue
+                raise
+            finally:
+                _strip_cache_breakpoints(messages)
+
+            elapsed = time.time() - t0
+
+            usage_raw = response.usage
+            usage = {
+                "input_tokens": getattr(usage_raw, "input_tokens", 0),
+                "output_tokens": getattr(usage_raw, "output_tokens", 0),
+                "cache_creation_input_tokens": getattr(usage_raw, "cache_creation_input_tokens", 0),
+                "cache_read_input_tokens": getattr(usage_raw, "cache_read_input_tokens", 0),
+            }
+            last_api_usage = usage
+
+            tool_calls = []
+            thinking_parts = []
+            text_parts = []
             for block in response.content:
-                if block.type == "text" and block.text.strip():
-                    logger.info("[Stelle] Agent finished with text response on turn %d", turn)
-            break
+                if block.type == "tool_use":
+                    tool_calls.append({"name": block.name, "id": block.id, "input": block.input})
+                elif block.type == "thinking":
+                    thinking_parts.append(getattr(block, "thinking", ""))
+                elif block.type == "text":
+                    text_parts.append(block.text)
 
-        tool_results = []
-        tool_result_log = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
+            session_log.append({
+                "type": "turn",
+                "turn": turn,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "elapsed_seconds": round(elapsed, 1),
+                "model": response.model,
+                "stop_reason": response.stop_reason,
+                "usage": usage,
+                "tool_calls": tool_calls or None,
+                "thinking": "\n".join(thinking_parts) if thinking_parts else None,
+                "text": "\n".join(text_parts) if text_parts else None,
+                "content_blocks": len(response.content),
+            })
 
-            name = block.name
-            args = block.input if isinstance(block.input, dict) else {}
-            logger.info("[Stelle]   tool: %s(%s)", name, _summarize_args(args))
+            turn_context = usage["input_tokens"] + usage["cache_read_input_tokens"] + usage["cache_creation_input_tokens"]
+            turn_cache_pct = (usage["cache_read_input_tokens"] / turn_context * 100) if turn_context > 0 else 0
+            status_msg = (
+                f"Turn {turn} done in {elapsed:.1f}s — "
+                f"in={usage['input_tokens']} out={usage['output_tokens']} "
+                f"cache_read={usage['cache_read_input_tokens']} "
+                f"cache_write={usage['cache_creation_input_tokens']} "
+                f"({turn_cache_pct:.0f}% cached)"
+            )
+            logger.info(
+                "[Stelle] Turn %d done in %.1fs — stop=%s blocks=%d "
+                "in=%d out=%d cache_read=%d cache_write=%d (%.0f%% cached)",
+                turn, elapsed, response.stop_reason, len(response.content),
+                usage["input_tokens"], usage["output_tokens"],
+                usage["cache_read_input_tokens"], usage["cache_creation_input_tokens"],
+                turn_cache_pct,
+            )
+            if event_callback:
+                event_callback("status", {"message": status_msg})
 
-            if name == "write_result":
-                raw_json = args.get("result_json", "")
-                # Gap 6: validate before accepting
-                try:
-                    parsed = json.loads(raw_json)
-                    passed, val_errors, val_warnings = _validate_output(parsed)
-                    if not passed:
-                        error_msg = "Validation failed:\n" + "\n".join(f"- {e}" for e in val_errors)
-                        if val_warnings:
-                            error_msg += "\nWarnings:\n" + "\n".join(f"- {w}" for w in val_warnings)
-                        error_msg += "\n\nFix the issues and call write_result again."
+            messages.append({"role": "assistant", "content": response.content})
+
+            if response.stop_reason == "end_turn":
+                for block in response.content:
+                    if block.type == "text" and block.text.strip():
+                        logger.info("[Stelle] Agent finished with text response on turn %d", turn)
+                        if event_callback:
+                            event_callback("text_delta", {"text": block.text})
+                break
+
+            tool_results = []
+            tool_result_log = []
+            for block in response.content:
+                if block.type != "tool_use":
+                    continue
+
+                name = block.name
+                args = block.input if isinstance(block.input, dict) else {}
+                summary = _summarize_args(args)
+                logger.info("[Stelle]   tool: %s(%s)", name, summary)
+                if event_callback:
+                    event_callback("tool_call", {"name": name, "arguments": summary})
+
+                if name == "write_result":
+                    raw_json = args.get("result_json", "")
+                    # Gap 6: validate before accepting
+                    try:
+                        parsed = json.loads(raw_json)
+                        passed, val_errors, val_warnings = _validate_output(parsed)
+                        if not passed:
+                            error_msg = "Validation failed:\n" + "\n".join(f"- {e}" for e in val_errors)
+                            if val_warnings:
+                                error_msg += "\nWarnings:\n" + "\n".join(f"- {w}" for w in val_warnings)
+                            error_msg += "\n\nFix the issues and call write_result again."
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": error_msg,
+                                "is_error": True,
+                            })
+                            tool_result_log.append({
+                                "tool_name": name, "tool_call_id": block.id,
+                                "result_chars": len(error_msg), "is_error": True,
+                                "validation_errors": val_errors,
+                            })
+                            continue
+
+                        # Iteration discipline guard: enforce a minimum of 3
+                        # simulate_flame_chase_journey calls per post before
+                        # accepting submission. A draft that hasn't been
+                        # iterated against Irontomb at least 3 times is an
+                        # under-tested draft; reject it back to Stelle with
+                        # a specific error so she goes back and iterates.
+                        _n_posts = len(parsed.get("posts", []))
+                        _min_required_simulate_calls = max(3 * _n_posts, 3)
+                        _actual_simulate_calls = simulate_call_count[0]
+                        if _actual_simulate_calls < _min_required_simulate_calls:
+                            error_msg = (
+                                f"Iteration discipline check failed: you made "
+                                f"{_actual_simulate_calls} simulate_flame_chase_journey "
+                                f"calls across {_n_posts} post(s), but the minimum "
+                                f"is {_min_required_simulate_calls} "
+                                f"(3 per post).\n\n"
+                                f"Irontomb exists to fight you. A post that hasn't "
+                                f"been iterated against her at least 3 times is an "
+                                f"under-tested draft and cannot ship. Go back to "
+                                f"each post that hasn't been simulated enough, "
+                                f"revise based on Irontomb's prediction (compare "
+                                f"her engagement_prediction against this client's "
+                                f"real historical performance via query_observations), "
+                                f"call simulate_flame_chase_journey again, and keep "
+                                f"iterating until the prediction is at or above "
+                                f"what comparable past posts actually achieved.\n\n"
+                                f"Then call write_result again."
+                            )
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": error_msg,
+                                "is_error": True,
+                            })
+                            tool_result_log.append({
+                                "tool_name": name, "tool_call_id": block.id,
+                                "result_chars": len(error_msg), "is_error": True,
+                                "iteration_discipline_failed": True,
+                                "simulate_calls": _actual_simulate_calls,
+                                "required": _min_required_simulate_calls,
+                            })
+                            continue
+
+                        # Guard 2: would_stop_scrolling check.
+                        # For each submitted post, find its latest Irontomb
+                        # prediction by draft_hash. If would_stop_scrolling
+                        # is False, the post is dead on arrival — reject.
+                        _failed_posts: list[str] = []
+                        for _pi, _post in enumerate(parsed.get("posts", []), 1):
+                            _post_text = (_post.get("text") or "").strip()
+                            if not _post_text:
+                                continue
+                            _ph = hashlib.sha256(_post_text.encode("utf-8")).hexdigest()[:16]
+                            # Find last simulate result for this draft
+                            _last = None
+                            for _sr in reversed(simulate_results):
+                                if _sr["draft_hash"] == _ph:
+                                    _last = _sr["result"]
+                                    break
+                            if _last and _last.get("would_stop_scrolling") is False:
+                                _iv = (_last.get("inner_voice") or "")[:120]
+                                _failed_posts.append(
+                                    f"  Post {_pi}: would_stop_scrolling=False "
+                                    f"(inner_voice: \"{_iv}\")"
+                                )
+                        if _failed_posts:
+                            error_msg = (
+                                f"Scroll-stop check failed. Irontomb says the "
+                                f"audience would NOT stop scrolling for "
+                                f"{len(_failed_posts)} post(s):\n\n"
+                                + "\n".join(_failed_posts) + "\n\n"
+                                f"A post nobody stops for is dead on arrival. "
+                                f"Revise the hook — make it specific, personal, "
+                                f"unexpected — then call "
+                                f"simulate_flame_chase_journey again. Repeat "
+                                f"until would_stop_scrolling is True.\n\n"
+                                f"Then call write_result again."
+                            )
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": error_msg,
+                                "is_error": True,
+                            })
+                            tool_result_log.append({
+                                "tool_name": name, "tool_call_id": block.id,
+                                "result_chars": len(error_msg), "is_error": True,
+                                "scroll_stop_failed": True,
+                                "failed_posts": len(_failed_posts),
+                            })
+                            continue
+
+                    except json.JSONDecodeError as e:
+                        error_msg = f"Invalid JSON: {e}\n\nFix the JSON syntax and call write_result again."
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": block.id,
@@ -3365,124 +3799,154 @@ def _run_agent_loop(
                         tool_result_log.append({
                             "tool_name": name, "tool_call_id": block.id,
                             "result_chars": len(error_msg), "is_error": True,
-                            "validation_errors": val_errors,
                         })
                         continue
-                except json.JSONDecodeError as e:
-                    error_msg = f"Invalid JSON: {e}\n\nFix the JSON syntax and call write_result again."
+
+                    result_json = raw_json
+                    result_text = f"Result accepted. {len(parsed.get('posts', []))} post(s). Session complete."
+                    if val_warnings:
+                        result_text += "\nWarnings: " + "; ".join(val_warnings)
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": error_msg,
+                        "content": result_text,
+                    })
+                    tool_result_log.append({
+                        "tool_name": name, "tool_call_id": block.id,
+                        "result_chars": len(result_json), "is_error": False,
+                    })
+                elif name in run_handlers:
+                    try:
+                        output = run_handlers[name](workspace_root, args)
+                        is_error = False
+                    except Exception as e:
+                        output = f"Error: {e}"
+                        is_error = True
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": output[:MAX_TOOL_OUTPUT_CHARS],
+                    })
+                    tool_result_log.append({
+                        "tool_name": name, "tool_call_id": block.id,
+                        "result_chars": len(output), "is_error": is_error,
+                    })
+                    if event_callback:
+                        event_callback("tool_result", {
+                            "name": name,
+                            "result": output[:500],
+                            "is_error": is_error,
+                        })
+                else:
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": f"Unknown tool: {name}",
                         "is_error": True,
                     })
                     tool_result_log.append({
                         "tool_name": name, "tool_call_id": block.id,
-                        "result_chars": len(error_msg), "is_error": True,
+                        "result_chars": 0, "is_error": True,
                     })
-                    continue
 
-                result_json = raw_json
-                result_text = f"Result accepted. {len(parsed.get('posts', []))} post(s). Session complete."
-                if val_warnings:
-                    result_text += "\nWarnings: " + "; ".join(val_warnings)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result_text,
-                })
-                tool_result_log.append({
-                    "tool_name": name, "tool_call_id": block.id,
-                    "result_chars": len(result_json), "is_error": False,
-                })
-            elif name in _TOOL_HANDLERS:
-                try:
-                    output = _TOOL_HANDLERS[name](workspace_root, args)
-                    is_error = False
-                except Exception as e:
-                    output = f"Error: {e}"
-                    is_error = True
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": output[:MAX_TOOL_OUTPUT_CHARS],
-                })
-                tool_result_log.append({
-                    "tool_name": name, "tool_call_id": block.id,
-                    "result_chars": len(output), "is_error": is_error,
-                })
-            else:
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": f"Unknown tool: {name}",
-                    "is_error": True,
-                })
-                tool_result_log.append({
-                    "tool_name": name, "tool_call_id": block.id,
-                    "result_chars": 0, "is_error": True,
+            if tool_result_log:
+                session_log.append({
+                    "type": "tool_results",
+                    "turn": turn,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "results": tool_result_log,
                 })
 
-        if tool_result_log:
-            session_log.append({
-                "type": "tool_results",
-                "turn": turn,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "results": tool_result_log,
-            })
+            if result_json is not None:
+                break
 
-        if result_json is not None:
-            break
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
 
-        if tool_results:
-            messages.append({"role": "user", "content": tool_results})
+            prev_count = compaction_state.compaction_count
+            messages = _compact_messages(messages, session_log, compaction_state, last_api_usage)
+            if compaction_state.compaction_count > prev_count and event_callback:
+                event_callback("compaction", {"message": f"Context compaction #{compaction_state.compaction_count}"})
 
-    total_elapsed = time.time() - session_start
-    total_input = sum(e.get("usage", {}).get("input_tokens", 0) for e in session_log if e.get("type") == "turn")
-    total_output = sum(e.get("usage", {}).get("output_tokens", 0) for e in session_log if e.get("type") == "turn")
+        total_elapsed = time.time() - session_start
+        turns = [e for e in session_log if e.get("type") == "turn"]
+        total_input = sum(e.get("usage", {}).get("input_tokens", 0) for e in turns)
+        total_output = sum(e.get("usage", {}).get("output_tokens", 0) for e in turns)
+        total_cache_read = sum(e.get("usage", {}).get("cache_read_input_tokens", 0) for e in turns)
+        total_cache_create = sum(e.get("usage", {}).get("cache_creation_input_tokens", 0) for e in turns)
 
-    session_log.append({
-        "type": "session_end",
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "total_turns": turn,
-        "total_elapsed_seconds": round(total_elapsed, 1),
-        "total_input_tokens": total_input,
-        "total_output_tokens": total_output,
-        "has_result": result_json is not None,
-    })
+        total_context = total_input + total_cache_read + total_cache_create
+        cache_hit_pct = (total_cache_read / total_context * 100) if total_context > 0 else 0
 
-    logger.info(
-        "[Stelle] Session complete: %d turns, %.1fs, %d in / %d out tokens",
-        turn, total_elapsed, total_input, total_output,
-    )
+        cost_input = total_input / 1e6 * 15.0
+        cost_output = total_output / 1e6 * 75.0
+        cost_cache_read = total_cache_read / 1e6 * 1.50
+        cost_cache_write = total_cache_create / 1e6 * 18.75
+        cost_total = cost_input + cost_output + cost_cache_read + cost_cache_write
 
-    if turn >= MAX_AGENT_TURNS:
-        logger.warning("[Stelle] Hit max turns (%d) without result", MAX_AGENT_TURNS)
+        session_log.append({
+            "type": "session_end",
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "total_turns": turn,
+            "total_elapsed_seconds": round(total_elapsed, 1),
+            "total_input_tokens": total_input,
+            "total_output_tokens": total_output,
+            "total_cache_read_tokens": total_cache_read,
+            "total_cache_creation_tokens": total_cache_create,
+            "cache_hit_rate": round(cache_hit_pct, 1),
+            "estimated_cost_usd": round(cost_total, 2),
+            "cost_breakdown": {
+                "uncached_input": round(cost_input, 4),
+                "output": round(cost_output, 4),
+                "cache_read": round(cost_cache_read, 4),
+                "cache_write": round(cost_cache_write, 4),
+            },
+            "compactions": compaction_state.compaction_count,
+            "has_result": result_json is not None,
+        })
 
-    if result_json:
-        try:
-            return json.loads(result_json), session_log
-        except json.JSONDecodeError as e:
-            logger.error("[Stelle] Failed to parse result JSON: %s", e)
-            json_match = re.search(r"\{[\s\S]*\}", result_json)
-            if json_match:
-                try:
-                    return json.loads(json_match.group()), session_log
-                except json.JSONDecodeError:
-                    pass
+        logger.info(
+            "[Stelle] Session complete: %d turns, %.1fs, cache_hit=%.1f%%, "
+            "est_cost=$%.2f (in=$%.2f out=$%.2f cache_r=$%.2f cache_w=$%.2f), "
+            "%d compaction(s)",
+            turn, total_elapsed, cache_hit_pct,
+            cost_total, cost_input, cost_output, cost_cache_read, cost_cache_write,
+            compaction_state.compaction_count,
+        )
 
-    for msg in reversed(messages):
-        if isinstance(msg.get("content"), list):
-            for block in msg["content"]:
-                if hasattr(block, "text") and block.text:
-                    json_match = re.search(r"\{[\s\S]*\"posts\"[\s\S]*\}", block.text)
-                    if json_match:
-                        try:
-                            return json.loads(json_match.group()), session_log
-                        except json.JSONDecodeError:
-                            continue
-    return None, session_log
+        if turn >= MAX_AGENT_TURNS:
+            logger.warning("[Stelle] Hit max turns (%d) without result", MAX_AGENT_TURNS)
 
+        if result_json:
+            try:
+                return json.loads(result_json), session_log
+            except json.JSONDecodeError as e:
+                logger.error("[Stelle] Failed to parse result JSON: %s", e)
+                json_match = re.search(r"\{[\s\S]*\}", result_json)
+                if json_match:
+                    try:
+                        return json.loads(json_match.group()), session_log
+                    except json.JSONDecodeError:
+                        pass
+
+        for msg in reversed(messages):
+            if isinstance(msg.get("content"), list):
+                for block in msg["content"]:
+                    if hasattr(block, "text") and block.text:
+                        json_match = re.search(r"\{[\s\S]*\"posts\"[\s\S]*\}", block.text)
+                        if json_match:
+                            try:
+                                return json.loads(json_match.group()), session_log
+                            except json.JSONDecodeError:
+                                continue
+        return None, session_log
+
+    finally:
+        # Irontomb is stateless now — no background agent to tear down.
+        # The old icp_agent / irontomb_agent spawn was removed when we
+        # reverted to single-call + turn-based retrieval. Leaving the
+        # finally block here for future teardown if needed.
+        pass
 
 def _summarize_args(args: dict) -> str:
     if "path" in args:
@@ -3584,84 +4048,6 @@ def _generate_image_suggestion(post_text: str, hook: str) -> str:
 # Result processing + fact-check
 # ---------------------------------------------------------------------------
 
-def _compute_cv_thresholds(company: str) -> dict:
-    """Compute data-driven constitutional verification gating thresholds.
-
-    Returns {skip, ensemble_upper, ensemble_lower}. Falls back to
-    hard-coded defaults (4.0, 3.8, 3.0) when insufficient data.
-    """
-    defaults = {"skip": 4.0, "ensemble_upper": 3.8, "ensemble_lower": 3.0}
-
-    # Check cache
-    cache_path = P.memory_dir(company) / "cv_thresholds.json"
-    if cache_path.exists():
-        try:
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            computed = cached.get("computed_at", "")
-            if computed:
-                from datetime import datetime, timezone
-                dt = datetime.fromisoformat(computed.replace("Z", "+00:00"))
-                age_h = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
-                if age_h < 24 and cached.get("observation_count", 0) >= 15:
-                    return {k: cached[k] for k in ("skip", "ensemble_upper", "ensemble_lower") if k in cached}
-        except Exception:
-            pass
-
-    # Need observations with both cyrene_composite and engagement reward
-    try:
-        from backend.src.agents.ruan_mei import RuanMei
-        rm = RuanMei(company)
-        obs_with_scores = [
-            o for o in rm._state.get("observations", [])
-            if o.get("status") == "scored"
-            and o.get("cyrene_composite") is not None
-            and o.get("reward", {}).get("immediate") is not None
-        ]
-    except Exception:
-        return defaults
-
-    if len(obs_with_scores) < 15:
-        return defaults
-
-    perm_scores = [o["cyrene_composite"] for o in obs_with_scores]
-    rewards = [o["reward"]["immediate"] for o in obs_with_scores]
-    median_reward = sorted(rewards)[len(rewards) // 2]
-
-    # Skip threshold: 75th percentile of Cyrene scores for above-median-engagement posts
-    good_perms = sorted([p for p, r in zip(perm_scores, rewards) if r > median_reward])
-    skip = good_perms[int(len(good_perms) * 0.75)] if good_perms else 4.0
-
-    # Ensemble upper: median Cyrene score across all posts
-    all_sorted = sorted(perm_scores)
-    ensemble_upper = all_sorted[len(all_sorted) // 2]
-
-    # Ensemble lower: 25th percentile
-    ensemble_lower = all_sorted[int(len(all_sorted) * 0.25)]
-
-    # Sanity: ensure lower < upper < skip
-    ensemble_lower = min(ensemble_lower, ensemble_upper - 0.1)
-    skip = max(skip, ensemble_upper + 0.1)
-
-    result = {
-        "skip": round(skip, 2),
-        "ensemble_upper": round(ensemble_upper, 2),
-        "ensemble_lower": round(ensemble_lower, 2),
-        "observation_count": len(obs_with_scores),
-        "computed_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-    }
-
-    # Cache
-    try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(result, indent=2), encoding="utf-8")
-        tmp.rename(cache_path)
-    except Exception:
-        pass
-
-    return result
-
-
 def _process_result(
     result: dict,
     client_name: str,
@@ -3727,51 +4113,16 @@ def _process_result(
                 output_lines.append(f"- {c.get('claim', '')}: {c.get('source', '')}")
             output_lines.append("")
 
-        # Save original draft before Cyrene revision
-        pre_revision_text = text
-
-        output_lines.append("### Original Draft\n")
+        output_lines.append("### Draft\n")
         output_lines.append(text + "\n")
 
         # -----------------------------------------------------------
-        # SELF-REFINE: Critique-revise loop (Cyrene)
-        # Runs BEFORE fact-checking so Castorice gets the best version.
+        # Fact-check (Castorice) — the only post-processing step.
+        # No iterative refinement (Cyrene) or constitutional verification.
+        # Quality comes from RuanMei's context, not post-hoc patching.
+        # The client is the quality gate.
         # -----------------------------------------------------------
-        print(f"[Stelle] SELF-REFINE post {i}/{len(posts)}: {hook[:50]}...")
-        refine_report_lines: list[str] = []
-        _refine_result = None
-        try:
-            from backend.src.agents.cyrene import refine_post as _refine
-            _refine_result = _refine(
-                company=company_keyword,
-                draft_text=text,
-                transcript_excerpt=origin[:1000] if origin else "",
-                max_iterations=3,
-            )
-            if _refine_result.final_text != text:
-                text = _refine_result.final_text
-                refine_report_lines.append(f"**SELF-REFINE:** {_refine_result.total_iterations} iterations, "
-                                           f"best score {_refine_result.best_score}/5.0 ({_refine_result.method})")
-                for it in _refine_result.iterations:
-                    weak = it.get("weak_dimensions", [])
-                    if weak:
-                        weak_str = ", ".join(f"{d['name']}={d['score']}" for d in weak)
-                        refine_report_lines.append(f"  Iter {it['iteration']}: weak=[{weak_str}]")
-            else:
-                refine_report_lines.append(f"**SELF-REFINE:** Passed on first critique "
-                                           f"(score {_refine_result.best_score}/5.0)")
-        except Exception as _refine_err:
-            logger.debug("[Stelle] SELF-REFINE skipped for post %d: %s", i, _refine_err)
-
-        if refine_report_lines:
-            output_lines.append("### Quality Refinement\n")
-            output_lines.extend(refine_report_lines)
-            output_lines.append("")
-
-        # -----------------------------------------------------------
-        # Fact-check (Castorice) — runs on the refined version
-        # -----------------------------------------------------------
-        print(f"[Stelle] Fact-checking post {i}/{len(posts)}: {hook[:50]}...")
+        logger.info("[Stelle] Fact-checking post %d/%d: %s...", i, len(posts), hook[:50])
         corrected = text
         citation_comments: list[str] = []
         try:
@@ -3793,48 +4144,7 @@ def _process_result(
             output_lines.append(f"### Fact-Check\n\nFact-check failed: {e}\n")
             output_lines.append(f"### Final Post\n\n{corrected}\n")
 
-        # -----------------------------------------------------------
-        # Constitutional Verifier — gated to borderline Cyrene scores only.
-        # Full ensemble (3 models) on ambiguous posts; single-model on others.
-        # Skipped entirely when SELF-REFINE scored ≥4.0 (high confidence).
-        # -----------------------------------------------------------
-        _cyrene_score = _refine_result.best_score if _refine_result is not None else 0.0
-        _cv_thresholds = _compute_cv_thresholds(company_keyword)
-        _cv_borderline = _cv_thresholds["ensemble_lower"] <= _cyrene_score < _cv_thresholds["ensemble_upper"]
-        _cv_low = _cyrene_score < _cv_thresholds["ensemble_lower"] and _cyrene_score > 0
-        if _cv_borderline or _cv_low:
-            _cv_models = ["claude", "gemini", "gpt"] if _cv_borderline else ["claude"]
-            print(f"[Stelle] Constitutional verification post {i}/{len(posts)} "
-                  f"(Cyrene {_cyrene_score:.1f}, {'ensemble' if _cv_borderline else 'single'})...")
-            try:
-                from backend.src.utils.constitutional_verifier import verify_post as _verify
-                _cv_result = _verify(corrected, company=company_keyword, models=_cv_models)
-                _cv_score = _cv_result.get("constitutional_score")
-                _cv_mode = _cv_result.get("mode", "binary")
-                if not _cv_result.get("passed"):
-                    violations = _cv_result.get("violations", [])
-                    score_str = f" score={_cv_score:.2f}" if _cv_score is not None else ""
-                    output_lines.append(f"### Constitutional Verification: FAIL ({_cv_mode}{score_str})\n")
-                    for v in violations:
-                        conf = v.get("confidence")
-                        weight = v.get("weight")
-                        if conf is not None and weight is not None:
-                            output_lines.append(f"- **{v['name']}** (confidence: {conf:.0%}, weight: {weight:.2f})")
-                        else:
-                            notes = " | ".join(v.get("notes", []))
-                            output_lines.append(f"- **{v['name']}** ({v.get('votes_fail', 0)}/{v.get('votes_pass', 0) + v.get('votes_fail', 0)} models failed) {notes}")
-                        for note in v.get("notes", []):
-                            output_lines.append(f"  {note}")
-                    output_lines.append(f"\nModel agreement: {_cv_result.get('model_agreement', 0):.0%}\n")
-                else:
-                    score_str = f" score={_cv_score:.2f}" if _cv_score is not None else ""
-                    output_lines.append(f"### Constitutional Verification: PASS ({_cv_mode}{score_str}, {_cv_result.get('model_agreement', 0):.0%} agreement)\n")
-            except Exception as _cv_err:
-                logger.debug("[Stelle] Constitutional verification skipped for post %d: %s", i, _cv_err)
-        elif _cyrene_score >= _cv_thresholds["skip"]:
-            output_lines.append(f"### Constitutional Verification: SKIPPED (Cyrene score {_cyrene_score:.1f} — high confidence)\n")
-
-        print(f"[Stelle] Generating why-post + image for post {i}/{len(posts)}...")
+        logger.info("[Stelle] Generating why-post + image for post %d/%d...", i, len(posts))
         why_post = _generate_why_post(corrected, origin, client_name, company_keyword)
         if why_post:
             output_lines.append(f"### Why Post\n\n{why_post}\n")
@@ -3845,7 +4155,7 @@ def _process_result(
         elif image_suggestion:
             output_lines.append(f"### Image Suggestion\n\n{image_suggestion}\n")
 
-        print(f"[Stelle] Validating draft {i}/{len(posts)}...")
+        logger.info("[Stelle] Validating draft %d/%d...", i, len(posts))
         validation = _validate_draft_with_llm(corrected, company_keyword)
         if validation["issues"]:
             output_lines.append("### Validation Notes\n")
@@ -3896,77 +4206,14 @@ def _process_result(
                 local_post_id=_draft_id,
             )
 
-            # Persist Cyrene scores and constitutional results on the observation.
-            # Persist Cyrene scores and constitutional results on the observation.
-            # existing adaptive config code and readiness checks.
+            # Generation-time metadata for downstream learning.
             _extra_fields = {}
-            if _refine_result is not None and _refine_result.iterations:
-                _last_iter = _refine_result.iterations[-1]
-                _dim_scores = _last_iter.get("all_dimensions", {})
-                if not _dim_scores:
-                    _dim_scores = {d["name"]: d["score"] for d in _last_iter.get("weak_dimensions", [])}
-                if _dim_scores:
-                    _extra_fields["cyrene_dimensions"] = _dim_scores
-                _extra_fields["cyrene_composite"] = _refine_result.best_score
-                _extra_fields["cyrene_iterations"] = _refine_result.total_iterations
-                # Per-iteration composite scores — enables the adaptive config
-                # to learn the marginal value of each additional revision cycle
-                # and set the iteration ceiling per-client.
-                _extra_fields["cyrene_iteration_scores"] = [
-                    it.get("composite_score", 0) for it in _refine_result.iterations
-                ]
-                _extra_fields["cyrene_weights_tier"] = _refine_result.adaptive_tier
-                _extra_fields["cyrene_dimension_set"] = _refine_result.dimension_set
 
-            # Constitutional results — _cv_result is only set when verifier ran
-            try:
-                if _cv_result and isinstance(_cv_result, dict):
-                    _cv_principles = {}
-                    for _pr in _cv_result.get("principles", []):
-                        if _pr.get("id"):
-                            _cv_principles[_pr["id"]] = _pr.get("passed", True)
-                    if _cv_principles:
-                        _extra_fields["constitutional_results"] = _cv_principles
-            except NameError:
-                pass  # _cv_result not defined — verifier was skipped
-
-            # Alignment score — compute and store for threshold learning
-            try:
-                from backend.src.utils.alignment_scorer import score_draft_alignment as _score_align
-                _align_result = _score_align(company_keyword, corrected)
-                if _align_result and _align_result.get("score") is not None:
-                    _extra_fields["alignment_score"] = _align_result["score"]
-            except Exception:
-                pass
-
-            # Active learned directives — stamp which directives were in the
-            # system prompt at generation time so compute_directive_efficacy()
-            # can retrospectively classify them as validated / neutral /
-            # counterproductive based on the resulting engagement.
-            try:
-                from backend.src.utils.feedback_distiller import get_active_directive_ids
-                _active_ids = get_active_directive_ids(company_keyword)
-                # Always set the field (even to empty list) so attribution can
-                # distinguish "directive was not active" from "observation
-                # created before tracking shipped".
-                _extra_fields["active_directives"] = _active_ids
-            except Exception:
-                pass
-
-            # Analyst findings tracking — stamp whether analyst findings were
-            # available and injected into the user prompt at generation time.
-            try:
-                import json as _json_af_track
-                _af_path = P.memory_dir(company_keyword) / "analyst_findings.json"
-                if _af_path.exists():
-                    _af_data = _json_af_track.loads(_af_path.read_text(encoding="utf-8"))
-                    _af_runs = _af_data.get("runs", [])
-                    _af_findings = _af_data.get("findings", [])
-                    if _af_findings and _af_runs:
-                        _extra_fields["analyst_findings_version"] = _af_runs[-1].get("timestamp", "")
-                        _extra_fields["analyst_findings_count"] = len(_af_findings)
-            except Exception:
-                pass
+            # (Analyst findings stamping removed — analyst findings are no
+            # longer injected into Stelle's prompt, so stamping a version id
+            # onto the observation has no consumer. Slot attribution and
+            # landscape brief references were also removed earlier in the
+            # prescriptive-injection strip.)
 
             # Prediction tracking — score this post with the draft scorer
             # BEFORE it's published so we can compare predicted vs actual
@@ -3991,10 +4238,6 @@ def _process_result(
 
         if _sqlite_available:
             try:
-                # Store both pre-revision and post-revision content
-                _pre_rev = pre_revision_text if pre_revision_text != corrected else None
-                _perm_score = _refine_result.best_score if _refine_result is not None else None
-                # Build generation metadata for draft_map persistence
                 _gen_meta = dict(_extra_fields) if _extra_fields else {}
                 _save_post(
                     post_id=_draft_id,
@@ -4004,8 +4247,8 @@ def _process_result(
                     status="draft",
                     why_post=why_post or None,
                     citation_comments=citation_comments,
-                    pre_revision_content=_pre_rev,
-                    cyrene_score=_perm_score,
+                    pre_revision_content=None,
+                    cyrene_score=None,
                     generation_metadata=_gen_meta if _gen_meta else None,
                 )
             except Exception as _e:
@@ -4036,8 +4279,15 @@ def generate_one_shot(
     model: str = "claude-opus-4-6",
     event_callback: Any = None,
 ) -> str:
-    print(f"[Stelle] Starting agentic ghostwriter for {client_name}...")
+    """Generate a batch of LinkedIn posts.
 
+    Stelle's in-context inputs are restricted to: raw transcripts (client-
+    direct content), auto-captured draft→posted diffs, her own published-
+    post history, and LinkedIn profile/research. Operator-curated layers
+    (ABM, feedback files, revisions) and other agents' briefs (Cyrene) are
+    NOT injected — everything beyond transcripts + observations is a tool
+    call.
+    """
     username_path = P.linkedin_username_path(company_keyword)
     if not username_path.exists():
         raise FileNotFoundError(
@@ -4046,106 +4296,60 @@ def generate_one_shot(
             f"(the part after linkedin.com/in/) before running the pipeline."
         )
 
+    # Resolve proper display name from Supabase (falls back to slug)
+    username = username_path.read_text().strip()
+    if username:
+        _, _, display_name = _resolve_supabase_ids(username)
+        if display_name:
+            client_name = display_name
+
+    logger.info("[Stelle] Starting agentic ghostwriter for %s...", client_name)
+
     P.ensure_dirs(company_keyword)
 
-    print("[Stelle] Setting up workspace...")
+    # Purge any unpushed draft rows in local_posts from prior runs for this
+    # company. Per the project's dedup model, a draft that was never pushed
+    # to Ordinal "doesn't exist" — it must not persist across runs, because
+    # Stelle's dedup reads pushed/published content only. This is the DB-side
+    # companion to the memory/ + scratch/ filesystem wipe in _setup_workspace.
+    # Rows with a non-empty ordinal_post_id are preserved (they are owned by
+    # Ordinal), as are non-draft statuses (posted/scheduled/failed).
+    try:
+        from backend.src.db.local import purge_unpushed_drafts as _purge_drafts
+        _purged = _purge_drafts(company_keyword)
+        if _purged:
+            logger.info(
+                "[Stelle] Purged %d unpushed draft(s) from local_posts for %s",
+                _purged, company_keyword,
+            )
+    except Exception as _purge_err:
+        logger.warning("[Stelle] local_posts purge skipped: %s", _purge_err)
+
+    logger.info("[Stelle] Setting up workspace...")
     workspace_root = _setup_workspace(company_keyword)
 
-    # RuanMei: generate performance insight context (soft, non-prescriptive).
-    # This is additive context that Stelle can use or ignore. If RuanMei
-    # has insufficient data (< 5 scored posts), this is silently empty.
-    ruan_mei_insight_context = ""
+    # STRIPPED ARCHITECTURE (2026-04-10, extended 2026-04-11):
+    # All prescriptive intelligence injection has been removed. Stelle operates
+    # on raw workspace inputs (transcripts, voice examples, LinkedIn profile,
+    # published-posts history) plus her own tools (query_observations,
+    # search_linkedin_bank, execute_python, web_search, bash, read_file, etc.).
+    # Previously this section injected RuanMei landscape insights, analyst
+    # findings, content brief, hook library, trajectory sequences, market
+    # intelligence, cross-client patterns, and curated ICP definitions — all
+    # of which were Bitter Lesson violations: pre-chewed intermediate
+    # representations sitting between raw data and the writer. Stelle now
+    # queries raw observations/transcripts directly at generation time.
+
+    # Existing posts from Ordinal — all statuses — for topic dedup.
+    # Operational (not prescriptive), so it stays: prevents Stelle from
+    # writing the same post twice.
+    existing_posts_context = ""
     try:
-        import asyncio
-        from backend.src.agents.ruan_mei import RuanMei
-        _rm = RuanMei(company_keyword)
-        if _rm.scored_count() >= 5:
-            try:
-                _loop = asyncio.get_running_loop()
-            except RuntimeError:
-                _loop = None
-            if _loop and _loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as _pool_exec:
-                    _insights = _pool_exec.submit(
-                        lambda: asyncio.run(_rm.generate_insights())
-                    ).result(timeout=30)
-            else:
-                _insights = asyncio.run(_rm.generate_insights())
-            if _insights:
-                ruan_mei_insight_context = (
-                    "\n\nPERFORMANCE INSIGHTS (from engagement data):\n"
-                    "The following patterns have been observed from this client's "
-                    "post performance history. Use your judgment on whether these "
-                    "apply to the current source material. These are observations, "
-                    "not directives.\n\n"
-                    + _insights
-                )
-        else:
-            _cross = RuanMei.generate_cross_client_insights()
-            if _cross:
-                ruan_mei_insight_context = (
-                    "\n\nCROSS-CLIENT INSIGHTS (this client has limited history — "
-                    "these patterns are from other clients' top-performing posts, anonymized):\n"
-                    "Use your judgment on which apply. These are general observations.\n\n"
-                    + _cross
-                )
+        existing_posts_context = _fetch_all_ordinal_hooks(company_keyword)
     except Exception as _e:
-        logger.debug("[Stelle] RuanMei insight generation skipped: %s", _e)
+        logger.debug("[Stelle] Ordinal post dedup fetch skipped: %s", _e)
 
-    # LOLA: topic/format bandit recommendations.
-    lola_context = ""
-    try:
-        from backend.src.agents.lola import LOLA
-        _lola = LOLA(company_keyword)
-        # Auto-seed arms: cross-client auto-seed is primary path.
-        # topic_arms.json is manual override only.
-        if not _lola._state.arms:
-            _arms_path = P.memory_dir(company_keyword) / "topic_arms.json"
-            if _arms_path.exists():
-                # Manual override takes precedence
-                import json as _json
-                _seed_arms = _json.loads(_arms_path.read_text(encoding="utf-8"))
-                _lola.seed_arms(_seed_arms)
-            else:
-                # Primary: auto-seed from universal patterns + client ICP
-                try:
-                    from backend.src.services.cross_client_learning import auto_seed_lola as _auto_seed
-                    _auto_seed(company_keyword)
-                except Exception as _seed_err:
-                    logger.debug("[Stelle] LOLA auto-seed skipped: %s", _seed_err)
-
-        # Auto-plan series from hot LOLA arms (no human gate)
-        try:
-            from backend.src.services.market_intelligence import auto_plan_series_from_lola as _auto_series
-            _auto_series(company_keyword)
-        except Exception as _series_err:
-            logger.debug("[Stelle] Auto series plan skipped: %s", _series_err)
-        lola_context = _lola.recommend_context()
-    except Exception as _e:
-        logger.debug("[Stelle] LOLA context skipped: %s", _e)
-
-    # Feedback learning is handled entirely through RuanMei observations:
-    # draft (post_body) → client edits → final (posted_body) → engagement (reward).
-    # No separate feedback ingestion pipeline needed.
-
-    # Market intelligence: trending topics, hook shifts, whitespace from vertical monitoring.
-    market_context = ""
-    try:
-        from backend.src.services.market_intelligence import build_market_context as _mktctx
-        market_context = _mktctx(company_keyword)
-    except Exception as _e:
-        logger.debug("[Stelle] Market intelligence skipped: %s", _e)
-
-    # Cross-client hook library: top-performing hooks as reference exemplars.
-    hook_library_context = ""
-    try:
-        from backend.src.services.cross_client_learning import load_hook_library_for_stelle as _hooks
-        hook_library_context = _hooks(company=company_keyword, limit=10)
-    except Exception as _e:
-        logger.debug("[Stelle] Hook library skipped: %s", _e)
-
-    # Series Engine: inject series context if a series post is due.
+    # Series Engine: inject series context if a series post is due (operational).
     series_context = ""
     try:
         from backend.src.services.series_engine import get_stelle_series_context as _series_ctx
@@ -4153,7 +4357,7 @@ def generate_one_shot(
     except Exception as _e:
         logger.debug("[Stelle] Series context skipped: %s", _e)
 
-    # Temporal Orchestrator: scheduling intelligence for generation context.
+    # Temporal Orchestrator: scheduling intelligence (operational).
     scheduling_context = ""
     try:
         from backend.src.services.temporal_orchestrator import build_scheduling_context as _sched_ctx
@@ -4161,82 +4365,7 @@ def generate_one_shot(
     except Exception as _e:
         logger.debug("[Stelle] Scheduling context skipped: %s", _e)
 
-    # Analyst findings: hypothesis-driven engagement analysis from the analyst
-    # agent. Replaces the old fixed strategy brief with findings the agent
-    # discovered by forming and testing its own hypotheses using statistical
-    # tools + LinkedIn-wide data. Injected as raw data with caveats — the
-    # LLM reads the findings and decides how to apply them.
-    analyst_context = ""
-    try:
-        import json as _json_analyst_ctx
-        _findings_path = P.memory_dir(company_keyword) / "analyst_findings.json"
-        if _findings_path.exists():
-            _af = _json_analyst_ctx.loads(_findings_path.read_text(encoding="utf-8"))
-            _all_findings = _af.get("findings", [])
-            _runs = _af.get("runs", [])
-
-            # Only inject findings from the LATEST run. The full history is
-            # preserved in the file for stability analysis and the analyst's
-            # own self-assessment, but Stelle should see a clean, current set
-            # of findings — not an accumulation of months of potentially
-            # contradictory observations.
-            if _runs and _all_findings:
-                _latest_run_id = _runs[-1].get("run_id")  # None for pre-migration
-                if _latest_run_id:
-                    _findings = [f for f in _all_findings if f.get("run_id") == _latest_run_id]
-                else:
-                    _findings = [f for f in _all_findings if f.get("run_id") is None]
-                    if not _findings:
-                        _findings = _all_findings[-10:]
-            else:
-                _findings = _all_findings
-
-            if _findings:
-                _lines = [
-                    "",
-                    "",
-                    "ENGAGEMENT ANALYSIS (from hypothesis-driven analyst agent):",
-                    "The following findings were discovered by testing statistical hypotheses "
-                    "against this client's engagement history and 200K+ LinkedIn posts. "
-                    "They are data-driven observations, not directives. Use them to inform "
-                    "topic selection and content approach when multiple valid angles exist. "
-                    "Respect the confidence levels — 'suggestive' means directional, not proven.",
-                    "",
-                ]
-                for _f in _findings:
-                    _conf = _f.get("confidence", "suggestive")
-                    _claim = _f.get("claim", "")
-                    _evidence = _f.get("evidence", "")
-                    _lines.append(f"[{_conf.upper()}] {_claim}")
-                    if _evidence:
-                        _lines.append(f"  Evidence: {_evidence[:200]}")
-                    _lines.append("")
-                analyst_context = "\n".join(_lines)
-    except Exception as _e:
-        logger.debug("[Stelle] Analyst context skipped: %s", _e)
-
-    # 360Brew alignment scorer: pre-generation semantic consistency check.
-    alignment_context = ""
-    try:
-        from backend.src.utils.alignment_scorer import build_stelle_context as _align
-        # Sample source material from transcripts for alignment check.
-        _transcripts_dir = P.transcripts_dir(company_keyword)
-        _source_sample = ""
-        if _transcripts_dir.exists():
-            for _tf in sorted(_transcripts_dir.iterdir()):
-                if _tf.suffix in (".txt", ".md") and _tf.stat().st_size < 30_000:
-                    try:
-                        _source_sample += _tf.read_text(encoding="utf-8")[:1500] + "\n\n"
-                        if len(_source_sample) > 3000:
-                            break
-                    except Exception:
-                        pass
-        if _source_sample:
-            alignment_context = _align(company_keyword, _source_sample, client_name)
-    except Exception as _e:
-        logger.debug("[Stelle] Alignment scoring skipped: %s", _e)
-
-    user_prompt = prompt or (
+    base_prompt = (
         f"Write up to {num_posts} LinkedIn posts for {client_name}. "
         f"The transcripts are from content interviews — conversations designed "
         f"to surface post material. Mine them for everything worth writing about. "
@@ -4244,48 +4373,37 @@ def generate_one_shot(
         f"distinct insights — if the material supports 7, write 7, not {num_posts}. "
         f"Quality and distinctness over quantity."
     )
-    if ruan_mei_insight_context:
-        user_prompt += ruan_mei_insight_context
-    if lola_context:
-        user_prompt += lola_context
-    if alignment_context:
-        user_prompt += alignment_context
-
+    if prompt:
+        user_prompt = f"{base_prompt}\n\nAdditional instructions from the user:\n{prompt}"
+    else:
+        user_prompt = base_prompt
+    if existing_posts_context:
+        user_prompt += existing_posts_context
     if scheduling_context:
         user_prompt += scheduling_context
     if series_context:
         user_prompt += series_context
-    if market_context:
-        user_prompt += market_context
-    if hook_library_context:
-        user_prompt += hook_library_context
-    if analyst_context:
-        user_prompt += analyst_context
 
-    if _PI_AVAILABLE:
-        print(f"[Stelle] Using Pi agent (context compaction enabled)...")
-        result, session_log = _run_pi_agent(
-            workspace_root, user_prompt, company_keyword,
-            event_callback=event_callback, model=model,
-        )
-    else:
-        logger.warning("[Stelle] Pi not installed — falling back to direct API loop (higher token usage)")
-        print(f"[Stelle] Pi not found. Using direct API loop (max {MAX_AGENT_TURNS} turns)...")
-        directives = _build_dynamic_directives(company_keyword)
-        overrides = _build_overrides(company_keyword)
-        system_prompt = _DIRECT_SYSTEM_TEMPLATE.format(dynamic_directives=directives)
-        system_prompt = _apply_overrides_to_prompt(system_prompt, overrides)
-        result, session_log = _run_agent_loop(system_prompt, user_prompt, workspace_root)
+    logger.info("[Stelle] Using direct API loop (max %d turns)...", MAX_AGENT_TURNS)
+    directives = _build_dynamic_directives(company_keyword)
+    system_prompt = _DIRECT_SYSTEM_TEMPLATE.format(dynamic_directives=directives)
+    result, session_log = _run_agent_loop(
+        system_prompt,
+        user_prompt,
+        workspace_root,
+        event_callback=event_callback,
+        company_keyword=company_keyword,
+    )
 
     session_path = output_filepath.replace(".md", "_session.jsonl")
     Path(session_path).parent.mkdir(parents=True, exist_ok=True)
     with open(session_path, "w", encoding="utf-8") as f:
         for entry in session_log:
             f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
-    print(f"[Stelle] Session log saved to {session_path}")
+    logger.info("[Stelle] Session log saved to %s", session_path)
 
     if result is None:
-        print("[Stelle] Agent did not produce a result. Writing empty output.")
+        logger.warning("[Stelle] Agent did not produce a result. Writing empty output.")
         with open(output_filepath, "w", encoding="utf-8") as f:
             f.write(f"# {client_name} — One-Shot Posts\n\nAgent failed to produce output.\n")
         return output_filepath
@@ -4295,7 +4413,7 @@ def generate_one_shot(
         logger.warning("[Stelle] Final output validation failed: %s", val_errors)
 
     post_count = len(result.get("posts", []))
-    print(f"[Stelle] Agent produced {post_count} posts. Running fact-check...")
+    logger.info("[Stelle] Agent produced %d posts. Running fact-check...", post_count)
 
     output_path = _process_result(result, client_name, company_keyword, output_filepath)
 
@@ -4332,7 +4450,7 @@ def inline_edit(
     )
 
     if _PI_AVAILABLE and has_sessions:
-        print("[Stelle] Inline edit via Pi --continue...")
+        logger.info("[Stelle] Inline edit via Pi --continue...")
         workspace_root = P.memory_dir(company_keyword)
 
         pi_cmd = [
@@ -4382,7 +4500,7 @@ def inline_edit(
             output = "".join(collected_text).strip()
 
             if output and len(output) > 200:
-                print(f"[Stelle] Inline edit complete ({len(output)} chars)")
+                logger.info("[Stelle] Inline edit complete (%d chars)", len(output))
                 return output
 
             logger.warning("[Stelle] Pi inline edit produced no usable output")
@@ -4393,7 +4511,7 @@ def inline_edit(
         except Exception as e:
             logger.warning("[Stelle] Pi inline edit failed: %s", e)
 
-    print("[Stelle] Inline edit via direct Claude Haiku call...")
+    logger.info("[Stelle] Inline edit via direct Claude Haiku call...")
     try:
         client = Anthropic()
         resp = _call_with_retry(lambda: client.messages.create(
@@ -4403,7 +4521,7 @@ def inline_edit(
         ))
         text = resp.content[0].text.strip() if resp.content else None
         if text and len(text) > 100:
-            print(f"[Stelle] Inline edit complete ({len(text)} chars)")
+            logger.info("[Stelle] Inline edit complete (%d chars)", len(text))
             if event_callback:
                 event_callback("text_delta", {"text": text})
             return text

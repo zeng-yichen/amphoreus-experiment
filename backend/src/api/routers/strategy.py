@@ -1,8 +1,16 @@
-"""Strategy API — Herta content strategy generation + learned strategy briefs."""
+"""Strategy API — Cyrene strategic reviews + Herta content strategy generation.
+
+Cyrene (strategic growth agent) produces a JSON brief with interview
+questions, DM targets, content priorities, ABM targeting, and Stelle
+scheduling. Runs on demand via POST /api/strategy/cyrene/{company}.
+
+Herta (content strategy document generator) is the older, static
+strategy path — still available at /generate for clients that prefer
+a formatted strategy document over Cyrene's live brief.
+"""
 
 import json
 import logging
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -14,10 +22,6 @@ from backend.src.services import job_manager
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/strategy", tags=["strategy"])
 
-# Strategy brief staleness threshold — after this many days, the /brief
-# endpoint returns 404 with a hint to refresh.
-_BRIEF_STALENESS_DAYS = 7
-
 
 class StrategyRequest(BaseModel):
     company: str
@@ -25,142 +29,62 @@ class StrategyRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Learned strategy brief endpoints (A4 pipeline output)
+# Cyrene — strategic growth agent
 # ---------------------------------------------------------------------------
-# These are declared BEFORE the /{company} catchall routes below so FastAPI
-# matches them by literal path prefix ("brief", "topics", "causal") rather
-# than treating those words as company slugs.
 
 
-@router.get("/brief/{company}")
-async def get_content_brief(company: str):
-    """Return the live, auto-updated content strategy brief.
+@router.post("/cyrene/{company}")
+async def run_cyrene_review(company: str):
+    """Start a Cyrene strategic review as a background job.
 
-    This is the data-driven strategy computed from the analyst's latest
-    findings. It updates automatically after each analyst run — no manual
-    regeneration needed. Replaces Herta's static strategy document for
-    clients with enough data.
+    Cyrene is a turn-based Opus agent that studies the client's full
+    engagement history, ICP exposure trends, warm prospects, and
+    transcript inventory, then produces a strategic brief with:
+    interview questions, DM targets, content priorities, ABM targeting,
+    Stelle scheduling, and a self-scheduled next-run trigger.
 
-    Returns the content plan (topic/format allocation), analyst findings,
-    hook guidance, and performance rankings. 404 if no analyst data exists.
+    Returns a job_id; connect to /stream/{job_id} for SSE progress.
+    The final brief is also persisted to memory/{company}/cyrene_brief.json.
     """
-    from backend.src.db import vortex
-    path = vortex.memory_dir(company) / "content_brief.json"
-
-    # Try cached file first
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
-    # Generate on demand if analyst data exists
-    try:
-        from backend.src.utils.content_brief import build_interview_brief
-        brief = build_interview_brief(company, n_posts=6)
-        if brief:
-            return brief
-    except Exception:
-        pass
-
-    raise HTTPException(
-        status_code=404,
-        detail=(
-            f"No content brief available for {company}. Needs at least "
-            "10 scored observations and one analyst run."
-        ),
+    job_id = job_manager.create_job(
+        client_slug=company,
+        agent="cyrene",
+        prompt=None,
+        creator_id=None,
     )
 
+    def _run(jid: str, co: str):
+        from backend.src.agents.cyrene import run_strategic_review
+        job_manager.emit_event(jid, status_event(f"Starting Cyrene strategic review for {co}..."))
+        try:
+            brief = run_strategic_review(co)
+            if brief.get("_error"):
+                job_manager.emit_event(jid, status_event(f"Cyrene failed: {brief['_error']}"))
+                return brief
+            job_manager.emit_event(jid, done_event(json.dumps(brief, default=str)))
+            return brief
+        except Exception as e:
+            job_manager.emit_event(jid, status_event(f"Cyrene crashed: {e}"))
+            raise
 
-@router.get("/findings/{company}")
-async def get_analyst_findings(company: str):
-    """Return the analyst agent's findings for a client.
+    job_manager.run_in_background(job_id, target=_run, args=(job_id, company))
+    return {"job_id": job_id, "status": "pending"}
 
-    The analyst runs hypothesis-driven engagement analysis using statistical
-    tools + LinkedIn-wide data. Its findings replace the old fixed pipeline's
-    strategy brief, topic transitions, and causal dimensions with a single
-    adaptive, open-ended analysis.
 
-    404 if no findings exist or the latest run is stale (> 7 days).
-    """
+@router.get("/cyrene/{company}/brief")
+async def get_cyrene_brief(company: str):
+    """Return the most recent Cyrene brief for a client (if any)."""
     from backend.src.db import vortex
-    path = vortex.memory_dir(company) / "analyst_findings.json"
+    path = vortex.memory_dir(company) / "cyrene_brief.json"
     if not path.exists():
         raise HTTPException(
             status_code=404,
-            detail=(
-                f"No analyst findings for {company}. Needs at least 10 "
-                "scored observations. Run ordinal sync to trigger the analyst."
-            ),
+            detail=f"No Cyrene brief for {company}. Run POST /api/strategy/cyrene/{company} first.",
         )
-
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read findings: {e}")
-
-    runs = data.get("runs", [])
-    last_run = runs[-1] if runs else {}
-    last_ts = last_run.get("timestamp", "")
-    age_days = 0.0
-    if last_ts:
-        try:
-            dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
-            age_days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400
-        except Exception:
-            pass
-
-    if age_days > _BRIEF_STALENESS_DAYS:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"Analyst findings for {company} are {age_days:.1f} days old "
-                f"(threshold: {_BRIEF_STALENESS_DAYS} days). Run ordinal sync "
-                "to trigger a fresh analysis."
-            ),
-        )
-
-    return {
-        "company": company,
-        "findings": data.get("findings", []),
-        "last_run": last_run,
-        "age_days": round(age_days, 2),
-        "total_runs": len(runs),
-    }
-
-
-@router.get("/findings/{company}/refresh")
-async def refresh_analyst_findings(company: str):
-    """Run a fresh analyst analysis for a client and return the findings.
-
-    Runs the full analyst agent synchronously (typically 2-4 minutes,
-    ~$2-3 in LLM cost). Use sparingly — the analyst is designed to run
-    weekly, not on-demand for every request.
-    """
-    try:
-        from backend.src.agents.analyst import run_analysis
-        result = run_analysis(company)
-    except Exception as e:
-        logger.exception("[strategy] Analyst refresh failed for %s", company)
-        raise HTTPException(status_code=500, detail=f"Analyst failed: {e}")
-
-    if result.get("error"):
-        raise HTTPException(status_code=404, detail=result["error"])
-
-    from backend.src.db import vortex
-    path = vortex.memory_dir(company) / "analyst_findings.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        data = {"findings": [], "runs": []}
-
-    return {
-        "company": company,
-        "findings": data.get("findings", []),
-        "last_run": result,
-        "age_days": 0.0,
-        "total_runs": len(data.get("runs", [])),
-    }
+        raise HTTPException(status_code=500, detail=f"Failed to read brief: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -189,16 +113,16 @@ async def generate_strategy(req: StrategyRequest):
 
 
 @router.get("/stream/{job_id}")
-async def stream_strategy(job_id: str):
-    job = job_manager.get_job(job_id)
-    if not job:
+async def stream_strategy(job_id: str, after_id: int = 0):
+    from backend.src.db.local import get_run
+    if not job_manager.get_job(job_id) and not get_run(job_id):
         raise HTTPException(status_code=404, detail="Job not found")
 
-    def _gen():
-        for event in job_manager.drain_events(job_id, timeout=600):
-            yield f"data: {event.model_dump_json()}\n\n"
-
-    return StreamingResponse(_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+    return StreamingResponse(
+        job_manager.sse_stream(job_id, timeout=3600, heartbeat_interval=15, after_id=after_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/{company}/html")

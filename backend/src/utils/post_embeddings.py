@@ -1,39 +1,47 @@
 """Post embedding cache — continuous vector representations of every scored post.
 
 Every observation gets an embedding of its post body. These embeddings
-replace discrete format_tag/topic_tag as the primary feature for the
-learning pipeline's internal operations:
+are the PRIMARY feature representation for the entire learning pipeline:
 
-  - The analyst's `find_similar_posts` tool uses them for similarity search
-  - The analyst's `fit_embedding_regression` tool uses them as regression features
-  - The draft scorer's k-NN path uses them to score new drafts by similarity
-    to historically high-performing posts
+  - Topic transitions → embedding trajectory model (continuous directions)
+  - Causal filter → PCA components replace discrete tag categories
+  - Draft scorer → k-NN similarity, no categorical features
+  - Content brief → embedding clusters, not tag aggregation
+  - Sequential state → embedding similarity, not tag string equality
 
-Tags (format_tag, topic_tag) remain as display-only metadata for humans.
-The learning pipeline operates on embeddings. This follows the principle:
-continuous over categorical, labels only for human display.
+Tags (format_tag, topic_tag) are display-only metadata for human dashboards.
+No learning subsystem should depend on them.
+
+Also provides PCA decomposition and k-means clustering utilities used by
+the causal filter, content brief, and embedding trajectory modules.
 
 Storage: memory/{company}/post_embeddings.json
-Embedding model: OpenAI text-embedding-3-small (1536 dims) — same as
-alignment_scorer, transcript_scorer, and lola.
+Embedding model: OpenAI text-embedding-3-small (1536 dims)
 
 Usage:
     from backend.src.utils.post_embeddings import (
         get_post_embeddings,
         embed_text,
+        embed_texts,
+        cosine_similarity,
+        compute_pca,
+        project_to_pca,
+        cluster_embeddings,
     )
 
-    # Get all observation embeddings (lazy backfill on first call)
     embeddings = get_post_embeddings("innovocommerce")
-    # → {"post_hash_1": [1536 floats], "post_hash_2": [1536 floats], ...}
-
-    # Embed a new draft for comparison
-    draft_emb = embed_text("Your post text here")
+    pca_state = compute_pca(embeddings, n_components=10)
+    projections = pca_state["projections"]  # {hash: [10 floats]}
 """
+
+from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, field
 from typing import Optional
+
+import numpy as np
 
 from backend.src.db import vortex
 
@@ -66,7 +74,7 @@ def get_post_embeddings(company: str) -> dict[str, list[float]]:
 
     scored = [
         o for o in state.get("observations", [])
-        if o.get("status") == "scored"
+        if o.get("status") in ("scored", "finalized")
         and o.get("post_hash")
         and (o.get("posted_body") or o.get("post_body"))
     ]
@@ -107,14 +115,24 @@ def embed_text(text: str) -> Optional[list[float]]:
     return results[0] if results else None
 
 
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Batch embed multiple texts via OpenAI.
+
+    Truncates each text to 32k chars (~8k tokens) for safety.
+    Returns [] on failure — callers must handle the empty case.
+    """
+    return _embed_batch([t[:32000] for t in texts])
+
+
 def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Cosine similarity between two embedding vectors."""
-    import math
-    if len(a) != len(b) or not a:
+    """Cosine similarity between two embedding vectors (numpy-accelerated)."""
+    a_arr = np.asarray(a, dtype=np.float32)
+    b_arr = np.asarray(b, dtype=np.float32)
+    if a_arr.shape != b_arr.shape or a_arr.size == 0:
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
+    dot = float(np.dot(a_arr, b_arr))
+    norm_a = float(np.linalg.norm(a_arr))
+    norm_b = float(np.linalg.norm(b_arr))
     if norm_a < 1e-10 or norm_b < 1e-10:
         return 0.0
     return dot / (norm_a * norm_b)
@@ -189,3 +207,179 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
     except Exception as e:
         logger.warning("[post_embeddings] Embedding failed: %s", e)
         return []
+
+
+# ------------------------------------------------------------------
+# PCA — principal component decomposition of embedding space
+# ------------------------------------------------------------------
+
+@dataclass
+class PCAState:
+    """Compact PCA result for downstream consumers."""
+    components: np.ndarray          # (n_components, embedding_dim) — principal axes
+    mean: np.ndarray                # (embedding_dim,) — centering vector
+    explained_variance: np.ndarray  # (n_components,) — variance per component
+    explained_ratio: np.ndarray     # (n_components,) — fraction of total variance
+    projections: dict[str, list[float]]  # {post_hash: [n_components floats]}
+    hashes: list[str] = field(default_factory=list)
+
+
+def compute_pca(
+    embeddings: dict[str, list[float]],
+    n_components: int = 10,
+) -> Optional[PCAState]:
+    """PCA decomposition of post embeddings.
+
+    For n << p (typical: 30-50 posts, 1536 dims), uses the dual trick:
+    eigendecompose the n×n Gram matrix instead of the p×p covariance matrix.
+
+    Returns PCAState with components, projections per hash, and variance
+    explained. Returns None if fewer than 3 embeddings are available.
+    """
+    if len(embeddings) < 3:
+        return None
+
+    hashes = list(embeddings.keys())
+    X = np.array([embeddings[h] for h in hashes], dtype=np.float64)
+    n, p = X.shape
+    n_components = min(n_components, n - 1, p)
+
+    mean = X.mean(axis=0)
+    Xc = X - mean  # centered
+
+    # Dual PCA: eigendecompose Xc @ Xc.T (n×n) instead of Xc.T @ Xc (p×p)
+    gram = Xc @ Xc.T  # n×n
+    eigenvalues, eigenvectors = np.linalg.eigh(gram)
+
+    # eigh returns ascending order; flip to descending
+    idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[idx][:n_components]
+    eigenvectors = eigenvectors[:, idx][:, :n_components]
+
+    # Convert Gram eigenvectors to actual principal components (p-dim)
+    # V = Xc.T @ U / sqrt(eigenvalues)
+    components = np.zeros((n_components, p), dtype=np.float64)
+    for i in range(n_components):
+        if eigenvalues[i] > 1e-10:
+            components[i] = Xc.T @ eigenvectors[:, i]
+            components[i] /= np.linalg.norm(components[i])
+
+    total_var = np.sum(np.maximum(eigenvalues, 0)) + np.sum(
+        np.maximum(np.linalg.eigh(gram)[0], 0)
+    ) - np.sum(np.maximum(eigenvalues, 0))
+    # Simpler: total variance = trace of Gram
+    total_var = max(np.trace(gram), 1e-10)
+    explained_ratio = np.maximum(eigenvalues, 0) / total_var
+
+    # Project all observations onto the components
+    projections_matrix = Xc @ components.T  # n × n_components
+    projections = {
+        h: proj.tolist()
+        for h, proj in zip(hashes, projections_matrix)
+    }
+
+    return PCAState(
+        components=components,
+        mean=mean,
+        explained_variance=np.maximum(eigenvalues, 0),
+        explained_ratio=explained_ratio,
+        projections=projections,
+        hashes=hashes,
+    )
+
+
+def project_to_pca(
+    embedding: list[float],
+    pca: PCAState,
+) -> list[float]:
+    """Project a single embedding onto an existing PCA basis."""
+    e = np.array(embedding, dtype=np.float64) - pca.mean
+    return (e @ pca.components.T).tolist()
+
+
+# ------------------------------------------------------------------
+# Clustering — k-means in embedding space
+# ------------------------------------------------------------------
+
+@dataclass
+class ClusterResult:
+    """k-means clustering result."""
+    k: int
+    centroids: np.ndarray          # (k, embedding_dim)
+    labels: dict[str, int]         # {post_hash: cluster_id}
+    cluster_sizes: dict[int, int]  # {cluster_id: count}
+
+
+def cluster_embeddings(
+    embeddings: dict[str, list[float]],
+    k: int = 5,
+    max_iter: int = 50,
+    seed: int = 42,
+) -> Optional[ClusterResult]:
+    """Simple k-means clustering over post embeddings.
+
+    Uses cosine distance (L2-normalized embeddings → Euclidean k-means
+    on the unit sphere ≈ spherical k-means).
+
+    Returns None if fewer than k embeddings available.
+    """
+    if len(embeddings) < k:
+        return None
+
+    hashes = list(embeddings.keys())
+    X = np.array([embeddings[h] for h in hashes], dtype=np.float64)
+
+    # L2-normalize for cosine-based clustering
+    norms = np.linalg.norm(X, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-10)
+    Xn = X / norms
+
+    rng = np.random.RandomState(seed)
+
+    # k-means++ initialization
+    n = len(Xn)
+    centroid_indices = [rng.randint(n)]
+    for _ in range(1, k):
+        dists = np.min(
+            [np.sum((Xn - Xn[ci]) ** 2, axis=1) for ci in centroid_indices],
+            axis=0,
+        )
+        probs = dists / (dists.sum() + 1e-10)
+        centroid_indices.append(rng.choice(n, p=probs))
+
+    centroids = Xn[centroid_indices].copy()
+
+    for _ in range(max_iter):
+        # Assign
+        dists = np.array([
+            np.sum((Xn - c) ** 2, axis=1) for c in centroids
+        ]).T  # n × k
+        assignments = np.argmin(dists, axis=1)
+
+        # Update
+        new_centroids = np.zeros_like(centroids)
+        for ci in range(k):
+            mask = assignments == ci
+            if mask.sum() > 0:
+                new_centroids[ci] = Xn[mask].mean(axis=0)
+                norm = np.linalg.norm(new_centroids[ci])
+                if norm > 1e-10:
+                    new_centroids[ci] /= norm
+            else:
+                new_centroids[ci] = centroids[ci]
+
+        if np.allclose(centroids, new_centroids, atol=1e-6):
+            break
+        centroids = new_centroids
+
+    labels = {h: int(assignments[i]) for i, h in enumerate(hashes)}
+    cluster_sizes = {}
+    for ci in range(k):
+        cluster_sizes[ci] = int(np.sum(assignments == ci))
+
+    return ClusterResult(
+        k=k,
+        centroids=centroids,
+        labels=labels,
+        cluster_sizes=cluster_sizes,
+    )

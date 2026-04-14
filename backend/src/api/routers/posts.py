@@ -200,7 +200,7 @@ async def delete_post(post_id: str):
 @router.post("/{post_id}/rewrite")
 async def rewrite_post(post_id: str, req: RewriteRequest):
     """Rewrite a post via Cyrene."""
-    from backend.src.agents.cyrene import Cyrene
+    from backend.src.agents.demiurge import Cyrene
     cyrene = Cyrene()
     result = cyrene.rewrite_single_post(
         post_text=req.post_text,

@@ -174,7 +174,7 @@ def _load_observations(company: str) -> list[dict]:
         rm = RuanMei(company)
         return [
             o for o in rm._state.get("observations", [])
-            if o.get("status") == "scored" and o.get("posted_at")
+            if o.get("status") in ("scored", "finalized") and o.get("posted_at")
         ]
     except Exception as e:
         logger.warning("[temporal] Failed to load RuanMei state for %s: %s", company, e)

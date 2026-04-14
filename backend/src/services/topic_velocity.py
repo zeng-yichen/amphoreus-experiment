@@ -1,6 +1,6 @@
-"""Topic Velocity — proactive industry trend monitoring via Gemini + Google Search.
+"""Topic Velocity — proactive industry trend monitoring via Perplexity.
 
-Periodically queries Gemini (with Google Search grounding) for each client's
+Queries Perplexity (sonar model with web search) for each client's
 industry trends, producing a markdown file at
 ``memory/{company}/topic_velocity.md`` that Stelle reads as generation context.
 
@@ -10,9 +10,11 @@ rather than prescribing strategy from trends.
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 
-from backend.src.core.config import get_settings
+import httpx
+
 from backend.src.db import vortex as P
 
 logger = logging.getLogger(__name__)
@@ -58,7 +60,7 @@ def _gather_context(company: str) -> str:
 
 
 def refresh_topic_velocity(company: str) -> str:
-    """Fetch current industry signal via Gemini + Google Search and write topic_velocity.md.
+    """Fetch current industry signal via Perplexity and write topic_velocity.md.
 
     Returns the generated markdown, or empty string on failure.
     """
@@ -66,52 +68,50 @@ def refresh_topic_velocity(company: str) -> str:
     if not context.strip():
         context = company.replace("-", " ")
 
-    settings = get_settings()
-    if not settings.gemini_api_key:
-        logger.warning("[topic_velocity] GEMINI_API_KEY not set — skipping")
+    api_key = os.environ.get("PERPLEXITY_API_KEY", "")
+    if not api_key:
+        logger.warning("[topic_velocity] PERPLEXITY_API_KEY not set — skipping")
         return ""
 
+    prompt = (
+        f"You are monitoring industry trends for a LinkedIn thought leader.\n\n"
+        f"CLIENT CONTEXT:\n{context[:3000]}\n\n"
+        f"Search the web for the 8-12 most important recent news stories, developments, "
+        f"and trends relevant to this person's industry and audience. Focus on:\n"
+        f"- Breaking news and announcements\n"
+        f"- Industry shifts and emerging trends\n"
+        f"- Regulatory or market changes\n"
+        f"- Notable reports or research\n\n"
+        f"For each item, provide:\n"
+        f"- A bold title\n"
+        f"- A 1-2 sentence summary\n"
+        f"- The source URL if available\n\n"
+        f"Output as a clean markdown list. Be specific and factual."
+    )
+
     try:
-        from google import genai
-        from google.genai import types
-
-        client = genai.Client(api_key=settings.gemini_api_key)
-
-        prompt = (
-            f"You are monitoring industry trends for a LinkedIn thought leader.\n\n"
-            f"CLIENT CONTEXT:\n{context[:3000]}\n\n"
-            f"Search the web for the 8-12 most important recent news stories, developments, "
-            f"and trends relevant to this person's industry and audience. Focus on:\n"
-            f"- Breaking news and announcements\n"
-            f"- Industry shifts and emerging trends\n"
-            f"- Regulatory or market changes\n"
-            f"- Notable reports or research\n\n"
-            f"For each item, provide:\n"
-            f"- A bold title\n"
-            f"- A 1-2 sentence summary\n"
-            f"- The source URL if available\n\n"
-            f"Output as a clean markdown list. Be specific and factual."
+        resp = httpx.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "sonar",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.2,
+                "max_tokens": 2000,
+            },
+            timeout=60.0,
         )
-
-        config = types.GenerateContentConfig(
-            temperature=0.2,
-            tools=[{"google_search": {}}],
-            max_output_tokens=2000,
-        )
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=config,
-        )
-
-        body = (response.text or "").strip()
+        resp.raise_for_status()
+        data = resp.json()
+        body = (data.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
         if not body:
-            logger.warning("[topic_velocity] Gemini returned empty response for %s", company)
+            logger.warning("[topic_velocity] Perplexity returned empty response for %s", company)
             return ""
-
     except Exception as e:
-        logger.warning("[topic_velocity] Gemini search failed for %s: %s", company, e)
+        logger.warning("[topic_velocity] Perplexity search failed for %s: %s", company, e)
         return ""
 
     md = (

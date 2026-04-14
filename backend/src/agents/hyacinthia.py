@@ -3,7 +3,6 @@ import csv
 import json
 import re
 import time
-import difflib
 import requests
 from backend.src.db import vortex as P
 from datetime import datetime, timedelta, timezone
@@ -51,15 +50,63 @@ class Hyacinthia:
     def _save_draft_map_entry(
         self, company_keyword: str, post_id: str, content: str, title: str,
         generation_metadata: dict | None = None,
-    ) -> None:
-        """Persist a post_id → original_text + generation quality metadata to draft_map.json."""
+    ) -> bool:
+        """Persist a post_id → original_text mapping to draft_map.json.
+
+        This is THE critical registration point in the draft preservation pipeline:
+        every post Stelle pushes to Ordinal must land here, keyed by the Ordinal
+        workspace post id, so that when ordinal_sync later ingests the published
+        version it can compute the (draft, published) delta.
+
+        Bulletproof contract: never raises. Returns True on successful persistence,
+        False on any failure. Logs every success AND every failure with enough
+        context to grep the sync logs for pairing issues.
+
+        Input validation: an empty post_id or content is treated as a bug (logged
+        loudly) — these are both essential for the pipeline to work and silent
+        acceptance was the root cause of past 'it looked like it was working'
+        failures.
+        """
+        # --- input validation: loud failures on bad inputs ---
+        pid = (post_id or "").strip()
+        text = (content or "").strip()
+        if not pid:
+            print(
+                f"[ORDINAL CLIENT] DRAFT_MAP REGISTRATION FAILED ({company_keyword}): "
+                f"empty post_id — the draft→published pairing pipeline will be broken "
+                f"for this post. Title: {title!r}"
+            )
+            return False
+        if not text:
+            print(
+                f"[ORDINAL CLIENT] DRAFT_MAP REGISTRATION FAILED ({company_keyword}/{pid[:12]}): "
+                f"empty content — the draft→published pairing pipeline will be broken "
+                f"for this post. Title: {title!r}"
+            )
+            return False
+
         path = P.draft_map_path(company_keyword)
-        try:
-            draft_map = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except Exception:
-            draft_map = {}
+
+        # --- load existing map (permissive on read errors) ---
+        draft_map: dict = {}
+        if path.exists():
+            try:
+                draft_map = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(draft_map, dict):
+                    print(
+                        f"[ORDINAL CLIENT] draft_map.json for {company_keyword} "
+                        f"was not a dict ({type(draft_map).__name__}) — resetting to empty"
+                    )
+                    draft_map = {}
+            except Exception as e:
+                print(
+                    f"[ORDINAL CLIENT] Could not read draft_map.json for {company_keyword}: "
+                    f"{e} — starting fresh"
+                )
+                draft_map = {}
+
         entry = {
-            "original_text": content,
+            "original_text": text,
             "title": title,
             "company": company_keyword,
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -71,9 +118,27 @@ class Hyacinthia:
                        "constitutional_results", "alignment_score"):
                 if k in generation_metadata:
                     entry[k] = generation_metadata[k]
-        draft_map[post_id] = entry
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(draft_map, indent=2, ensure_ascii=False), encoding="utf-8")
+        draft_map[pid] = entry
+
+        # --- persist (loud failure on write errors) ---
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(draft_map, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as e:
+            print(
+                f"[ORDINAL CLIENT] DRAFT_MAP REGISTRATION FAILED ({company_keyword}/{pid[:12]}): "
+                f"write failed: {e} — the draft→published pairing pipeline will be "
+                f"broken for this post"
+            )
+            return False
+
+        print(
+            f"[ORDINAL CLIENT] draft_map registered: {company_keyword}/{pid[:12]}… "
+            f"({len(text)} chars, total entries: {len(draft_map)})"
+        )
+        return True
 
     def remove_draft_map_entry(self, company_keyword: str, ordinal_post_id: str) -> None:
         """Drop a stale Ordinal post id from draft_map.json (e.g. local draft was re-pushed)."""
@@ -485,7 +550,12 @@ class Hyacinthia:
             if not clean_title.strip():
                 clean_title = f"Draft {i+1}"
             
-            linked_in_cfg: dict = {"copy": _strip_linkedin_mentions(post_data["content"])}
+            # Strip LinkedIn mention markers BEFORE sending to Ordinal AND before
+            # writing to draft_map. Storing the stripped version ensures the
+            # draft_map text matches what Ordinal actually received, so later
+            # fuzzy-matching against the published body produces high similarity.
+            stripped_content = _strip_linkedin_mentions(post_data["content"])
+            linked_in_cfg: dict = {"copy": stripped_content}
             li_assets = extras.get("linkedin_asset_ids") or []
             if li_assets:
                 linked_in_cfg["assetIds"] = li_assets
@@ -524,8 +594,18 @@ class Hyacinthia:
                     )
 
                 if post_id:
-                    self._save_draft_map_entry(company_keyword, post_id, post_data["content"], clean_title)
-                    self._update_story_inventory(company_keyword, post_id, post_data["content"], tentative_date)
+                    # Store the stripped content — what Ordinal actually received —
+                    # so the draft_map text aligns with what ingest_from_ordinal
+                    # will see in the analytics feed. Using the raw post_data
+                    # here would leave LinkedIn mention markers in the stored
+                    # text, dropping fuzzy-match similarity against the
+                    # published body.
+                    self._save_draft_map_entry(
+                        company_keyword, post_id, stripped_content, clean_title
+                    )
+                    self._update_story_inventory(
+                        company_keyword, post_id, stripped_content, tentative_date
+                    )
 
                 if post_approvals and post_id:
                     app_res = self.create_approvals(company_keyword, post_id, post_approvals)
@@ -944,81 +1024,3 @@ class Hyacinthia:
             return {"success": False, "comment_id": None, "error": error_msg}
         except Exception as e:
             return {"success": False, "comment_id": None, "error": str(e)}
-
-    def harvest_feedback_diffs(self, company_keyword: str) -> list:
-        """Compare current Ordinal post copy against stored draft_map originals.
-
-        For every post in draft_map.json, fetches the live copy from Ordinal.
-        If it differs from the stored original, writes a unified diff to the
-        client's feedback directory and returns a summary list.
-
-        Returns:
-            List of dicts: {post_id, title, diff_path} for posts that changed.
-        """
-        api_key = self._get_api_key_for_client(company_keyword)
-        if not api_key:
-            print(f"[HARVEST] API key not found for '{company_keyword}'.")
-            return []
-
-        draft_map_file = P.draft_map_path(company_keyword)
-        if not draft_map_file.exists():
-            print(f"[HARVEST] No draft_map.json found for '{company_keyword}'.")
-            return []
-
-        try:
-            draft_map = json.loads(draft_map_file.read_text(encoding="utf-8"))
-        except Exception as e:
-            print(f"[HARVEST] Failed to read draft_map.json: {e}")
-            return []
-
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        feedback_path = P.feedback_dir(company_keyword)
-        os.makedirs(feedback_path, exist_ok=True)
-
-        changed = []
-        for post_id, entry in draft_map.items():
-            original = entry.get("original_text", "")
-            title = entry.get("title", post_id[:8])
-
-            try:
-                resp = requests.get(f"{self.base_url}/posts/{post_id}", headers=headers, timeout=10)
-                if resp.status_code == 404:
-                    print(f"[HARVEST] Post {post_id} no longer exists — skipping.")
-                    continue
-                resp.raise_for_status()
-                post_data = resp.json().get("post", {})
-                current = ""
-                if post_data.get("linkedIn") and post_data["linkedIn"].get("copy"):
-                    current = post_data["linkedIn"]["copy"]
-            except Exception as e:
-                print(f"[HARVEST] Failed to fetch post {post_id}: {e}")
-                continue
-
-            if current.strip() == original.strip():
-                continue
-
-            diff_lines = list(difflib.unified_diff(
-                original.splitlines(keepends=True),
-                current.splitlines(keepends=True),
-                fromfile=f"original/{title}",
-                tofile=f"ordinal/{title}",
-            ))
-            if not diff_lines:
-                continue
-
-            safe_title = "".join(c if c.isalnum() else "_" for c in title)[:40]
-            diff_filename = f"diff_{safe_title}_{post_id[:8]}.txt"
-            diff_path = os.path.join(str(feedback_path), diff_filename)
-            with open(diff_path, "w", encoding="utf-8") as f:
-                f.write(f"=== POST: {title} ({post_id}) ===\n")
-                f.write(f"=== HARVESTED: {datetime.now(timezone.utc).isoformat()} ===\n\n")
-                f.writelines(diff_lines)
-
-            print(f"[HARVEST] Diff saved: {diff_filename}")
-            changed.append({"post_id": post_id, "title": title, "diff_path": diff_path})
-
-        print(f"[HARVEST] {len(changed)} post(s) with edits found for '{company_keyword}'.")
-        return changed

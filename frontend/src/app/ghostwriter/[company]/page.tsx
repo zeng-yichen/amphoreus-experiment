@@ -24,13 +24,6 @@ interface TerminalLine {
   timestamp: number;
 }
 
-interface FileEntry {
-  name: string;
-  path: string;
-  is_dir: boolean;
-  size: number | null;
-}
-
 interface RunEntry {
   id: string;
   agent: string;
@@ -56,11 +49,8 @@ export default function GhostwriterIDE() {
   const [prompt, setPrompt] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [lines, setLines] = useState<TerminalLine[]>([]);
-  const [activeTab, setActiveTab] = useState<"terminal" | "files" | "history" | "posts">("terminal");
-  const [files, setFiles] = useState<FileEntry[]>([]);
-  const [filePath, setFilePath] = useState("");
+  const [activeTab, setActiveTab] = useState<"terminal" | "history" | "posts">("terminal");
   const [runs, setRuns] = useState<RunEntry[]>([]);
-  const [loadingFiles, setLoadingFiles] = useState(false);
   const [loadingRuns, setLoadingRuns] = useState(false);
   const [selectedRun, setSelectedRun] = useState<RunEntry | null>(null);
   const [runEvents, setRunEvents] = useState<RunEvent[]>([]);
@@ -97,19 +87,6 @@ export default function GhostwriterIDE() {
       setSavingUsername(false);
     }
   }
-
-  const loadFiles = useCallback(async (path = "") => {
-    setLoadingFiles(true);
-    try {
-      const res = await ghostwriterApi.getFiles(company, path);
-      setFiles(res.files);
-      setFilePath(path);
-    } catch {
-      setFiles([]);
-    } finally {
-      setLoadingFiles(false);
-    }
-  }, [company]);
 
   const loadRuns = useCallback(async () => {
     setLoadingRuns(true);
@@ -149,10 +126,43 @@ export default function GhostwriterIDE() {
   }, []);
 
   useEffect(() => {
-    if (activeTab === "files") loadFiles(filePath);
     if (activeTab === "history") { loadRuns(); setSelectedRun(null); }
     if (activeTab === "posts") loadPosts();
-  }, [activeTab, loadFiles, loadRuns, loadPosts, filePath]);
+  }, [activeTab, loadRuns, loadPosts]);
+
+  // localStorage key for tracking a live Stelle run per client — lets the
+  // user navigate away (or close + reopen) and rejoin the live terminal.
+  const activeJobKey = `amphoreus_stelle_job_${company}`;
+
+  const consumeStream = useCallback(
+    async (jobId: string, afterId = 0) => {
+      try {
+        for await (const data of ghostwriterApi.streamJob(jobId, afterId)) {
+          const text = extractText(data);
+          setLines((prev) => [
+            ...prev,
+            {
+              type: data.type,
+              text,
+              timestamp: (data.timestamp || Date.now() / 1000) * 1000,
+            },
+          ]);
+          if (data.type === "done" || data.type === "error") {
+            localStorage.removeItem(activeJobKey);
+            setIsGenerating(false);
+          }
+        }
+        setIsGenerating(false);
+      } catch (e) {
+        setLines((prev) => [
+          ...prev,
+          { type: "error", text: String(e), timestamp: Date.now() },
+        ]);
+        setIsGenerating(false);
+      }
+    },
+    [activeJobKey],
+  );
 
   async function handleGenerate() {
     if (isGenerating) return;
@@ -161,21 +171,16 @@ export default function GhostwriterIDE() {
     setActiveTab("terminal");
 
     try {
-      const { job_id } = await ghostwriterApi.generate(company, prompt || undefined);
+      const { job_id } = await ghostwriterApi.generate(
+        company,
+        prompt || undefined,
+      );
+      localStorage.setItem(activeJobKey, job_id);
       setLines((prev) => [
         ...prev,
         { type: "status", text: `Job started: ${job_id}`, timestamp: Date.now() },
       ]);
-
-      for await (const data of ghostwriterApi.streamJob(job_id)) {
-        const text = extractText(data);
-        setLines((prev) => [...prev, { type: data.type, text, timestamp: (data.timestamp || Date.now() / 1000) * 1000 }]);
-
-        if (data.type === "done" || data.type === "error") {
-          setIsGenerating(false);
-        }
-      }
-      setIsGenerating(false);
+      await consumeStream(job_id, 0);
     } catch (e) {
       setLines((prev) => [
         ...prev,
@@ -185,12 +190,70 @@ export default function GhostwriterIDE() {
     }
   }
 
+  // On mount: if a job was in-flight when the user navigated away or
+  // closed the tab, rehydrate the terminal from run_events and resume
+  // the live stream from the last event id.
+  useEffect(() => {
+    const savedJobId = localStorage.getItem(activeJobKey);
+    if (!savedJobId) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await ghostwriterApi.getRunEvents(savedJobId);
+        if (cancelled) return;
+        const status = res.run?.status;
+        if (status === "completed" || status === "failed") {
+          localStorage.removeItem(activeJobKey);
+          return;
+        }
+        setIsGenerating(true);
+        setActiveTab("terminal");
+        const hist: TerminalLine[] = res.events.map((ev) => {
+          const parsed =
+            typeof ev.data === "string"
+              ? (() => {
+                  try {
+                    return JSON.parse(ev.data as string);
+                  } catch {
+                    return {};
+                  }
+                })()
+              : ev.data || {};
+          return {
+            type: ev.event_type,
+            text: extractText({ type: ev.event_type, data: parsed }),
+            timestamp: ev.timestamp * 1000,
+          };
+        });
+        setLines([
+          { type: "status", text: `Rejoining job ${savedJobId}…`, timestamp: Date.now() },
+          ...hist,
+        ]);
+        const maxId = res.events.reduce((m, e) => (e.id > m ? e.id : m), 0);
+        await consumeStream(savedJobId, maxId);
+      } catch {
+        localStorage.removeItem(activeJobKey);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeJobKey, consumeStream]);
+
   return (
     <div className="flex h-screen flex-col">
       <header className="flex items-center gap-4 border-b border-stone-200 bg-white px-6 py-3">
         <Link href="/home" className="text-sm text-stone-400 hover:text-stone-600">&larr;</Link>
-        <h1 className="text-lg font-semibold">Ghostwriter</h1>
+        <h1 className="text-lg font-semibold">Stelle</h1>
         <span className="rounded bg-stone-100 px-2 py-0.5 text-xs text-stone-600">{company}</span>
+        <Link
+          href={`/ghostwriter/${company}/calendar`}
+          className="rounded-lg border border-stone-200 px-3 py-1.5 text-xs font-medium text-stone-600 transition-colors hover:border-stone-300 hover:text-stone-900"
+        >
+          Calendar &rarr;
+        </Link>
         <div className="flex-1" />
         <input
           value={prompt}
@@ -246,7 +309,7 @@ export default function GhostwriterIDE() {
       )}
 
       <div className="flex border-b border-stone-200 bg-stone-50 px-6">
-        {(["terminal", "files", "posts", "history"] as const).map((tab) => (
+        {(["terminal", "posts", "history"] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -276,51 +339,6 @@ export default function GhostwriterIDE() {
                 <span className="whitespace-pre-wrap">{line.text}</span>
               </div>
             ))}
-          </div>
-        )}
-
-        {activeTab === "files" && (
-          <div className="space-y-1">
-            <div className="mb-3 flex items-center gap-2 text-stone-400">
-              <span className="text-xs">workspace/{filePath || "."}</span>
-              {filePath && (
-                <button
-                  onClick={() => loadFiles(filePath.split("/").slice(0, -1).join("/"))}
-                  className="rounded px-2 py-0.5 text-xs text-stone-400 hover:bg-stone-800 hover:text-stone-200"
-                >
-                  ..
-                </button>
-              )}
-              <button
-                onClick={() => loadFiles(filePath)}
-                className="ml-auto rounded px-2 py-0.5 text-xs text-stone-500 hover:bg-stone-800 hover:text-stone-200"
-              >
-                Refresh
-              </button>
-            </div>
-            {loadingFiles ? (
-              <p className="text-stone-500">Loading...</p>
-            ) : files.length === 0 ? (
-              <p className="text-stone-500">No files. Provision workspace first or run a generation.</p>
-            ) : (
-              files.map((f) => (
-                <button
-                  key={f.path}
-                  onClick={() => f.is_dir && loadFiles(f.path)}
-                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm ${
-                    f.is_dir
-                      ? "text-blue-400 hover:bg-stone-800"
-                      : "cursor-default text-stone-300"
-                  }`}
-                >
-                  <span className="w-4 text-center text-xs text-stone-500">{f.is_dir ? "D" : "F"}</span>
-                  <span className="flex-1">{f.name}</span>
-                  {f.size !== null && (
-                    <span className="text-xs text-stone-600">{formatBytes(f.size)}</span>
-                  )}
-                </button>
-              ))
-            )}
           </div>
         )}
 
@@ -391,7 +409,6 @@ export default function GhostwriterIDE() {
               onAction={setActionInProgress}
               onRefresh={loadPosts}
             />
-            <FeedbackPanel company={company} />
           </div>
         )}
       </div>
@@ -1415,154 +1432,4 @@ function PostsManager({
 }
 
 
-function FeedbackPanel({ company }: { company: string }) {
-  const [text, setText] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [feedbackData, setFeedbackData] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [showHistory, setShowHistory] = useState(false);
 
-  useEffect(() => {
-    ghostwriterApi
-      .getFeedback(company)
-      .then(setFeedbackData)
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [company]);
-
-  async function handleSubmit() {
-    if (!text.trim()) return;
-    setSubmitting(true);
-    setStatus(null);
-    try {
-      await ghostwriterApi.submitClientFeedback(company, text.trim());
-      setStatus("Feedback saved → will be distilled into writing rules on next sync");
-      setText("");
-      // Refresh the feedback list
-      ghostwriterApi.getFeedback(company).then(setFeedbackData).catch(console.error);
-      setTimeout(() => setStatus(null), 5000);
-    } catch (e) {
-      setStatus("Failed to submit");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  const directives = feedbackData?.directives || [];
-  const feedbackFiles = feedbackData?.feedback_files || [];
-
-  return (
-    <div className="mt-6 space-y-4">
-      {/* Learned Writing Rules — what the system extracted from feedback */}
-      {directives.length > 0 && (
-        <div className="rounded-lg border border-stone-800 bg-stone-900 p-4">
-          <h3 className="text-sm font-medium text-stone-300">
-            Learned Writing Rules
-            <span className="ml-2 text-xs text-stone-500">
-              ({directives.length} rules from feedback + engagement data)
-            </span>
-          </h3>
-          <p className="mt-1 text-xs text-stone-600">
-            These rules are injected into Stelle's system prompt. Posts generated
-            with these rules active are tracked for engagement impact.
-          </p>
-          <div className="mt-3 space-y-2">
-            {directives.map((d: any, i: number) => (
-              <div key={i} className="flex items-start gap-2 text-sm">
-                <span
-                  className={`mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${
-                    d.priority === "high"
-                      ? "bg-red-950 text-red-400"
-                      : "bg-stone-800 text-stone-400"
-                  }`}
-                >
-                  {d.priority}
-                </span>
-                <span className="text-stone-300">{d.directive}</span>
-                <span className="ml-auto shrink-0 text-[10px] text-stone-600">
-                  {d.source}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Automatic feedback notice */}
-      <div className="rounded-lg border border-stone-700/50 bg-stone-900/50 p-3">
-        <p className="text-xs text-stone-500">
-          <span className="text-emerald-500">●</span>{" "}
-          <strong className="text-stone-400">Edit-based feedback is automatic.</strong>{" "}
-          When the client edits a draft on Ordinal before publishing, the system
-          detects the diff and learns from it. No manual input needed for text changes.
-        </p>
-      </div>
-
-      {/* Submit strategic / non-text feedback */}
-      <div className="rounded-lg border border-stone-800 bg-stone-900 p-4">
-        <h3 className="text-sm font-medium text-stone-300">Strategic Feedback</h3>
-        <p className="mt-1 text-xs text-stone-500">
-          For feedback that isn't captured by text edits: strategic direction
-          changes, tone/voice preferences, verbal instructions, Slack notes.
-          The distiller converts these into writing rules Stelle follows.
-        </p>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          rows={3}
-          placeholder={'e.g., "Use the full term clinical operations, not ClinOps. Also, don\'t position us as competing with labs \u2014 we sell to them."'}
-          className="mt-3 w-full rounded border border-stone-700 bg-stone-950 p-3 text-sm text-stone-200 placeholder-stone-600 focus:border-stone-500 focus:outline-none"
-        />
-        <div className="mt-2 flex items-center gap-3">
-          <button
-            onClick={handleSubmit}
-            disabled={submitting || !text.trim()}
-            className="rounded bg-stone-700 px-4 py-1.5 text-xs font-medium text-white hover:bg-stone-600 disabled:opacity-50"
-          >
-            {submitting ? "Saving..." : "Submit Feedback"}
-          </button>
-          {status && (
-            <span
-              className={`text-xs ${
-                status.includes("Failed") ? "text-red-400" : "text-emerald-400"
-              }`}
-            >
-              {status}
-            </span>
-          )}
-          {feedbackFiles.length > 0 && (
-            <button
-              onClick={() => setShowHistory(!showHistory)}
-              className="ml-auto text-xs text-stone-500 hover:text-stone-300"
-            >
-              {showHistory ? "Hide" : "Show"} history ({feedbackFiles.length})
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Feedback history (collapsible) */}
-      {showHistory && feedbackFiles.length > 0 && (
-        <div className="rounded-lg border border-stone-800 bg-stone-900 p-4">
-          <h3 className="text-sm font-medium text-stone-300">Feedback History</h3>
-          <div className="mt-3 space-y-3">
-            {feedbackFiles.map((f: any, i: number) => (
-              <div key={i} className="border-l-2 border-stone-700 pl-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-stone-500">{f.name}</span>
-                  <span className="text-[10px] text-stone-600">
-                    {new Date(f.modified * 1000).toLocaleDateString()}
-                  </span>
-                </div>
-                <p className="mt-1 text-xs text-stone-400 whitespace-pre-wrap">
-                  {f.preview}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}

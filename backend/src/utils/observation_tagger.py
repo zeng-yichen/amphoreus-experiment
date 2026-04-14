@@ -1,29 +1,35 @@
-"""Observation tagger — post-hoc metadata extraction for learning.
+"""Observation tagger — DISPLAY-ONLY metadata extraction for human dashboards.
 
 Adds ``topic_tag``, ``source_segment_type``, and ``format_tag`` to RuanMei
-observations via a single Haiku call per post. Enables downstream components
-(topic transition model, strategy brief, causal filter) to reason about
-content by category without requiring a hard-coded taxonomy.
+observations via a single Sonnet call per post. These tags are used
+EXCLUSIVELY for human-facing reporting, dashboards, and display purposes.
 
-No predefined topic list — the tagger produces free-text tags that cluster
-naturally. This follows the same bitter-lesson principle as RuanMei's
-open-ended post analysis and LOLA's embedding-based arm matching: expand
-the observation space, don't prescribe categories.
+**IMPORTANT: No learning subsystem should depend on these tags.**
 
-``source_transcript`` and ``abm_target`` cannot be inferred from the post
-alone; they stay null until the strategy brief pipeline populates them at
-generation time.
+The entire learning pipeline operates on continuous post embeddings:
+  - Topic transitions → embedding trajectory model (continuous directions)
+  - Causal filter → PCA components of embeddings
+  - Draft scorer → embedding k-NN similarity
+  - Content brief → embedding clustering
+  - Sequential state → embedding cosine similarity
+
+Human-readable labels compress a 1536-dimensional embedding space into
+~15 discrete categories designed by humans. This violates the Bitter
+Lesson: the categories encode our theory of what distinctions matter,
+not what the data reveals. The tags remain for operator convenience —
+humans need interpretable labels to understand what's happening — but
+the machine learning infrastructure operates in continuous space.
 
 Usage:
     from backend.src.utils.observation_tagger import tag_post, backfill_client_tags
 
-    # Single-post tagging (used by strategy brief, ad-hoc scoring):
+    # Display-only tagging:
     tags = tag_post(post_body)
     # → {"topic_tag": "regulatory compliance",
     #    "source_segment_type": "specific compliance gap",
     #    "format_tag": "case study"}
 
-    # Batch backfill (called from ordinal_sync):
+    # Batch backfill for dashboards (called from ordinal_sync):
     n = backfill_client_tags("innovocommerce")
 """
 
@@ -139,7 +145,7 @@ def backfill_client_tags(company: str, limit: int = 100) -> int:
 
     needs_tagging = []
     for obs in rm._state.get("observations", []):
-        if obs.get("status") != "scored":
+        if obs.get("status") not in ("scored", "finalized"):
             continue
         # Idempotent: skip observations that already have ALL THREE tag fields.
         # The tagger always sets all three together in one LLM call, so if

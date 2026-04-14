@@ -1,0 +1,47 @@
+# Fly.io config for the Amphoreus frontend.
+#
+# This is the ONLY publicly reachable piece of Amphoreus. It sits behind
+# Cloudflare Access (email allowlist) which enforces identity before any
+# request reaches this machine. See DEPLOY.md for the CF Access setup.
+#
+# Deploy from the frontend dir:
+#   fly deploy --config fly.toml
+
+app            = "cyrene"
+primary_region = "sjc"   # match backend region to keep the proxy hop cheap
+
+[build]
+  dockerfile = "Dockerfile"
+  # BACKEND_URL is baked into the Next.js routes manifest at `next build`
+  # time, so it has to be a Docker build ARG, not a runtime env var.
+  # If you rename the backend app, update this AND redeploy the frontend.
+  [build.args]
+    BACKEND_URL = "http://amphoreus.internal:8000"
+
+[env]
+  NODE_ENV             = "production"
+  PORT                 = "3000"
+  NEXT_TELEMETRY_DISABLED = "1"
+
+[http_service]
+  internal_port       = 3000
+  force_https         = true
+  auto_stop_machines  = "stop"
+  auto_start_machines = true
+  min_machines_running = 1   # always-on so Cloudflare never sees a cold start
+  processes           = ["app"]
+
+  [http_service.concurrency]
+    type       = "requests"
+    hard_limit = 200
+    soft_limit = 150
+
+[[vm]]
+  size     = "shared-cpu-1x"
+  memory   = "512mb"
+  cpu_kind = "shared"
+  cpus     = 1
+
+[[restart]]
+  policy = "on-failure"
+  retries = 3

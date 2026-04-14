@@ -52,6 +52,17 @@ class Settings(BaseSettings):
     data_dir: str = str(PROJECT_ROOT / "data")
     sqlite_path: str = str(PROJECT_ROOT / "data" / "amphoreus.db")
 
+    # --- Cloudflare Access (Stage 2 auth) ---
+    # When both are set, every request (except /health, /docs, /openapi.json) must carry a valid
+    # Cloudflare Access JWT in the Cf-Access-Jwt-Assertion header or CF_Authorization cookie.
+    # When either is empty, auth is bypassed (local dev mode — never do this in prod).
+    cf_access_team_domain: str = ""  # e.g. "cyrene-stelle.cloudflareaccess.com"
+    cf_access_aud: str = ""  # 64-char application audience tag from Zero Trust dashboard
+    # Volume-resident ACL file. Maps emails → allowed client slugs. See backend/src/auth/acl.py.
+    acl_path: str = str(PROJECT_ROOT / "data" / "acl.json")
+    # Append-only audit log for write methods.
+    audit_log_path: str = str(PROJECT_ROOT / "data" / "audit.log")
+
     class Config:
         env_file = str(PROJECT_ROOT / ".env")
         extra = "ignore"

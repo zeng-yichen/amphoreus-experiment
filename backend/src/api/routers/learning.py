@@ -38,18 +38,15 @@ def _collect_client(company: str) -> dict:
     data: dict = {"company": company}
 
     # --- RuanMei ---
-    # Use the SQLite load path (same as RuanMei, ordinal_sync, and all other
-    # consumers). The old JSON file at ruan_mei_state.json may be stale —
-    # after the SQLite migration, saves go to SQLite and the JSON isn't updated.
     rm_state = None
     try:
         from backend.src.db.local import initialize_db, ruan_mei_load
         initialize_db()
         rm_state = ruan_mei_load(company)
     except Exception:
-        rm_state = _load_json(P.memory_dir(company) / "ruan_mei_state.json")
+        rm_state = None
     obs = rm_state.get("observations", []) if rm_state else []
-    scored = [o for o in obs if o.get("status") == "scored"]
+    scored = [o for o in obs if o.get("status") in ("scored", "finalized")]
     pending = [o for o in obs if o.get("status") == "pending"]
 
     data["observations"] = {
@@ -97,30 +94,7 @@ def _collect_client(company: str) -> dict:
         "posts_last_7d": sum(1 for t in timestamps if (datetime.now(timezone.utc) - t).days <= 7),
     }
 
-    # --- LOLA ---
-    lola = _load_json(P.memory_dir(company) / "lola_state.json")
-    if lola:
-        arms = lola.get("arms", [])
-        points = lola.get("points", [])
-        sorted_arms = sorted([a for a in arms if a.get("n_pulls", 0) > 0],
-                             key=lambda a: a.get("sum_reward", 0) / max(a.get("n_pulls", 1), 1), reverse=True)
-        data["lola"] = {
-            "total_pulls": lola.get("total_pulls", 0),
-            "arm_count": len(arms),
-            "content_points": len(points),
-            "using_continuous": len(points) >= 10,
-            "exploration_rate": lola.get("thresholds", {}).get("exploration_rate", 0.2),
-            "top_arms": [{"label": a.get("label", ""), "pulls": a.get("n_pulls", 0),
-                          "avg_reward": round(a.get("sum_reward", 0) / max(a.get("n_pulls", 1), 1), 3)}
-                         for a in sorted_arms[:5]],
-            "bottom_arms": [{"label": a.get("label", ""), "pulls": a.get("n_pulls", 0),
-                             "avg_reward": round(a.get("sum_reward", 0) / max(a.get("n_pulls", 1), 1), 3)}
-                            for a in sorted_arms[-3:]] if len(sorted_arms) >= 3 else [],
-        }
-    else:
-        data["lola"] = None
-
-    # --- Observation tags ---
+    # --- Observation tags (display only) ---
     from collections import Counter
     topic_dist = Counter(o.get("topic_tag") for o in scored if o.get("topic_tag"))
     format_dist = Counter(o.get("format_tag") for o in scored if o.get("format_tag"))
@@ -130,59 +104,6 @@ def _collect_client(company: str) -> dict:
         "formats": dict(format_dist.most_common()),
     }
 
-    # --- Analyst findings ---
-    analyst = _load_json(P.memory_dir(company) / "analyst_findings.json")
-    if analyst:
-        findings = analyst.get("findings", [])
-        runs = analyst.get("runs", [])
-        last_run = runs[-1] if runs else {}
-        latest_run_id = last_run.get("run_id", "")
-
-        # Only surface latest run's findings
-        if latest_run_id:
-            latest_findings = [f for f in findings if f.get("run_id") == latest_run_id]
-        else:
-            latest_findings = findings[-10:]
-
-        data["analyst"] = {
-            "total_runs": len(runs),
-            "total_findings_all_time": len(findings),
-            "latest_findings": [
-                {
-                    "claim": f.get("claim", ""),
-                    "confidence": f.get("confidence", "?"),
-                    "evidence": f.get("evidence", "")[:200],
-                }
-                for f in latest_findings
-            ],
-            "last_run": {
-                "timestamp": last_run.get("timestamp", ""),
-                "tool_calls": last_run.get("tool_calls", 0),
-                "findings_stored": last_run.get("findings_stored", 0),
-                "elapsed_seconds": last_run.get("elapsed_seconds", 0),
-            } if last_run else None,
-        }
-    else:
-        data["analyst"] = None
-
-    # --- Learned directives ---
-    directives = _load_json(P.memory_dir(company) / "learned_directives.json")
-    if directives:
-        data["directives"] = {
-            "count": len(directives.get("directives", [])),
-            "rules": [
-                {
-                    "directive": d.get("directive", ""),
-                    "priority": d.get("priority", "medium"),
-                    "source": d.get("source", "?"),
-                    "efficacy": d.get("efficacy_classification", "untested"),
-                }
-                for d in directives.get("directives", [])
-            ],
-        }
-    else:
-        data["directives"] = None
-
     # --- Adaptive readiness ---
     obs_with_perm = sum(1 for o in obs if o.get("cyrene_dimensions"))
     data["readiness"] = {
@@ -190,13 +111,7 @@ def _collect_client(company: str) -> dict:
         "cyrene_weights_ready": obs_with_perm >= 10,
         "freeform_critic_active": len(scored) >= 10,
         "observation_tagger_active": data["tags"]["tagged_count"] > 0,
-        "analyst_active": data["analyst"] is not None and bool(data["analyst"].get("latest_findings")),
-        "directives_active": data["directives"] is not None and data["directives"]["count"] > 0,
     }
-
-    # --- ICP ---
-    icp = _load_json(P.icp_definition_path(company))
-    data["icp"] = icp
 
     return data
 
@@ -208,11 +123,20 @@ async def list_learning_clients():
     if P.MEMORY_ROOT.exists():
         for d in sorted(P.MEMORY_ROOT.iterdir()):
             if d.is_dir() and not d.name.startswith(".") and d.name != "our_memory":
-                rm = _load_json(d / "ruan_mei_state.json")
+                rm = None
+                try:
+                    from backend.src.db.local import initialize_db, ruan_mei_load
+                    initialize_db()
+                    rm = ruan_mei_load(d.name)
+                except Exception:
+                    rm = None
                 if rm:
                     obs = rm.get("observations", [])
-                    scored = sum(1 for o in obs if o.get("status") == "scored")
-                    clients.append({"slug": d.name, "scored": scored, "total": len(obs)})
+                    scored = sum(1 for o in obs if o.get("status") in ("scored", "finalized"))
+                    clients.append({
+                        "slug": d.name, "scored": scored,
+                        "total": len(obs),
+                    })
     return {"clients": clients}
 
 
@@ -228,30 +152,36 @@ async def get_cross_client():
     hook_lib = _load_json(P.our_memory_dir() / "hook_library.json")
     patterns = _load_json(P.our_memory_dir() / "universal_patterns.json")
 
-    # Collect top/bottom arms across all clients
-    all_arms = []
+    # Collect RuanMei-based stats across all clients
+    client_summaries = []
     if P.MEMORY_ROOT.exists():
         for d in P.MEMORY_ROOT.iterdir():
             if not d.is_dir() or d.name.startswith(".") or d.name == "our_memory":
                 continue
-            lola = _load_json(d / "lola_state.json")
-            if not lola:
+            rm = None
+            try:
+                from backend.src.db.local import initialize_db, ruan_mei_load
+                initialize_db()
+                rm = ruan_mei_load(d.name)
+            except Exception:
+                rm = None
+            if not rm:
                 continue
-            for a in lola.get("arms", []):
-                if a.get("n_pulls", 0) > 0:
-                    all_arms.append({
-                        "company": d.name,
-                        "label": a.get("label", ""),
-                        "pulls": a.get("n_pulls", 0),
-                        "avg_reward": round(a.get("sum_reward", 0) / max(a.get("n_pulls", 1), 1), 3),
-                    })
+            scored = [o for o in rm.get("observations", []) if o.get("status") in ("scored", "finalized")]
+            if not scored:
+                continue
+            rewards = [o.get("reward", {}).get("immediate", 0) for o in scored]
+            client_summaries.append({
+                "company": d.name,
+                "scored_posts": len(scored),
+                "avg_reward": round(sum(rewards) / len(rewards), 3),
+            })
 
-    all_arms.sort(key=lambda a: a["avg_reward"], reverse=True)
+    client_summaries.sort(key=lambda c: c["avg_reward"], reverse=True)
 
     return {
         "hook_library_size": len(hook_lib) if isinstance(hook_lib, list) else 0,
         "universal_patterns": len(patterns) if isinstance(patterns, list) else 0,
         "patterns": patterns[:5] if isinstance(patterns, list) else [],
-        "top_arms": all_arms[:5],
-        "bottom_arms": all_arms[-5:] if len(all_arms) >= 5 else [],
+        "client_summaries": client_summaries,
     }

@@ -2,7 +2,13 @@
  * API client for the Amphoreus backend.
  */
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// API base URL:
+//   - In production (built with NEXT_PUBLIC_API_URL=""), this is an empty
+//     string, so fetch("/api/...") goes same-origin → Next.js rewrites proxy
+//     to the internal backend (see next.config.ts).
+//   - In local dev (var unset), falls back to http://localhost:8000.
+// We use ?? instead of || so an explicit empty string is preserved.
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   // TODO: Get Supabase session token
@@ -17,8 +23,30 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
   const headers = await getAuthHeaders();
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
+    // Critical for Stage 2: forward CF_Authorization cookie so backend can
+    // read the Cloudflare Access JWT. Without this, same-origin rewrites skip
+    // the cookie and backend 401s every request.
+    credentials: "include",
     headers: { ...headers, ...options.headers },
   });
+  if (res.status === 401) {
+    // Cloudflare Access session expired. Force a full reload — CF will
+    // intercept the navigation and re-issue a login PIN challenge.
+    if (typeof window !== "undefined") {
+      window.location.href = "/";
+    }
+    throw new Error("Session expired — redirecting to login");
+  }
+  if (res.status === 403) {
+    let detail = "Forbidden";
+    try {
+      const body = await res.json();
+      detail = body.detail || body.error || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(`Forbidden: ${detail}`);
+  }
   if (!res.ok) {
     const error = await res.text();
     throw new Error(`API error ${res.status}: ${error}`);
@@ -28,24 +56,78 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
 
 // --- Shared SSE stream helper ---
 
-async function* streamSSE(url: string) {
+async function* streamSSE(url: string, initialAfterId = 0) {
   const headers = await getAuthHeaders();
-  const res = await fetch(`${API_BASE}${url}`, { headers });
-  if (!res.ok || !res.body) return;
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() || "";
-    for (const part of parts) {
-      const line = part.replace(/^data: /, "").trim();
-      if (line) {
-        try { yield JSON.parse(line); } catch { /* skip */ }
+
+  // Track the last event ID we saw so we can resume from it on reconnect.
+  // The backend's run_events table has auto-incrementing IDs; after a
+  // reconnect we only need events newer than what we already yielded.
+  // initialAfterId > 0 is how a fresh page mount picks up mid-run events
+  // it's already rendered (from the events REST endpoint).
+  let lastEventId = initialAfterId;
+  let reconnects = 0;
+  const MAX_RECONNECTS = 30; // ~5 min of retry at 10s intervals
+  let sawTerminal = false;
+
+  while (reconnects <= MAX_RECONNECTS && !sawTerminal) {
+    try {
+      const connectUrl =
+        lastEventId > 0
+          ? `${API_BASE}${url}?after_id=${lastEventId}`
+          : `${API_BASE}${url}`;
+      // credentials:"include" forwards the CF_Authorization cookie on
+      // Fly + Cloudflare Access so the reconnect doesn't 401 silently.
+      const res = await fetch(connectUrl, { headers, credentials: "include" });
+      if (!res.ok || !res.body) {
+        // If the job is already done, the endpoint might 404 — stop.
+        if (res.status === 404) return;
+        reconnects++;
+        await new Promise((r) => setTimeout(r, 10_000));
+        continue;
       }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+        for (const part of parts) {
+          // Skip SSE comments (keepalives start with ":")
+          if (part.startsWith(":")) continue;
+          const line = part.replace(/^data: /, "").trim();
+          if (!line) continue;
+          try {
+            const parsed = JSON.parse(line);
+            // Track event ID if present for resume
+            if (parsed._event_id && parsed._event_id > lastEventId) {
+              lastEventId = parsed._event_id;
+            }
+            yield parsed;
+            // Terminal events end the stream
+            if (parsed.type === "done" || parsed.type === "error") {
+              sawTerminal = true;
+            }
+          } catch {
+            /* skip malformed */
+          }
+        }
+      }
+
+      // Stream ended (reader returned done). If we already got a terminal
+      // event, we're finished. Otherwise the connection dropped mid-stream
+      // — reconnect after a brief pause.
+      if (sawTerminal) return;
+      reconnects++;
+      await new Promise((r) => setTimeout(r, 3_000));
+    } catch {
+      // Network error — retry
+      reconnects++;
+      await new Promise((r) => setTimeout(r, 10_000));
     }
   }
 }
@@ -53,13 +135,18 @@ async function* streamSSE(url: string) {
 // --- Ghostwriter ---
 
 export const ghostwriterApi = {
-  generate: (company: string, prompt?: string, model?: string) =>
+  generate: (
+    company: string,
+    prompt?: string,
+    model?: string,
+  ) =>
     apiFetch<{ job_id: string; status: string }>("/api/ghostwriter/generate", {
       method: "POST",
       body: JSON.stringify({ company, prompt, model }),
     }),
 
-  streamJob: (jobId: string) => streamSSE(`/api/ghostwriter/stream/${jobId}`),
+  streamJob: (jobId: string, afterId = 0) =>
+    streamSSE(`/api/ghostwriter/stream/${jobId}`, afterId),
 
   getJob: (jobId: string) =>
     apiFetch<{ job_id: string; status: string; output?: string; error?: string }>(
@@ -68,26 +155,6 @@ export const ghostwriterApi = {
 
   getRuns: (company: string, limit = 20) =>
     apiFetch<{ runs: any[] }>(`/api/ghostwriter/${company}/runs?limit=${limit}`),
-
-  submitClientFeedback: (company: string, text: string, postId?: string) =>
-    apiFetch<{ status: string; file: string }>("/api/ghostwriter/client-feedback", {
-      method: "POST",
-      body: JSON.stringify({ company, text, post_id: postId }),
-    }),
-
-  submitEditFeedback: (company: string, original: string, revised: string) =>
-    apiFetch<{ status: string }>("/api/ghostwriter/feedback", {
-      method: "POST",
-      body: JSON.stringify({ company, original, revised }),
-    }),
-
-  getFeedback: (company: string) =>
-    apiFetch<{
-      feedback_files: any[];
-      feedback_count: number;
-      directives: any[];
-      directives_count: number;
-    }>(`/api/ghostwriter/feedback/${company}`),
 
   getRunEvents: (runId: string) =>
     apiFetch<{ run: any; events: any[] }>(`/api/ghostwriter/runs/${runId}/events`),
@@ -115,6 +182,42 @@ export const ghostwriterApi = {
 
   getOrdinalUsers: (company: string) =>
     apiFetch<{ users: any[] }>(`/api/ghostwriter/${company}/ordinal-users`),
+
+  // Calendar
+  getCalendar: (company: string, month?: string) =>
+    apiFetch<{ company: string; month: string | null; posts: any[] }>(
+      `/api/ghostwriter/${company}/calendar${month ? `?month=${month}` : ""}`
+    ),
+
+  schedulePost: (company: string, postId: string, scheduledDate: string | null) =>
+    apiFetch<any>(`/api/ghostwriter/${company}/posts/${postId}/schedule`, {
+      method: "PATCH",
+      body: JSON.stringify({ scheduled_date: scheduledDate }),
+    }),
+
+  autoAssign: (company: string, cadence: string, startDate?: string) =>
+    apiFetch<{ assigned: number; posts: any[] }>(
+      `/api/ghostwriter/${company}/calendar/auto-assign`,
+      {
+        method: "POST",
+        body: JSON.stringify({ cadence, start_date: startDate }),
+      }
+    ),
+
+  pushAll: (company: string) =>
+    apiFetch<{ pushed: number; results: any[] }>(
+      `/api/ghostwriter/${company}/calendar/push-all`,
+      { method: "POST" }
+    ),
+
+  pushSingle: (company: string, postId: string) =>
+    apiFetch<{ id: string; status: string; ordinal_post_id?: string }>(
+      `/api/ghostwriter/${company}/calendar/push-single`,
+      {
+        method: "POST",
+        body: JSON.stringify({ post_id: postId }),
+      }
+    ),
 };
 
 // --- Briefings ---
@@ -135,39 +238,19 @@ export const briefingsApi = {
     apiFetch<{ content: string }>(`/api/briefings/content/${company}`),
 };
 
-// --- Strategy ---
+// --- Cyrene (Strategic Growth Agent) ---
 
-// --- Analyst Findings ---
-
-export const analystApi = {
-  getFindings: (company: string) =>
-    apiFetch<{ company: string; findings: any[]; last_run: any; age_days: number; total_runs: number }>(
-      `/api/strategy/findings/${company}`
-    ),
-  refresh: (company: string) =>
-    apiFetch<{ company: string; findings: any[]; last_run: any }>(
-      `/api/strategy/findings/${company}/refresh`
-    ),
-  getBrief: (company: string) =>
-    apiFetch<any>(`/api/strategy/brief/${company}`),
-};
-
-// --- Strategy ---
-
-export const strategyApi = {
-  generate: (company: string, prompt?: string) =>
-    apiFetch<{ job_id: string }>("/api/strategy/generate", {
+export const cyreneApi = {
+  run: (company: string) =>
+    apiFetch<{ job_id: string }>(`/api/strategy/cyrene/${company}`, {
       method: "POST",
-      body: JSON.stringify({ company, prompt }),
     }),
 
-  streamJob: (jobId: string) => streamSSE(`/api/strategy/stream/${jobId}`),
+  streamJob: (jobId: string, afterId = 0) =>
+    streamSSE(`/api/strategy/stream/${jobId}`, afterId),
 
-  getCurrent: (company: string) =>
-    apiFetch<{ strategy: string | null; path?: string }>(`/api/strategy/${company}`),
-
-  getHtml: (company: string) =>
-    apiFetch<{ html: string | null }>(`/api/strategy/${company}/html`),
+  getBrief: (company: string) =>
+    apiFetch<any>(`/api/strategy/cyrene/${company}/brief`),
 };
 
 // --- Progress Report ---
@@ -178,6 +261,17 @@ export const reportApi = {
 
   getHtml: (company: string, weeks = 2) =>
     apiFetch<{ html: string }>(`/api/report/${company}/html?weeks=${weeks}`),
+
+  generate: (company: string, weeks = 2) =>
+    apiFetch<{ job_id: string; status: string }>(
+      `/api/report/${company}/generate?weeks=${weeks}`,
+      { method: "POST" },
+    ),
+
+  streamJob: (jobId: string, afterId = 0) =>
+    streamSSE(`/api/report/stream/${jobId}`, afterId),
+
+  renderedUrl: (company: string) => `${API_BASE}/api/report/${company}/rendered`,
 };
 
 // --- Posts ---
@@ -342,20 +436,23 @@ export const researchApi = {
     }),
 };
 
-// --- Desktop GUI ---
-
-export const desktopApi = {
-  launch: () =>
-    apiFetch<{ status: string; pid: number }>("/api/desktop/launch", { method: "POST" }),
-
-  status: () =>
-    apiFetch<{ running: boolean; pid: number | null }>("/api/desktop/status"),
-};
-
 // --- Clients ---
 
 export const clientsApi = {
   list: () => apiFetch<{ clients: { slug: string }[] }>("/api/clients"),
+};
+
+// --- Me (Stage 2 auth) ---
+
+export type MeResponse = {
+  email: string;
+  is_admin: boolean;
+  allowed_clients: "*" | string[];
+  auth_enabled: boolean;
+};
+
+export const meApi = {
+  get: () => apiFetch<MeResponse>("/api/me"),
 };
 
 // --- Auth ---
@@ -372,10 +469,175 @@ export const csApi = {
   getClient: (clientId: string) => apiFetch<{ user: any; posts: any[] }>(`/api/cs/clients/${clientId}`),
 };
 
-export const learningApi = {
-  listClients: () => apiFetch<{ clients: any[] }>("/api/learning/clients"),
-  getClient: (company: string) => apiFetch<any>(`/api/learning/clients/${company}`),
-  getCrossClient: () => apiFetch<any>("/api/learning/cross-client"),
+// --- Transcripts (add-only file management) ---
+
+export type TranscriptFile = {
+  filename: string;
+  size_bytes: number;
+  modified_at: number;
+  source_label: string | null;
+  uploaded_by: string | null;
+  uploaded_at: number | null;
+  original_filename: string | null;
+  content_type: string | null;
+};
+
+export const transcriptsApi = {
+  list: (company: string) =>
+    apiFetch<{ company: string; files: TranscriptFile[] }>(`/api/transcripts/${company}`),
+
+  // Multipart upload — uses FormData directly, not apiFetch, because apiFetch
+  // sets Content-Type: application/json which would break the boundary header.
+  upload: async (company: string, file: File, sourceLabel: string) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("source_label", sourceLabel);
+    const res = await fetch(`${API_BASE}/api/transcripts/${company}/upload`, {
+      method: "POST",
+      credentials: "include",
+      body: form,
+    });
+    if (res.status === 401) {
+      if (typeof window !== "undefined") window.location.href = "/";
+      throw new Error("Session expired");
+    }
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(`Upload failed (${res.status}): ${detail}`);
+    }
+    return res.json() as Promise<{
+      status: string;
+      filename: string;
+      size_bytes: number;
+      source_label: string;
+    }>;
+  },
+
+  paste: (company: string, text: string, sourceLabel: string) =>
+    apiFetch<{
+      status: string;
+      filename: string;
+      size_bytes: number;
+      source_label: string;
+    }>(`/api/transcripts/${company}/paste`, {
+      method: "POST",
+      body: JSON.stringify({ text, source_label: sourceLabel }),
+    }),
+
+  delete: (company: string, filename: string) =>
+    apiFetch<{ status: string; filename: string }>(
+      `/api/transcripts/${company}/${encodeURIComponent(filename)}`,
+      { method: "DELETE" }
+    ),
+
+  downloadUrl: (company: string, filename: string) =>
+    `${API_BASE}/api/transcripts/${company}/${encodeURIComponent(filename)}`,
+};
+
+// --- Usage / Spend (admin-only) ---
+
+export type UsageUserRow = {
+  user_email: string | null;
+  n_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  cost_usd: number;
+};
+
+export type UsageClientRow = {
+  client_slug: string | null;
+  n_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+};
+
+export type UsageModelRow = {
+  model: string;
+  provider: string;
+  n_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+};
+
+export type UsageSummary = {
+  since: number;
+  until: number;
+  total: {
+    n_calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+  };
+  by_user: UsageUserRow[];
+};
+
+function usageQueryString(opts: { since?: string; until?: string }): string {
+  const params = new URLSearchParams();
+  if (opts.since) params.set("since", opts.since);
+  if (opts.until) params.set("until", opts.until);
+  const s = params.toString();
+  return s ? `?${s}` : "";
+}
+
+export const usageApi = {
+  summary: (opts: { since?: string; until?: string } = {}) =>
+    apiFetch<UsageSummary>(`/api/usage/summary${usageQueryString(opts)}`),
+
+  byClient: (opts: { since?: string; until?: string } = {}) =>
+    apiFetch<{ since: number; until: number; by_client: UsageClientRow[] }>(
+      `/api/usage/by-client${usageQueryString(opts)}`
+    ),
+
+  byUser: (email: string, opts: { since?: string; until?: string } = {}) =>
+    apiFetch<{
+      user_email: string | null;
+      since: number;
+      until: number;
+      by_model: UsageModelRow[];
+    }>(`/api/usage/by-user/${encodeURIComponent(email)}${usageQueryString(opts)}`),
+};
+
+// --- Deploy (localhost only) ---
+
+export const deployApi = {
+  code: (target: string = "both") =>
+    apiFetch<{ status: string; target: string; key: string }>("/api/deploy/code", {
+      method: "POST",
+      body: JSON.stringify({ target }),
+    }),
+
+  data: (client?: string) =>
+    apiFetch<{ status: string; client: string | null; key: string }>("/api/deploy/data", {
+      method: "POST",
+      body: JSON.stringify({ client: client ?? null }),
+    }),
+
+  status: (key: string) =>
+    apiFetch<{ key: string; status: string; log: string; returncode?: number }>(
+      `/api/deploy/status/${encodeURIComponent(key)}`
+    ),
+
+  ban: (email: string) =>
+    apiFetch<{ status: string; email: string }>("/api/deploy/ban", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+
+  unban: (email: string) =>
+    apiFetch<{ status: string; email: string }>("/api/deploy/unban", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+
+  listBanned: () =>
+    apiFetch<{ banned: string[] }>("/api/deploy/banned"),
+
+  listUsers: () =>
+    apiFetch<{ users: { email: string; role: string }[] }>("/api/deploy/users"),
 };
 
 // --- Interview Companion (Tribbie) ---
