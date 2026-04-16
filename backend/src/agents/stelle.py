@@ -53,7 +53,7 @@ APIMAESTRO_HOST = os.getenv("APIMAESTRO_HOST", "")
 PARALLEL_API_KEY = os.getenv("PARALLEL_API_KEY", "")
 _PI_AVAILABLE = shutil.which("pi") is not None
 
-MAX_AGENT_TURNS = 60
+MAX_AGENT_TURNS = 100
 MAX_TOOL_OUTPUT_CHARS = 50_000
 MAX_FETCH_CHARS = 12_000
 MAX_BASH_OUTPUT_CHARS = 50_000
@@ -208,11 +208,16 @@ sparked the post, the post has no foundation. Do not write it.
   `would_react`, `would_comment`, `would_share`) — anchored in \
   retrieved evidence, not generic priors. Optional `inner_voice` \
   debug field. NO fix_suggestion, NO critique. You diagnose failure \
-  yourself. Minimum 3 calls per post, normal 5-8, cap 12. A draft \
-  whose predicted engagement is well below what comparable past \
-  posts actually received is a losing draft — revise until the \
-  prediction is at or above historical performance. If you hit 12 \
-  rounds and can't move the prediction, reconsider the topic.
+  yourself. Minimum 3 calls per post, normal 5-8, cap 12. \
+  **Irontomb is your loss function.** Each simulation returns a \
+  `_gradient` block showing: predicted engagement vs client median, \
+  delta, and revision trajectory across iterations. Your job is to \
+  CLOSE THE GAP between predicted and median engagement through \
+  revision. If the prediction is below median, revise and re-simulate. \
+  Watch the trajectory — are your revisions still improving the \
+  prediction? If the last 2 revisions show diminishing returns, \
+  you've plateaued. At plateau: ship if you've squeezed out what \
+  you can, or drop the topic if it's clearly a losing angle.
 - `write_result` — submit your final posts (ends the session)
 - `query_posts` — search 200K+ real LinkedIn posts by keyword, ranked by \
   engagement. Use to study what formats, hooks, and angles perform best in \
@@ -262,27 +267,20 @@ publisher marks them after confirmed Ordinal push.
 2. Pick the next unwritten topic from the plan. Identify the specific \
 source material (file + timestamps) you'll draw from.
 3. Draft in `scratch/`. Read it back. Revise until it's right.
-4. **Fight Irontomb — AT LEAST 3 TIMES PER POST, PROGRAMMATICALLY \
-ENFORCED.** Call `simulate_flame_chase_journey` on every draft. This \
-is not optional and not prompt-suggestive — `write_result` has a \
-hard guard that rejects any submission where total simulate calls \
-< 3 × n_posts. If you submit 7 posts with only 8 total simulate \
-calls, the tool will reject you and send you back to iterate. Plan \
-accordingly. For each call, Irontomb enters a short turn loop: she \
-reads your draft, searches this client's scored post history for \
-comparable past posts, reads their real engagement, then emits a \
-prediction anchored in what actually happened to posts like yours. \
-Read her `engagement_prediction` (reactions per 1000 impressions) \
-and compare it to this client's real historical performance via \
-`query_observations`. If her prediction is well below what \
-comparable past posts earned, your draft is weak relative to the \
-client's own track record. Diagnose yourself (Irontomb gives you \
-NO fix_suggestion — the `inner_voice` field is optional debug text, \
-not a prescription). Revise. Call again. Keep iterating. **Minimum \
-3 rounds per post, normal 5-8, cap 12.** If 12 rounds in you still \
-can't move the prediction to at or above this client's historical \
-median, the ANGLE is weak. Reconsider the topic, draft a genuinely \
-different post. Do not submit a losing draft under any circumstances.
+4. **Fight Irontomb — YOUR LOSS FUNCTION.** Call \
+`simulate_flame_chase_journey` on every draft. Minimum 3 times per \
+post, programmatically enforced — `write_result` rejects submissions \
+where total simulate calls < 3 × n_posts. Each simulation returns a \
+`_gradient` block: predicted engagement vs client median, the delta, \
+and a trajectory showing how your revisions are moving the prediction. \
+**Treat the delta like a loss to minimize.** If predicted engagement \
+is below client median, revise and re-simulate. Watch the trajectory — \
+are your revisions actually improving the prediction? If predictions \
+plateau (diminishing returns across revisions), you've squeezed out \
+what you can. Ship it or drop the topic — your call based on the \
+numbers. Irontomb gives NO fix_suggestion — the `inner_voice` field \
+is debug text, not a prescription. You diagnose failure yourself. \
+**Normal 5-8 rounds, cap 12.**
 5. Save each final (simulator-approved) draft to `scratch/final/` — \
 NOT to `memory/draft-posts/`. That directory is authoritative for \
 Ordinal-pushed content and is read-only during your run. Your scratch \
@@ -297,6 +295,21 @@ based on what you observed during the run — which drafts Irontomb \
 predicted highest for, which hooks are most timely, which topics \
 should lead vs follow. No hand-engineered rotation rules; use your \
 judgment from the data you studied.
+
+## TIME BUDGET — CRITICAL
+
+You have a hard wall-clock limit. **You MUST call `write_result` before \
+running out of turns.** Budget your turns:
+- Planning + research: ~5 turns
+- Per post (draft + simulate + revise): ~8-10 turns
+- Final assembly + `write_result`: ~3 turns
+- **Reserve at least 5 turns as buffer for `write_result`.**
+
+If you find yourself on revision v3+ for multiple posts, STOP REVISING. \
+Take your best versions, save them to `scratch/final/`, and call \
+`write_result`. Shipping 7 good posts beats perfecting 3 and timing out \
+with nothing. **A run that doesn't call `write_result` produces ZERO \
+output — every revision was wasted.**
 
 ## Output
 
@@ -1551,8 +1564,7 @@ def _fetch_all_ordinal_hooks(company_keyword: str) -> str:
                 li = p.get("linkedIn") or p.get("linkedin") or {}
                 text = (li.get("copy") or li.get("text") or "").strip()
                 title = (p.get("title") or "").strip()
-                hook = text.split("\n")[0][:120] if text else title[:120]
-                if not hook:
+                if not text and not title:
                     continue
 
                 date_str = ""
@@ -1562,7 +1574,16 @@ def _fetch_all_ordinal_hooks(company_keyword: str) -> str:
                         date_str = str(val)[:10]
                         break
 
-                entries.append(f"- [{status}] {date_str}: {hook}")
+                # Include full post text — more data to the model for
+                # thematic dedup. Truncated hooks miss topic-level
+                # collisions (e.g. two climbing posts with different
+                # angles still saturate the same topic for the audience).
+                if text:
+                    entries.append(
+                        f"- [{status}] {date_str}:\n{text}\n"
+                    )
+                else:
+                    entries.append(f"- [{status}] {date_str}: {title[:200]}")
 
             if not data.get("hasMore") or not data.get("nextCursor"):
                 break
@@ -1576,19 +1597,20 @@ def _fetch_all_ordinal_hooks(company_keyword: str) -> str:
     try:
         from backend.src.db.local import list_local_posts
         local_posts = list_local_posts(company=company_keyword, limit=100)
-        local_hooks = set()
+        local_seen: set[str] = set()
         for lp in local_posts:
-            hook = (lp.get("title") or "").strip()
-            if not hook:
-                content = (lp.get("content") or "").strip()
-                hook = content.split("\n")[0][:120] if content else ""
-            if not hook:
+            content = (lp.get("content") or "").strip()
+            title = (lp.get("title") or "").strip()
+            # Dedup by first line to avoid exact duplicates in the list
+            dedup_key = content.split("\n")[0][:120] if content else title[:120]
+            if not dedup_key or dedup_key in local_seen:
                 continue
-            if hook in local_hooks:
-                continue
-            local_hooks.add(hook)
+            local_seen.add(dedup_key)
             status = lp.get("status", "draft")
-            entries.append(f"- [{status}] (local): {hook[:120]}")
+            if content:
+                entries.append(f"- [{status}] (local):\n{content}\n")
+            else:
+                entries.append(f"- [{status}] (local): {title[:200]}")
     except Exception as e:
         logger.debug("[Stelle] Local post dedup fetch failed: %s", e)
 
@@ -1597,9 +1619,15 @@ def _fetch_all_ordinal_hooks(company_keyword: str) -> str:
 
     logger.info("[Stelle] Fetched %d existing post hooks for dedup (%s)", len(entries), company_keyword)
     return (
-        "\n\nEXISTING POSTS (all posts in Ordinal and locally generated). "
-        "DO NOT duplicate any of these topics, angles, or hooks. "
-        "Every post you write must cover genuinely new ground:\n"
+        "\n\nEXISTING POSTS (all posts in Ordinal and locally generated — "
+        f"{len(entries)} total). Full text included so you can judge "
+        "thematic overlap accurately. DO NOT write a post that covers "
+        "the same TOPIC as any existing post, even from a different "
+        "angle. Two posts about the same activity, setting, or subject "
+        "(e.g. climbing, piano, a specific trial) will read as "
+        "repetition to the audience regardless of angle distinction. "
+        "Every post you write must occupy genuinely new thematic "
+        "territory:\n\n"
         + "\n".join(entries)
     )
 
@@ -1825,10 +1853,24 @@ def _setup_workspace(company_keyword: str) -> Path:
         )
         logger.info("[Stelle] Using person.md research as profile.md fallback")
 
-    # memory/strategy.md — retired under stripped architecture.
-    # RuanMei's content_brief.json is no longer injected into Stelle's
-    # workspace as a prescriptive strategy document. Stelle writes from
-    # raw transcripts and voice examples instead.
+    # Cyrene's strategic brief — treated as source material (like a transcript)
+    # so Stelle can read content_priorities, content_avoid, etc. without
+    # being prescriptively told what to write.
+    cyrene_brief_path = client_mem / "cyrene_brief.json"
+    if cyrene_brief_path.exists():
+        import json as _json
+        try:
+            brief = _json.loads(cyrene_brief_path.read_text(encoding="utf-8"))
+            brief_text = (
+                "# Strategic Brief (from Cyrene's account review)\n\n"
+                + _json.dumps(brief, indent=2, default=str)
+            )
+            (source_mat / "cyrene-strategic-brief.txt").write_text(
+                brief_text, encoding="utf-8",
+            )
+            logger.info("[Stelle] Loaded Cyrene brief into source-material/")
+        except Exception as e:
+            logger.debug("[Stelle] Cyrene brief load skipped: %s", e)
 
     # memory/constraints.md — voice/tone rules from accepted posts (placeholder if empty)
     accepted_src = client_mem / "accepted"
@@ -3414,6 +3456,38 @@ def _run_agent_loop(
     # prompt — all scored posts are pre-loaded as calibration data.
     # No separate warmup loop needed.
 
+    # Compute client median engagement rate (reactions per 1000 impressions)
+    # from scored observations. This becomes the loss function reference —
+    # Irontomb predictions below median indicate a draft that would
+    # underperform this client's historical baseline.
+    _engagement_rates: list[float] = []
+    for _obs in scored_observations:
+        _raw = (_obs.get("reward") or {}).get("raw_metrics", {})
+        _imp = _raw.get("impressions", 0)
+        _react = _raw.get("reactions", 0)
+        if _imp > 0:
+            _engagement_rates.append(_react / _imp * 1000)
+    _engagement_rates.sort()
+    client_median_engagement: float | None = None
+    client_median_impressions: int | None = None
+    if _engagement_rates:
+        _mid = len(_engagement_rates) // 2
+        client_median_engagement = (
+            _engagement_rates[_mid] if len(_engagement_rates) % 2
+            else (_engagement_rates[_mid - 1] + _engagement_rates[_mid]) / 2
+        )
+    _impression_values = sorted(
+        (_obs.get("reward") or {}).get("raw_metrics", {}).get("impressions", 0)
+        for _obs in scored_observations
+        if ((_obs.get("reward") or {}).get("raw_metrics", {}).get("impressions", 0)) > 0
+    )
+    if _impression_values:
+        _mid = len(_impression_values) // 2
+        client_median_impressions = int(
+            _impression_values[_mid] if len(_impression_values) % 2
+            else (_impression_values[_mid - 1] + _impression_values[_mid]) / 2
+        )
+
     # Iteration discipline counter — tracks how many times
     # simulate_flame_chase_journey has been called in this run. Used by the
     # write_result validator to reject submissions where the total simulate
@@ -3499,18 +3573,84 @@ def _run_agent_loop(
             prediction. Every call increments simulate_call_count; the
             write_result validator enforces a minimum of 3 calls per post
             before accepting submission.
+
+            Returns Irontomb's prediction PLUS a gradient signal showing
+            how the predicted engagement compares to this client's median.
+            This turns Irontomb into a loss function that Stelle optimizes
+            against across revision iterations.
             """
             if not company_keyword:
                 return json.dumps({"_error": "company not set"})
             draft = args.get("draft_text", "")
             simulate_call_count[0] += 1
             try:
-                from backend.src.agents.irontomb import simulate_flame_chase_journey
-                result = simulate_flame_chase_journey(company_keyword, draft)
+                # CLI path: use Claude Max subscription instead of API
+                from backend.src.mcp_bridge.claude_cli import use_cli
+                if use_cli():
+                    from backend.src.mcp_bridge.claude_cli import simulate_flame_chase_journey_cli
+                    result = simulate_flame_chase_journey_cli(company_keyword, draft)
+                else:
+                    from backend.src.agents.irontomb import simulate_flame_chase_journey
+                    result = simulate_flame_chase_journey(company_keyword, draft)
+                _dh = result.get("_draft_hash", "")
                 simulate_results.append({
-                    "draft_hash": result.get("_draft_hash", ""),
+                    "draft_hash": _dh,
                     "result": result,
                 })
+
+                # --- Gradient signal ---
+                # Append loss function context: how this prediction
+                # compares to client median, and whether revisions are
+                # improving the prediction (trajectory).
+                pred_eng = result.get("engagement_prediction", 0) or 0
+                pred_imp = result.get("impression_prediction", 0) or 0
+                gradient: dict[str, Any] = {}
+
+                if client_median_engagement is not None:
+                    delta_eng = pred_eng - client_median_engagement
+                    gradient["client_median_engagement"] = round(client_median_engagement, 2)
+                    gradient["predicted_engagement"] = round(pred_eng, 2)
+                    gradient["delta_vs_median"] = round(delta_eng, 2)
+                    if delta_eng < 0:
+                        gradient["signal"] = (
+                            f"BELOW median by {abs(delta_eng):.1f}. "
+                            f"This draft would underperform the client's "
+                            f"historical baseline. Revise and re-simulate."
+                        )
+                    else:
+                        gradient["signal"] = (
+                            f"ABOVE median by {delta_eng:.1f}. "
+                            f"This draft is predicted to outperform baseline."
+                        )
+
+                if client_median_impressions is not None:
+                    gradient["client_median_impressions"] = client_median_impressions
+                    gradient["predicted_impressions"] = pred_imp
+
+                # Trajectory: compare with previous sims of this same draft
+                _prev_preds = [
+                    sr["result"].get("engagement_prediction", 0) or 0
+                    for sr in simulate_results[:-1]
+                    if sr["draft_hash"] == _dh
+                ]
+                if _prev_preds:
+                    gradient["revision_trajectory"] = [
+                        round(p, 2) for p in _prev_preds
+                    ] + [round(pred_eng, 2)]
+                    _improvement = pred_eng - _prev_preds[-1]
+                    gradient["last_revision_delta"] = round(_improvement, 2)
+                    if abs(_improvement) < 0.5 and len(_prev_preds) >= 2:
+                        gradient["plateau_detected"] = True
+                        gradient["plateau_note"] = (
+                            "Engagement prediction has plateaued across "
+                            "last 2+ revisions. Consider: (1) ship if "
+                            "above median, (2) try a fundamentally "
+                            "different hook/angle if below median."
+                        )
+
+                if gradient:
+                    result["_gradient"] = gradient
+
                 return json.dumps(result, default=str)
             except Exception as _e:
                 logger.warning("[Stelle] Irontomb simulate failed: %s", _e)
@@ -3788,6 +3928,7 @@ def _run_agent_loop(
                             })
                             continue
 
+
                     except json.JSONDecodeError as e:
                         error_msg = f"Invalid JSON: {e}\n\nFix the JSON syntax and call write_result again."
                         tool_results.append({
@@ -3802,7 +3943,22 @@ def _run_agent_loop(
                         })
                         continue
 
-                    result_json = raw_json
+                    # Stamp Irontomb's latest predictions onto each post
+                    # so they appear in the final output. The model doesn't
+                    # need to manually copy these — we pull them from
+                    # simulate_results by draft hash.
+                    for _post in parsed.get("posts", []):
+                        _pt = (_post.get("text") or "").strip()
+                        if not _pt:
+                            continue
+                        _ph = hashlib.sha256(_pt.encode("utf-8")).hexdigest()[:16]
+                        for _sr in reversed(simulate_results):
+                            if _sr["draft_hash"] == _ph:
+                                _r = _sr["result"]
+                                _post["predicted_engagement"] = _r.get("engagement_prediction")
+                                _post["predicted_impressions"] = _r.get("impression_prediction")
+                                break
+                    result_json = json.dumps(parsed)
                     result_text = f"Result accepted. {len(parsed.get('posts', []))} post(s). Session complete."
                     if val_warnings:
                         result_text += "\nWarnings: " + "; ".join(val_warnings)
@@ -3991,25 +4147,29 @@ def _generate_why_post(
             f"theme, or audience segment does this post serve?\n"
         )
 
+    _why_prompt = (
+        f"Client: {client_name}\n"
+        f"Post origin: {origin}\n"
+        f"{strategy_block}\n"
+        f"Post:\n{post_text}\n\n"
+        f"Why should we publish this? 2-3 sentences max. "
+        f"Say who specifically will care and what they'll do (save it, share it, DM the client, etc). "
+        f"If there's a content strategy above, say which part this hits. "
+        f"Write like you're explaining it to a teammate over coffee. "
+        f"No words like 'strategically,' 'positions,' 'leverages,' 'resonates,' or 'ecosystem.' "
+        f"Just say what makes it good in plain English."
+    )
+
+    from backend.src.mcp_bridge.claude_cli import use_cli as _use_cli, cli_single_shot as _cli_ss
+    if _use_cli():
+        txt = _cli_ss(_why_prompt, model="opus", max_tokens=400) or ""
+        return txt.strip()
+
     try:
         resp = _call_with_retry(lambda: _client.messages.create(
             model="claude-opus-4-6",
             max_tokens=400,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Client: {client_name}\n"
-                    f"Post origin: {origin}\n"
-                    f"{strategy_block}\n"
-                    f"Post:\n{post_text}\n\n"
-                    f"Why should we publish this? 2-3 sentences max. "
-                    f"Say who specifically will care and what they'll do (save it, share it, DM the client, etc). "
-                    f"If there's a content strategy above, say which part this hits. "
-                    f"Write like you're explaining it to a teammate over coffee. "
-                    f"No words like 'strategically,' 'positions,' 'leverages,' 'resonates,' or 'ecosystem.' "
-                    f"Just say what makes it good in plain English."
-                ),
-            }],
+            messages=[{"role": "user", "content": _why_prompt}],
         ))
         return resp.content[0].text.strip() if resp.content else ""
     except Exception as e:
@@ -4019,24 +4179,28 @@ def _generate_why_post(
 
 def _generate_image_suggestion(post_text: str, hook: str) -> str:
     """Generate a simple, easy-to-produce image suggestion for the post."""
+    _img_prompt = (
+        f"Post hook: {hook}\n\n"
+        f"Post:\n{post_text}\n\n"
+        f"Suggest ONE simple image a single graphic designer could make in "
+        f"under 30 minutes. Think: a clean quote card, a bold stat highlight, "
+        f"a minimal photo with a text overlay, or a simple before/after. "
+        f"No intricate infographics, multi-panel illustrations, or complex "
+        f"diagrams. Keep it to one sentence describing the visual and one "
+        f"sentence describing any text on it. If the post works better as "
+        f"text-only, just say 'Text-only'. No preamble."
+    )
+
+    from backend.src.mcp_bridge.claude_cli import use_cli as _use_cli, cli_single_shot as _cli_ss
+    if _use_cli():
+        txt = _cli_ss(_img_prompt, model="opus", max_tokens=200) or ""
+        return txt.strip()
+
     try:
         resp = _call_with_retry(lambda: _client.messages.create(
             model="claude-opus-4-6",
             max_tokens=200,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Post hook: {hook}\n\n"
-                    f"Post:\n{post_text}\n\n"
-                    f"Suggest ONE simple image a single graphic designer could make in "
-                    f"under 30 minutes. Think: a clean quote card, a bold stat highlight, "
-                    f"a minimal photo with a text overlay, or a simple before/after. "
-                    f"No intricate infographics, multi-panel illustrations, or complex "
-                    f"diagrams. Keep it to one sentence describing the visual and one "
-                    f"sentence describing any text on it. If the post works better as "
-                    f"text-only, just say 'Text-only'. No preamble."
-                ),
-            }],
+            messages=[{"role": "user", "content": _img_prompt}],
         ))
         return resp.content[0].text.strip() if resp.content else ""
     except Exception as e:
@@ -4100,6 +4264,16 @@ def _process_result(
         output_lines.append(f"## Post {i}: {hook}\n")
         output_lines.append(f"**Origin:** {origin}\n")
         output_lines.append(f"**Characters:** {len(text)}\n")
+
+        _pred_eng = post.get("predicted_engagement")
+        _pred_imp = post.get("predicted_impressions")
+        if _pred_eng is not None or _pred_imp is not None:
+            parts = []
+            if _pred_eng is not None:
+                parts.append(f"{_pred_eng:.1f} reactions/1k impressions")
+            if _pred_imp is not None:
+                parts.append(f"{_pred_imp:,} impressions")
+            output_lines.append(f"**Irontomb Prediction:** {' · '.join(parts)}\n")
 
         if hook_variants:
             output_lines.append("**Hook Variants:**")
@@ -4302,6 +4476,20 @@ def generate_one_shot(
         _, _, display_name = _resolve_supabase_ids(username)
         if display_name:
             client_name = display_name
+
+    # --- CLI mode: run through Claude CLI with Max plan (no API cost) ---
+    from backend.src.mcp_bridge.claude_cli import use_cli
+    if use_cli():
+        logger.info("[Stelle] CLI mode enabled — delegating to run_stelle_cli()")
+        from backend.src.mcp_bridge.claude_cli import run_stelle_cli
+        return run_stelle_cli(
+            client_name=client_name,
+            company_keyword=company_keyword,
+            output_filepath=output_filepath,
+            num_posts=num_posts,
+            prompt=prompt,
+            event_callback=event_callback,
+        )
 
     logger.info("[Stelle] Starting agentic ghostwriter for %s...", client_name)
 

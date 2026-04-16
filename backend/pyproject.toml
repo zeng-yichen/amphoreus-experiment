@@ -26,7 +26,8 @@ dependencies = [
     "pinecone>=8.0.0",
 
     # Audio capture + transcription
-    "faster-whisper>=1.0.0",
+    "faster-whisper>=1.0.0",          # local fallback path
+    "deepgram-sdk>=3.7.0",            # Nova-3 streaming (primary path)
     "sounddevice>=0.5.0",
     "numpy>=1.26.0",
 

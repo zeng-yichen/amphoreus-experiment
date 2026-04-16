@@ -63,6 +63,7 @@ _CACHE_READ_COST_PER_MTOK = 1.50
 _CACHE_WRITE_COST_PER_MTOK = 18.75
 
 _BRIEF_FILENAME = "cyrene_brief.json"
+_BRIEF_HISTORY_FILENAME = "cyrene_brief_history.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +512,53 @@ def _query_ordinal_posts(company: str, args: dict) -> str:
     }, default=str)
 
 
+def _query_brief_history(company: str, args: dict) -> str:
+    """Return the trajectory of all previous Cyrene briefs for this client.
+
+    Each entry includes the timestamp, content_priorities, content_avoid,
+    icp_exposure_assessment, and cost. This lets Cyrene see how its own
+    recommendations have evolved over time and correlate with outcomes.
+    """
+    history_path = P.memory_dir(company) / _BRIEF_HISTORY_FILENAME
+    if not history_path.exists():
+        return json.dumps({
+            "n_briefs": 0,
+            "briefs": [],
+            "note": "No brief history yet. This is the first Cyrene run for this client.",
+        })
+
+    briefs: list[dict] = []
+    try:
+        for line in history_path.read_text(encoding="utf-8").strip().splitlines():
+            if line.strip():
+                briefs.append(json.loads(line))
+    except Exception as e:
+        return json.dumps({"error": f"failed to read brief history: {str(e)[:200]}"})
+
+    limit = min(int(args.get("limit", 20)), 50)
+    # Return most recent first
+    briefs = briefs[-limit:][::-1]
+
+    # Slim down to the strategically relevant fields
+    slim: list[dict] = []
+    for b in briefs:
+        slim.append({
+            "computed_at": b.get("_computed_at", ""),
+            "content_priorities": b.get("content_priorities", []),
+            "content_avoid": b.get("content_avoid", []),
+            "icp_exposure_assessment": b.get("icp_exposure_assessment", ""),
+            "dm_targets_count": len(b.get("dm_targets", [])),
+            "abm_targets_count": len(b.get("abm_targets", [])),
+            "stelle_timing": b.get("stelle_timing", ""),
+            "cost_usd": b.get("_cost_usd", 0),
+        })
+
+    return json.dumps({
+        "n_briefs": len(slim),
+        "briefs": slim,
+    }, default=str)
+
+
 def _note(company: str, args: dict) -> str:
     """Working memory — append to per-run notes list."""
     # Notes are managed by the agent loop, not stored persistently.
@@ -742,6 +790,25 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "query_brief_history",
+        "description": (
+            "Return the trajectory of all previous Cyrene briefs for this "
+            "client. Shows how your content_priorities, content_avoid, and "
+            "ICP exposure assessments have evolved over time. Use this to "
+            "see what you've recommended before and correlate with outcomes "
+            "from query_observations and query_icp_exposure_trend."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max briefs to return (default 20, max 50).",
+                },
+            },
+        },
+    },
+    {
         "name": "note",
         "description": "Record an observation to your working memory.",
         "input_schema": {
@@ -765,8 +832,10 @@ _TOOLS: list[dict[str, Any]] = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Data-backed questions for the next client interview. "
-                        "Each should target a content gap or high-signal topic."
+                        "DEPRECATED — leave empty or omit. Tribbie now generates "
+                        "interview questions live from content_priorities and the "
+                        "conversation itself. Pre-written questions run out mid-call "
+                        "and can't adapt to what the client actually says."
                     ),
                 },
                 "asset_requests": {
@@ -847,7 +916,6 @@ _TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": [
-                "interview_questions",
                 "content_priorities",
                 "content_avoid",
                 "dm_targets",
@@ -917,6 +985,16 @@ You sit between step 6 and step 1. After the system learns from the \
 latest batch, you study everything and produce a brief that shapes the \
 NEXT cycle.
 
+## Your brief history
+
+Every brief you've ever produced is saved. Use `query_brief_history` \
+to see the trajectory of your own recommendations over time. Compare \
+what you recommended in previous cycles against what actually happened \
+(via `query_observations` and `query_icp_exposure_trend`). This is \
+your gradient signal: which of your past recommendations led to posts \
+that outperformed? Which led to underperformers? Which recommendations \
+did you repeat cycle after cycle without improvement? Adjust accordingly.
+
 ## Client context
 
 {client_context}
@@ -943,7 +1021,27 @@ No hand-engineered strategy frameworks. No "post 3x/week." No \
 "rotate between TOFU/MOFU/BOFU." Read the data, see what's working, \
 see what's not, and form your own view.
 
-When ready, call submit_brief with your strategic recommendations.
+## Division of labor with Tribbie
+
+Do NOT pre-generate interview questions. Tribbie (the live interview \
+companion) generates questions on the fly during the call using your \
+`content_priorities` / `content_avoid` as the topic menu plus what the \
+client actually says. Pre-written questions run out mid-interview and \
+can't adapt to surprising threads.
+
+Your job is to make `content_priorities` sharp enough that Tribbie can \
+drill into them from any starting point. A good priority entry names a \
+theme AND the angle on it engagement data suggests will work — not \
+"talk about hiring" but "hiring mistakes at 50→200 headcount, the \
+specific decision moment, not the generic lesson." Tribbie turns those \
+into questions; the sharper your priorities, the better its questions.
+
+When ready, call submit_brief with your strategic recommendations. \
+Leave `interview_questions` empty.
+
+## Previous brief
+
+{previous_brief}
 """
 
 
@@ -963,6 +1061,7 @@ _TOOL_DISPATCH: dict[str, Any] = {
     "web_search": _web_search,
     "fetch_url": _fetch_url,
     "query_ordinal_posts": _query_ordinal_posts,
+    "query_brief_history": _query_brief_history,
     "note": _note,
 }
 
@@ -997,6 +1096,15 @@ def run_strategic_review(company: str) -> dict[str, Any]:
     or a dict with `_error` on failure. Persists the brief to
     memory/{company}/cyrene_brief.json.
     """
+    # CLI short-circuit: route the entire run through Claude CLI when the
+    # feature flag is on. No API spend. Hard-fail on CLI error — no silent
+    # fallback to API.
+    from backend.src.mcp_bridge.claude_cli import use_cli as _use_cli
+    if _use_cli():
+        logger.info("[Cyrene] CLI mode enabled — delegating to run_cyrene_cli()")
+        from backend.src.mcp_bridge.claude_cli import run_cyrene_cli
+        return run_cyrene_cli(company)
+
     # Load audience context from transcripts
     from backend.src.agents.irontomb import _load_icp_context
     client_context = _load_icp_context(company)
@@ -1012,10 +1120,24 @@ def run_strategic_review(company: str) -> dict[str, Any]:
     except Exception:
         n_scored = 0
 
+    # Load previous brief so Cyrene knows what it already recommended
+    # and can build on it rather than repeat itself.
+    previous_brief = "No previous brief exists. This is the first Cyrene run for this client."
+    try:
+        prev_path = P.memory_dir(company) / _BRIEF_FILENAME
+        if prev_path.exists():
+            prev_data = json.loads(prev_path.read_text(encoding="utf-8"))
+            # Include the full previous brief — more data to the model,
+            # no lossy summary. The model decides what's relevant.
+            previous_brief = json.dumps(prev_data, indent=2, ensure_ascii=False, default=str)
+    except Exception:
+        pass
+
     system_prompt = _SYSTEM_PROMPT.format(
         client_context=client_context,
         n_scored=n_scored,
         company=company,
+        previous_brief=previous_brief,
     )
 
     messages: list[dict[str, Any]] = [
@@ -1122,16 +1244,28 @@ def run_strategic_review(company: str) -> dict[str, Any]:
     brief["_cost_usd"] = round(total_cost, 2)
     brief["_notes"] = notes
 
-    # Persist
+    # Persist current brief + append to history
     try:
-        brief_path = P.memory_dir(company) / _BRIEF_FILENAME
-        brief_path.parent.mkdir(parents=True, exist_ok=True)
+        mem_dir = P.memory_dir(company)
+        mem_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write current brief (overwrite)
+        brief_path = mem_dir / _BRIEF_FILENAME
         tmp = brief_path.with_suffix(".json.tmp")
         tmp.write_text(
             json.dumps(brief, indent=2, ensure_ascii=False, default=str),
             encoding="utf-8",
         )
         tmp.rename(brief_path)
+
+        # Append to history (JSONL) — one line per brief, never overwritten.
+        # This is the trajectory Cyrene reads via query_brief_history to
+        # see how its recommendations have evolved and correlate with
+        # real engagement outcomes across cycles.
+        history_path = mem_dir / _BRIEF_HISTORY_FILENAME
+        with open(history_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(brief, ensure_ascii=False, default=str) + "\n")
+
         logger.info(
             "[Cyrene] %s: brief saved (%d turns, $%.2f). "
             "interview_questions=%d, dm_targets=%d, content_priorities=%d",

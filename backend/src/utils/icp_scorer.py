@@ -95,14 +95,22 @@ def score_engagers_segmented(company: str, headlines: list[dict | str]) -> dict:
     )
 
     try:
-        import anthropic
-        client = anthropic.Anthropic()
-        resp = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=250,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = resp.content[0].text.strip()
+        from backend.src.mcp_bridge.claude_cli import use_cli as _use_cli, cli_single_shot as _cli_ss
+        if _use_cli():
+            raw_out = _cli_ss(prompt, model="sonnet", max_tokens=250, timeout=120)
+            if not raw_out:
+                logger.warning("[icp_scorer] CLI returned empty for %s", company)
+                return empty
+            raw = raw_out.strip()
+        else:
+            import anthropic
+            client = anthropic.Anthropic()
+            resp = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=250,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = resp.content[0].text.strip()
         scores = _parse_continuous_scores(raw)
         if not scores:
             return empty

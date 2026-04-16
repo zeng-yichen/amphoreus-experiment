@@ -202,18 +202,14 @@ def main() -> int:
 
         _snapshot_workspace(args.company, args.job_id)
 
-        # Emit a final done event via the event stream
+        # Emit a final done event via the event stream.
+        # Only send a short summary — the full output is redundant
+        # with the posts tab and bloats the terminal stream.
         try:
             from backend.src.db import local as db
             from backend.src.core.events import done_event
-            output_text = ""
-            if result_path and os.path.exists(result_path):
-                try:
-                    with open(result_path, "r", encoding="utf-8") as f:
-                        output_text = f.read()
-                except Exception:
-                    pass
-            ev = done_event(output_text or result_path or "")
+            summary = f"Generation complete. Output: {result_path or 'unknown'}"
+            ev = done_event(summary)
             db.record_event(args.job_id, ev.type, ev.data)
         except Exception:
             logger.exception("[stelle_runner] done event emit failed")

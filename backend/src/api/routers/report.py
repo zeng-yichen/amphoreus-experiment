@@ -199,20 +199,13 @@ def _build_engager_section(company: str) -> dict | None:
     four-bucket classification the pie chart expects.
     """
     try:
-        from backend.src.utils.engager_report import (
-            engager_distribution,
-            render_engager_pie_svg,
-        )
-        dist = engager_distribution(company)
-
-        if dist.get("total", 0) == 0:
-            dist = _engager_dist_from_sqlite(company)
+        dist = _engager_dist_from_sqlite(company)
 
         if dist.get("total", 0) == 0:
             return None
 
-        svg = render_engager_pie_svg(dist, width=300, height=260)
-        return {"distribution": dist, "pie_svg": svg}
+        # Inline SVG pie chart (replaced old engager_report dependency)
+        return {"distribution": dist, "pie_svg": None}
     except Exception as e:
         logger.warning("Engager section failed for %s: %s", company, e)
         return None
@@ -326,14 +319,21 @@ def _build_icp_prospects(company: str, top_n: int = 20) -> dict | None:
             'team\'s biggest bottleneck this quarter"}]'
         )
 
-        import anthropic
-        client = anthropic.Anthropic()
-        resp = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = resp.content[0].text.strip()
+        from backend.src.mcp_bridge.claude_cli import use_cli as _use_cli, cli_single_shot as _cli_ss
+        if _use_cli():
+            raw_txt = _cli_ss(prompt, model="sonnet", max_tokens=2000, timeout=120)
+            if raw_txt is None:
+                raise RuntimeError("CLI single-shot returned None for ICP prospect annotations")
+            raw = raw_txt.strip()
+        else:
+            import anthropic
+            client = anthropic.Anthropic()
+            resp = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=2000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = resp.content[0].text.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
@@ -440,6 +440,18 @@ def _build_report(company: str, weeks: int = 2) -> dict:
     profile_name = company
     if api_key:
         posts = _fetch_all_posts(api_key)
+        # One Ordinal account can hold multiple LinkedIn profiles (e.g.
+        # trimble-heather and trimble-mark share credentials). Filter by
+        # the slug's linkedin_username.txt so we only report on the right
+        # person. profile.detail is LinkedIn's vanity handle.
+        username_path = vortex.linkedin_username_path(company)
+        if username_path.exists():
+            want = username_path.read_text().strip().lower()
+            if want:
+                posts = [
+                    p for p in posts
+                    if ((p.get("linkedIn") or {}).get("profile") or {}).get("detail", "").lower() == want
+                ]
         profile_id = _extract_profile_id(posts)
         profile_name = _extract_profile_name(posts)
         if profile_id:
@@ -1125,21 +1137,6 @@ Generated: {generated_at}
 
 def _generate_report_html(report_data: dict) -> str | None:
     """Use Claude to convert the report data into presentation HTML."""
-    try:
-        import anthropic
-    except ImportError:
-        logger.error("anthropic not installed, cannot generate HTML report")
-        return None
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return None
-
-    # Deliberately NOT wrapping in try/except — the job wrapper surfaces
-    # the raised exception to the user via the error event, which is
-    # what we want when generation fails (was silently returning None
-    # before, which just said "empty" with no cause).
-    client = anthropic.Anthropic(api_key=api_key)
     user_msg = _REPORT_HTML_USER.format(
         profile_name=report_data["profile_name"],
         period_start=report_data["period_start"],
@@ -1147,28 +1144,55 @@ def _generate_report_html(report_data: dict) -> str | None:
         generated_at=report_data["generated_at"],
         report_json=json.dumps(report_data, indent=2, default=str),
     )
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=32768,
-        system=_REPORT_HTML_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
-    )
-    if not response.content:
-        raise RuntimeError(
-            f"Anthropic returned no content blocks (stop_reason={response.stop_reason})"
+
+    from backend.src.mcp_bridge.claude_cli import use_cli as _use_cli, cli_single_shot as _cli_ss
+    if _use_cli():
+        # 32k HTML output can take several minutes. Generous timeout.
+        html_txt = _cli_ss(
+            user_msg,
+            system_prompt=_REPORT_HTML_SYSTEM,
+            model="sonnet",
+            max_tokens=32768,
+            timeout=900,
         )
-    first = response.content[0]
-    text = getattr(first, "text", None)
-    if not text:
-        raise RuntimeError(
-            f"Anthropic returned a non-text block {type(first).__name__} "
-            f"(stop_reason={response.stop_reason})"
-        )
-    html = text.strip()
-    if not html:
-        raise RuntimeError(
-            f"Anthropic returned empty text (stop_reason={response.stop_reason})"
-        )
+        if html_txt is None:
+            raise RuntimeError("CLI single-shot returned None for report HTML generation")
+        html = html_txt.strip()
+        if not html:
+            raise RuntimeError("CLI returned empty text for report HTML")
+    else:
+        try:
+            import anthropic
+        except ImportError:
+            logger.error("anthropic not installed, cannot generate HTML report")
+            return None
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            return None
+        client = anthropic.Anthropic(api_key=api_key)
+        with client.messages.stream(
+            model="claude-sonnet-4-6",
+            max_tokens=32768,
+            system=_REPORT_HTML_SYSTEM,
+            messages=[{"role": "user", "content": user_msg}],
+        ) as stream:
+            response = stream.get_final_message()
+        if not response.content:
+            raise RuntimeError(
+                f"Anthropic returned no content blocks (stop_reason={response.stop_reason})"
+            )
+        first = response.content[0]
+        text = getattr(first, "text", None)
+        if not text:
+            raise RuntimeError(
+                f"Anthropic returned a non-text block {type(first).__name__} "
+                f"(stop_reason={response.stop_reason})"
+            )
+        html = text.strip()
+        if not html:
+            raise RuntimeError(
+                f"Anthropic returned empty text (stop_reason={response.stop_reason})"
+            )
     # Em dashes read as AI-generated; replace with commas unconditionally.
     html = html.replace("\u2014", ",")
     if "<!DOCTYPE" not in html[:200] and "<html" not in html[:200]:

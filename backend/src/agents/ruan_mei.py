@@ -205,6 +205,17 @@ class RuanMei:
             "Write 3-5 sentences of analysis. Plain text, no JSON, no bullet points."
         )
 
+        from backend.src.mcp_bridge.claude_cli import (
+            use_cli as _use_cli,
+            cli_single_shot as _cli_ss,
+        )
+        if _use_cli():
+            txt = _cli_ss(prompt, model="sonnet", max_tokens=300) or ""
+            return StrategyDescriptor(
+                analysis=txt.strip(),
+                char_count=len(post_text),
+            )
+
         try:
             client = anthropic.Anthropic()
             resp = client.messages.create(

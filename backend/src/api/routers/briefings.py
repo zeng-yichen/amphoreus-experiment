@@ -1,10 +1,11 @@
-"""Briefings API — Aglaea interview prep generation."""
+"""Briefings API — reads Cyrene's strategic brief for interview prep."""
 
+import json
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
 from backend.src.core.events import done_event, status_event
 from backend.src.services import job_manager
@@ -13,57 +14,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/briefings", tags=["briefings"])
 
 
-class BriefingRequest(BaseModel):
-    client_name: str
-    company: str
-
-
-@router.post("/generate")
-async def generate_briefing(req: BriefingRequest):
-    job_id = job_manager.create_job(
-        client_slug=req.company,
-        agent="aglaea",
-        prompt=f"Generate briefing for {req.client_name}",
-        creator_id=None,
-    )
-
-    def _run(jid: str, client_name: str, company: str):
-        from backend.src.agents.aglaea_adapter import run_aglaea
-        job_manager.emit_event(jid, status_event(f"Generating briefing for {client_name}..."))
-        result = run_aglaea(client_name, company, job_id=jid)
-        job_manager.emit_event(jid, done_event(result))
-        return result
-
-    job_manager.run_in_background(job_id, target=_run, args=(job_id, req.client_name, req.company))
-    return {"job_id": job_id, "status": "pending"}
+def _cyrene_brief_path(company: str) -> Path:
+    from backend.src.db import vortex
+    return vortex.memory_dir(company) / "cyrene_brief.json"
 
 
 @router.get("/check/{company}")
 async def check_briefing(company: str):
-    """Check whether an Aglaea briefing exists for a company."""
-    from backend.src.db import vortex
-    brief_file = vortex.brief_dir(company) / f"{company}_briefing.md"
-    return {"exists": brief_file.exists()}
+    """Check whether a Cyrene brief exists for a company."""
+    return {"exists": _cyrene_brief_path(company).exists()}
 
 
 @router.get("/content/{company}")
 async def get_briefing_content(company: str):
-    """Return the raw markdown content of the latest Aglaea briefing for a company."""
-    from backend.src.db import vortex
-    brief_file = vortex.brief_dir(company) / f"{company}_briefing.md"
-    if not brief_file.exists():
-        raise HTTPException(status_code=404, detail="No briefing found")
-    return {"content": brief_file.read_text(encoding="utf-8")}
-
-
-@router.get("/stream/{job_id}")
-async def stream_briefing(job_id: str, after_id: int = 0):
-    job = job_manager.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    return StreamingResponse(
-        job_manager.sse_stream(job_id, timeout=3600, heartbeat_interval=15, after_id=after_id),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    """Return the Cyrene brief as structured JSON for interview prep."""
+    path = _cyrene_brief_path(company)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No Cyrene brief found. Run Cyrene first.")
+    brief = json.loads(path.read_text(encoding="utf-8"))
+    return {"content": brief}

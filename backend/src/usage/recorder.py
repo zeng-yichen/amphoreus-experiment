@@ -21,7 +21,7 @@ from backend.src.usage.pricing import price_call
 
 logger = logging.getLogger("amphoreus.usage.recorder")
 
-Provider = Literal["anthropic", "openai", "perplexity"]
+Provider = Literal["anthropic", "anthropic_cli", "openai", "perplexity"]
 CallKind = Literal["messages", "embeddings", "chat"]
 
 
