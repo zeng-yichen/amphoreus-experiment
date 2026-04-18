@@ -809,6 +809,23 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "query_irontomb_predictions",
+        "description": (
+            "Return Irontomb's post-hoc engagement predictions for the "
+            "latest batch of posts Stelle generated. These were produced "
+            "AFTER Stelle finished writing (no mid-loop bias). Compare "
+            "predicted engagement against real engagement from "
+            "query_observations to find where Irontomb systematically "
+            "over- or under-predicts for this client. That delta is "
+            "gradient signal: it tells you what conventional engagement "
+            "wisdom gets wrong about this client's audience."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "note",
         "description": "Record an observation to your working memory.",
         "input_schema": {
@@ -968,17 +985,23 @@ The operator (a ghostwriter at a content agency) runs a repeating cycle:
        - Scored observation history via query_observations (draft vs \
          published diffs, engagement metrics, reactor identities)
        - 200K LinkedIn post corpus for reference
-       - Irontomb (adversarial audience simulator that predicts \
-         engagement from comparable past posts — turn-based retrieval)
-     Stelle iterates each draft against Irontomb at least 3 times \
-     before submitting. She writes from specific transcript moments.
+       - Irontomb (audience simulator) runs post-hoc on each final \
+         post, producing engagement predictions grounded in client + \
+         cross-client data. These predictions are saved to \
+         `irontomb_posthoc_latest.json` in client memory. \
+     Stelle writes authentically from specific transcript moments \
+     without mid-loop scoring pressure.
   4. PUBLISH: posts are pushed to Ordinal, scheduled, go live on LinkedIn.
   5. ENGAGEMENT: real engagement data collected via Ordinal analytics \
      every hour (every 15 min for posts <72h old). Reactor identities \
      scraped via Apify. Per-reactor ICP scores computed. Engagement \
      trajectories (velocity, plateau, longevity) tracked.
-  6. LEARNING: RuanMei scores each post, Irontomb calibrates against \
-     real outcomes, the system gets smarter.
+  6. LEARNING: RuanMei scores each post. Irontomb's post-hoc \
+     predictions are compared against real T+7d outcomes. The \
+     prediction-vs-reality delta is your gradient signal — which \
+     kinds of posts does Irontomb systematically misjudge? That \
+     tells you something about what conventional engagement \
+     wisdom gets wrong for this specific client.
   7. REPEAT from step 1.
 
 You sit between step 6 and step 1. After the system learns from the \
@@ -1049,6 +1072,33 @@ Leave `interview_questions` empty.
 # Tool dispatcher
 # ---------------------------------------------------------------------------
 
+def _query_irontomb_predictions(company: str, args: dict) -> str:
+    """Return Irontomb's post-hoc predictions for the latest batch.
+
+    These predictions were generated AFTER Stelle finished writing,
+    so they reflect unbiased evaluation of the final drafts. Compare
+    against real engagement (via query_observations) to see where
+    Irontomb's predictions diverge from reality — that's gradient
+    signal about what conventional engagement wisdom gets wrong for
+    this client.
+    """
+    posthoc_path = P.memory_dir(company) / "irontomb_posthoc_latest.json"
+    if not posthoc_path.exists():
+        return json.dumps({
+            "available": False,
+            "note": "No post-hoc Irontomb predictions available yet.",
+        })
+    try:
+        predictions = json.loads(posthoc_path.read_text(encoding="utf-8"))
+        return json.dumps({
+            "available": True,
+            "n_posts": len(predictions),
+            "predictions": predictions,
+        }, default=str)
+    except Exception as e:
+        return json.dumps({"error": f"failed to read predictions: {str(e)[:200]}"})
+
+
 _TOOL_DISPATCH: dict[str, Any] = {
     "query_observations": _query_observations,
     "query_top_engagers": _query_top_engagers,
@@ -1062,6 +1112,7 @@ _TOOL_DISPATCH: dict[str, Any] = {
     "fetch_url": _fetch_url,
     "query_ordinal_posts": _query_ordinal_posts,
     "query_brief_history": _query_brief_history,
+    "query_irontomb_predictions": _query_irontomb_predictions,
     "note": _note,
 }
 

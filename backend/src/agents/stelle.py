@@ -164,80 +164,15 @@ sparked the post, the post has no foundation. Do not write it.
 
 ## Tools
 
-- `list_directory` / `read_file` / `search_files` — explore the workspace
+- `list_directory` / `read_file` — explore the workspace
 - `write_file` / `edit_file` — write scratch notes, draft posts, content plans
-- `web_search` — search the web (Parallel API — returns ranked excerpts). \
-  Use for industry context, real-time news, regulatory updates, or any \
-  external information you need.
-- `fetch_url` — extract content from a URL
-- `bash` — run shell commands (curl, jq, scripts, etc.). Every command \
-  starts with your workspace as the current directory — do NOT `cd` \
-  anywhere first. Just use relative paths like `tools/validate_draft.py` \
-  or `memory/plan.md`. The workspace is the only filesystem you have.
-- `query_observations` — inspect the client's scored post history with \
-  the FULL per-post learning signal: your draft (`post_body`) vs the \
-  client-edited published version (`posted_body`) — read the two texts side \
-  by side to see exactly what the client changed, engagement metrics \
-  (reactions/comments/reposts/impressions), `icp_match_rate` (mean of \
-  per-reactor icp_score), and `reactors` (per-post list of who reacted with \
-  their raw continuous icp_score). Four signals to study together: the \
-  (draft, published) diff, metrics, audience quality, audience identity. No \
-  pre-digested patterns — read the raw data.
-- `query_top_engagers` — aggregated top engagers across all scored posts, \
-  ranked by ICP fit × engagement count. Use for the overall audience composition. \
-  For per-post reactor lists, use query_observations (it includes `reactors` \
-  inline on each observation).
-- `search_linkedin_corpus` — search the 200K+ LinkedIn post corpus (keyword \
-  or semantic mode). Find high-engagement reference posts in adjacent niches.
-- `execute_python` — run arbitrary Python for sanity-checking intuitions \
-  against large samples. `obs` (the client's scored observations) is \
-  pre-loaded; numpy/scipy/sklearn/pandas are pre-imported. Use for \
-  exploration, not for deriving rules to mechanically follow.
-- `simulate_flame_chase_journey` — **mandatory AT LEAST 3 TIMES per \
-  draft before submission. NO EXCEPTIONS. `write_result` is \
-  programmatically guarded: if you submit with fewer than 3 × n_posts \
-  total simulate calls, it WILL be rejected and you'll be sent back \
-  to iterate.** Send a draft through Irontomb, the adversarial \
-  audience simulator. Irontomb is turn-based: on each call she reads \
-  the draft, retrieves comparable past posts from this client's \
-  scored history (real drafts + real published versions + real T+7d \
-  engagement + real reactor identities), then predicts audience \
-  reaction grounded in the real numbers she pulled. Returns five \
-  predictions — `engagement_prediction` (reactions per 1000 \
-  impressions), plus four booleans (`would_stop_scrolling`, \
-  `would_react`, `would_comment`, `would_share`) — anchored in \
-  retrieved evidence, not generic priors. Optional `inner_voice` \
-  debug field. NO fix_suggestion, NO critique. You diagnose failure \
-  yourself. Minimum 3 calls per post, normal 5-8, cap 12. \
-  **Irontomb is your loss function.** Each simulation returns a \
-  `_gradient` block showing: predicted engagement vs client median, \
-  delta, and revision trajectory across iterations. Your job is to \
-  CLOSE THE GAP between predicted and median engagement through \
-  revision. If the prediction is below median, revise and re-simulate. \
-  Watch the trajectory — are your revisions still improving the \
-  prediction? If the last 2 revisions show diminishing returns, \
-  you've plateaued. At plateau: ship if you've squeezed out what \
-  you can, or drop the topic if it's clearly a losing angle.
+- `bash` — run shell commands. Every command starts with your workspace as the current directory. Use relative paths like `tools/validate_draft.py` or `memory/plan.md`.
 - `write_result` — submit your final posts (ends the session)
-- `query_posts` — search 200K+ real LinkedIn posts by keyword, ranked by \
-  engagement. Use to study what formats, hooks, and angles perform best in \
-  the client's space. Also supports `--creator "username"` to search a \
-  specific creator's posts.
-- `semantic_search_posts` — search the post database by meaning, not \
-  keywords. Finds conceptually similar posts even when they use different \
-  words. Use for abstract topics like tone, narrative structure, or emotional \
-  resonance.
-- `ordinal_analytics` — get real LinkedIn performance data. Subcommands: \
-  `profiles` (list scheduling profiles), `followers <id>` (follower growth), \
-  `posts <id>` (post engagement), `cadence <id>` (posting frequency + gaps). \
-  Check cadence before writing — if the client hasn't posted recently, \
-  prioritize timely/newsy hooks.
-- `python3 tools/validate_draft.py "text"` — self-check a draft for AI \
-  patterns, banned phrases, and structural issues BEFORE submitting. Also \
-  accepts `--file path/to/draft.md`. Returns JSON with issues. If \
-  `needs_correction` is true, revise and re-validate with `--attempt N`. \
-  After attempt 2, escape hatch activates (issues downgraded, proceeds).
+- `python3 tools/validate_draft.py "text"` — self-check a draft for AI patterns, banned phrases, and structural issues BEFORE submitting. Also accepts `--file path/to/draft.md`. Returns JSON with issues. If `needs_correction` is true, revise and re-validate with `--attempt N`. After attempt 2, escape hatch activates (issues downgraded, proceeds).
 
+### Past performance data
+
+`memory/post-history.md` contains this client's top-performing posts by engagement — full text, full numbers, draft vs published versions. Read this before drafting. It is your baseline — everything you write will be compared to this distribution.
 ## Process
 
 1. If `memory/plan.md` doesn't exist, create it first. Read every \
@@ -266,35 +201,41 @@ already marked as used. Do not mark stories as used yourself — the \
 publisher marks them after confirmed Ordinal push.
 2. Pick the next unwritten topic from the plan. Identify the specific \
 source material (file + timestamps) you'll draw from.
-3. Draft in `scratch/`. Read it back. Revise until it's right.
-4. **Fight Irontomb — YOUR LOSS FUNCTION.** Call \
-`simulate_flame_chase_journey` on every draft. Minimum 3 times per \
-post, programmatically enforced — `write_result` rejects submissions \
-where total simulate calls < 3 × n_posts. Each simulation returns a \
-`_gradient` block: predicted engagement vs client median, the delta, \
-and a trajectory showing how your revisions are moving the prediction. \
-**Treat the delta like a loss to minimize.** If predicted engagement \
-is below client median, revise and re-simulate. Watch the trajectory — \
-are your revisions actually improving the prediction? If predictions \
-plateau (diminishing returns across revisions), you've squeezed out \
-what you can. Ship it or drop the topic — your call based on the \
-numbers. Irontomb gives NO fix_suggestion — the `inner_voice` field \
-is debug text, not a prescription. You diagnose failure yourself. \
-**Normal 5-8 rounds, cap 12.**
-5. Save each final (simulator-approved) draft to `scratch/final/` — \
-NOT to `memory/draft-posts/`. That directory is authoritative for \
-Ordinal-pushed content and is read-only during your run. Your scratch \
-writes only "become real" when the publisher pushes them after your \
-session completes. Within a single run, `scratch/final/` is also where \
-you read back your own earlier drafts to avoid self-collision across \
-posts in the same batch.
-6. When every post is complete, call `write_result` with the final JSON. \
-**The order of posts in the `posts` array IS the publication order.** \
-Put the post you want published first at index 0. Decide the sequence \
-based on what you observed during the run — which drafts Irontomb \
-predicted highest for, which hooks are most timely, which topics \
-should lead vs follow. No hand-engineered rotation rules; use your \
-judgment from the data you studied.
+3. Draft in `scratch/`. After each paragraph with a factual claim, \
+add a citation comment: `<!-- [filename, timestamp] "quote" -->`. \
+Read it back.
+4. Call `get_reader_reaction` on your draft. Read the reaction \
+string carefully. You are looking for REAL positive engagement, \
+not tolerance. Ship ONLY if the reaction contains felt engagement \
+— phrases like `"felt real"`, `"line stays"`, `"been here"`, \
+`"oh that's a good one"`, `"gonna forward this"`. Passive \
+tolerance (`"nodding along"`, `"fine"`, `"smart flex"`, `"okay \
+that's a line"`, `"reasonable take"`) means the post failed to \
+land — keep revising. Make ONE surgical edit targeting the \
+anchored span using `edit_file` (one sentence, one word, one \
+line break — not a rewrite), then call `get_reader_reaction` \
+again. The response also includes `_prior_reactions` — the last \
+few reactions from this session, each with the draft's first \
+line and length so you can see which ones were iterations on \
+the same post. Use this trajectory to check whether your edits \
+are moving the signal: if prior reactions for this post were \
+\"lecture\" → \"sermon\" → \"sermon\", your edits aren't \
+helping and you need a bigger change (cut more aggressively, \
+target a different span, or pivot the angle). If the same \
+reaction appears 2-3 times after different edits, your theory \
+is wrong. If you've made 6+ edits and the reaction is still \
+\"meh\", the topic may not land for this audience — consider \
+dropping the post rather than shipping mediocre. Cap at 12 \
+cycles per post.
+5. Save the final draft to `scratch/final/` — NOT to `memory/draft-posts/`. \
+That directory is authoritative for Ordinal-pushed content and is \
+read-only during your run. `scratch/final/` is also where you read \
+back your own earlier drafts to avoid self-collision across posts \
+in the same batch.
+6. Repeat steps 2-5 for all planned posts. When every post is \
+complete, call `write_result` with the final JSON. The order of \
+posts in the `posts` array IS the publication order — put the \
+post you want published first at index 0.
 
 ## TIME BUDGET — CRITICAL
 
@@ -428,80 +369,6 @@ _TOOLS = [
         },
     },
     {
-        "name": "search_files",
-        "description": (
-            "Search for a text pattern across all files in a workspace directory. "
-            "Returns matching lines with filenames."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Text or regex pattern to search for",
-                },
-                "directory": {
-                    "type": "string",
-                    "description": "Directory to search in (default: entire workspace)",
-                    "default": ".",
-                },
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "web_search",
-        "description": (
-            "Search the web via Parallel API. Returns ranked URLs with extended "
-            "excerpts suitable for LLM consumption. Use to verify claims or "
-            "research topics. Mode 'fast' for quick lookups, 'one-shot' for "
-            "comprehensive single-query results, 'agentic' for token-efficient results."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "objective": {
-                    "type": "string",
-                    "description": "Natural-language description of what to find",
-                },
-                "search_queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional keyword queries to guide the search",
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["fast", "one-shot", "agentic"],
-                    "description": "Search mode (default: fast)",
-                    "default": "fast",
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Max results to return (default 10)",
-                    "default": 10,
-                },
-            },
-            "required": ["objective"],
-        },
-    },
-    {
-        "name": "fetch_url",
-        "description": (
-            "Extract content from a URL via Parallel API. Returns markdown-formatted "
-            "excerpts. Useful for reading articles found via web_search."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "The URL to extract content from",
-                },
-            },
-            "required": ["url"],
-        },
-    },
-    {
         "name": "write_file",
         "description": (
             "Write or overwrite a file in the workspace. Use for scratch notes, "
@@ -566,221 +433,116 @@ _TOOLS = [
         },
     },
     {
-        "name": "query_observations",
+        "name": "get_reader_reaction",
         "description": (
-            "Inspect this client's scored post history. Returns every scored "
-            "post with the FULL set of per-post learning signals:\n\n"
-            "  post_body        — your original draft (what you handed the client)\n"
-            "  posted_body      — the LinkedIn-live version (what the client "
-            "actually shipped after their edits). Read these two texts side "
-            "by side — the diff is the client's preference signal. Don't "
-            "just look at whether they differ; look at WHAT they changed: "
-            "which phrases got cut, which got rewritten, which structural "
-            "moves survived. This is the strongest preference data you have.\n"
-            "  reward           — composite reward + raw_metrics "
-            "{impressions, reactions, comments, reposts} + icp_reward\n"
-            "  icp_match_rate   — mean of the per-reactor icp_score for this "
-            "post (continuous, 0.0–1.0). This is the AUDIENCE QUALITY signal — "
-            "a post with 5 reactions from high-icp_score reactors beats a post "
-            "with 30 reactions from low-icp_score ones.\n"
-            "  reactors         — list of every individual who left a reaction: "
-            "name, headline, title, current_company, location, icp_score. This "
-            "is the AUDIENCE IDENTITY signal — know WHO is reading and WHO is "
-            "engaging so you can write directly to them.\n"
-            "  topic_tag / format_tag / posted_at\n\n"
-            "Four signals to study together: the (draft, published) pair for "
-            "client preferences, engagement metrics for reach, icp_match_rate "
-            "for audience quality, and reactors for audience identity. Read "
-            "all four and decide how to weigh them for this specific client — "
-            "there is no universal rule about whether high reach or high "
-            "icp_match_rate matters more. The client's history is your only "
-            "evidence.\n\n"
-            "No pre-extracted patterns — you read the raw data and decide what "
-            "matters. Filters: min_reward, max_reward, limit. Set "
-            "summary_only=True for aggregate stats."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "min_reward": {"type": "number", "description": "Only observations with reward.immediate >= this value."},
-                "max_reward": {"type": "number", "description": "Only observations with reward.immediate <= this value."},
-                "limit": {"type": "integer", "description": "Max observations to return (default: all matching)."},
-                "summary_only": {"type": "boolean", "description": "If true, return aggregate stats."},
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "query_top_engagers",
-        "description": (
-            "Get the AGGREGATED top engagers for this client across every "
-            "scored post. Returns name, headline, title, company, location, "
-            "mean ICP score, engagement count, posts_engaged (list of "
-            "ordinal_post_ids they reacted to), and ranking_score "
-            "(mean_icp_score × log(1+engagement_count)).\n\n"
-            "Use to understand the overall audience composition — who are "
-            "the high-ICP repeat engagers, what their roles/companies look "
-            "like, which posts they gravitated toward. This anchors your "
-            "writing in a real audience instead of the hypothetical ICP.\n\n"
-            "NOTE: for per-post reactor breakdown (who reacted to THIS "
-            "specific post), use query_observations instead — each "
-            "observation now includes a full `reactors` list with ICP "
-            "scores per reactor."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "integer",
-                    "description": "Max engagers to return (default 20, max 50).",
-                    "default": 20,
-                },
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "search_linkedin_corpus",
-        "description": (
-            "Search the 200K+ LinkedIn post corpus via Pinecone + Supabase. "
-            "Two modes: 'keyword' (exact text match) or 'semantic' (meaning-"
-            "based via OpenAI embeddings). Use to find real high-engagement "
-            "posts in adjacent niches, study what's working in the broader "
-            "LinkedIn ecosystem, or sanity-check your intuitions about what "
-            "patterns land. Returns post text, engagement metrics, and "
-            "creator info."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query (keywords or natural-language description)."},
-                "mode": {
-                    "type": "string",
-                    "enum": ["keyword", "semantic"],
-                    "description": "'keyword' for exact text search, 'semantic' for meaning-based vector search.",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max results (default 20).",
-                    "default": 20,
-                },
-            },
-            "required": ["query", "mode"],
-        },
-    },
-    {
-        "name": "execute_python",
-        "description": (
-            "Run Python code in a sandboxed subprocess. Pre-loaded globals:\n"
-            "  • obs — scored observations (full post text, reward, metrics)\n"
-            "  • embeddings — {post_hash: [1536 floats]} (OpenAI embeddings)\n"
-            "  • emb_matrix — np.array shape (N, 1536), rows aligned to emb_hashes\n"
-            "  • emb_hashes — list[str] of post_hash keys\n"
-            "  • emb_by_obs — embeddings aligned to obs order (None for missing)\n"
-            "Pre-imported: numpy (np), scipy, scipy.stats, sklearn, pandas "
-            "(pd), json, math, statistics. No network. 60s timeout.\n\n"
-            "Use for sanity-checking intuitions against the data — NOT for "
-            "deriving rules to mechanically follow. For example: "
-            "'across my scored posts, does reaction rate correlate with "
-            "length?' or 'which past posts are closest in embedding "
-            "space to this draft?' Your JUDGMENT about how to use the "
-            "signal is what matters; the stats are just one input."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "Python code to execute. Use print() to return results.",
-                },
-            },
-            "required": ["code"],
-        },
-    },
-    {
-        "name": "simulate_flame_chase_journey",
-        "description": (
-            "MANDATORY before submitting any post. Send a draft through "
-            "Irontomb, the adversarial audience simulator grounded in "
-            "this client's real historical engagement data.\n\n"
-            "## What Irontomb does\n\n"
-            "Irontomb is a turn-based agent. On each simulate call, she:\n"
-            "  1. Reads your draft\n"
-            "  2. Uses her own retrieval tools to search this client's "
-            "scored post history for past posts that are actually "
-            "comparable to your draft — by topic, angle, or keywords. "
-            "She pulls them with their real Stelle drafts, real "
-            "client-published versions, real T+7d engagement metrics "
-            "(impressions / reactions / comments / reposts), and real "
-            "reactor identities with their ICP scores.\n"
-            "  3. Optionally deep-reads one or two of the most relevant "
-            "past posts in full.\n"
-            "  4. Forms a prediction anchored in what those specifically-"
-            "comparable past posts actually achieved — not in generic "
-            "LinkedIn priors.\n"
-            "  5. Calls submit_reaction and returns her prediction to you.\n\n"
-            "This is adaptive calibration: the calibration data she uses "
-            "for YOUR draft is specific to YOUR draft's topic and angle, "
-            "not some fixed set of recent posts regardless of relevance.\n\n"
-            "## Result shape\n\n"
-            "  engagement_prediction : float    # reactions per 1000 impressions\n"
-            "  would_stop_scrolling  : bool     # typical audience member\n"
-            "  would_react           : bool\n"
-            "  would_comment         : bool\n"
-            "  would_share           : bool\n"
-            "  inner_voice           : str      # OPTIONAL, debug only — NOT\n"
-            "                                   # a critique, NOT a fix suggestion\n"
-            "  _draft_hash           : str\n"
-            "  _turns_used           : int      # how many turns Irontomb spent\n"
-            "  _retrieval_calls      : list[str] # which tools she invoked\n"
-            "  _n_scored_obs_available : int    # historical pool size\n"
-            "  _cost_usd             : float\n\n"
-            "## No fix suggestion, no critique\n\n"
-            "Irontomb does NOT tell you what to change. She shows you "
-            "the numeric prediction and expects you to diagnose failure "
-            "yourself by comparing against this client's real historical "
-            "performance (which you can inspect directly via "
-            "query_observations). Hand-fed fix suggestions encode a "
-            "theory of reader psychology that real readers don't actually "
-            "produce; Irontomb refuses to pretend. The `inner_voice` "
-            "field is optional one-sentence stream-of-consciousness — "
-            "debugging only, not a prescription. Weight it accordingly.\n\n"
-            "## The loop you are running\n\n"
-            "Draft → simulate → read `engagement_prediction` → compare "
-            "against this client's real historical median (use "
-            "query_observations on your own side to see the full scored "
-            "history) → if your draft's prediction is below what "
-            "comparable past posts actually earned, revise based on your "
-            "own theory → simulate again → repeat. Minimum 3 rounds per "
-            "post, normal 5-8, cap 12. Iterate until the prediction sits "
-            "at or above historical performance for comparable past "
-            "posts. If 12 rounds in you still can't move it, the ANGLE "
-            "itself is weak — stop polishing and reconsider the topic.\n\n"
-            "## Diagnosis is your job\n\n"
-            "Irontomb gives you NO fix_suggestion and NO diagnostic "
-            "patterns. Compare her `engagement_prediction` to this "
-            "client's real historical performance (use "
-            "`query_observations` to see what past posts actually "
-            "achieved). Form your own theory about why the prediction "
-            "is where it is. Revise based on your theory. Simulate "
-            "again. The data is the same data Irontomb used — you can "
-            "read it yourself and draw your own conclusions.\n\n"
-            "## Why this is mandatory\n\n"
-            "Real engagement takes 2 weeks to arrive. Irontomb takes "
-            "seconds per call and pennies per draft. Skipping her means "
-            "publishing blind — exactly the failure mode this tool "
-            "exists to prevent. A draft that can't beat Irontomb's "
-            "prediction won't beat real readers."
+            "Send a draft to Irontomb, a rough-reader simulator. "
+            "Irontomb returns ONE short visceral reaction from a "
+            "LinkedIn reader (a working professional, not a writing "
+            "teacher) plus an anchor pointing to where they reacted. "
+            "Not a critique, not a prescription — just what they "
+            "felt and where. Use this to stress-test drafts before "
+            "shipping.\n\n"
+            "Response shape:\n"
+            "  reaction — under-15-word reader-voice reaction\n"
+            "  anchor   — where in the post they reacted (quoted "
+            "phrase, \"paragraph N\", \"at the end\", \"hook\")\n\n"
+            "You interpret the reaction and decide whether/how to "
+            "revise. Irontomb does not know craft. You do."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "draft_text": {
                     "type": "string",
-                    "description": "The full text of the post draft to evaluate.",
+                    "description": "The full current draft to send to the reader.",
                 },
             },
             "required": ["draft_text"],
+        },
+    },
+    {
+        "name": "submit_draft",
+        "description": (
+            "ATOMIC FINAL-DRAFT SUBMISSION. Use this instead of "
+            "`write_file(posts/drafts/<id>/content.md, text)` to avoid "
+            "leaving rough-draft files in the workspace. One call per "
+            "finished post.\n\n"
+            "Args:\n"
+            "  user_slug (string, required): FOC user this post belongs to. "
+            "Pick the slug from `list_directory(\"\")` output — each "
+            "top-level directory is one FOC user.\n"
+            "  content (string, required): final post text in plain "
+            "markdown, no front-matter, no JSON wrapper.\n"
+            "  scheduled_date (string, optional): ISO \"YYYY-MM-DD\". "
+            "Use this to lay multi-post runs across a cadence (e.g., "
+            "Mon/Wed/Fri or Tue/Thu). The date becomes the post's slot "
+            "on the Lineage calendar.\n"
+            "  approver_user_ids (list[uuid], optional): explicit approver "
+            "list. If omitted, defaults to the company's assigned AM, or "
+            "the FOC user themselves if no AM is set.\n"
+            "  publication_order (int, optional): sequencing hint when "
+            "producing multiple drafts in one run (1, 2, 3…).\n"
+            "  why_post (string, optional): your rationale — why this "
+            "post, this angle, this hook. Stored as a draft_comment."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_slug": {"type": "string"},
+                "content": {"type": "string"},
+                "scheduled_date": {"type": "string"},
+                "approver_user_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "publication_order": {"type": "integer"},
+                "why_post": {"type": "string"},
+            },
+            "required": ["user_slug", "content"],
+        },
+    },
+    {
+        "name": "query_observations",
+        "description": (
+            "Query scored post observations. Each observation corresponds to a "
+            "LinkedIn post with reward (engagement_score), topic/format tags, "
+            "ICP match rate, and engagement breakdown. Use this instead of "
+            "reading memory/post-history.md — same data, filtered server-side.\n\n"
+            "Args:\n"
+            "  min_reward (number, optional): keep only posts with reward >= this\n"
+            "  max_reward (number, optional): keep only posts with reward <= this\n"
+            "  limit (int, optional): cap returned observations\n"
+            "  summary_only (bool, optional): return aggregate stats "
+            "(reward mean/std, topic/format distribution) instead of full rows\n"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "min_reward": {"type": "number"},
+                "max_reward": {"type": "number"},
+                "limit": {"type": "integer"},
+                "summary_only": {"type": "boolean"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "mention_resolve",
+        "description": (
+            "Resolve a LinkedIn username to a mention URN. Returns a JSON "
+            "object {name, urn, url} suitable for @[Name](urn:li:member:XXX) "
+            "mentions inside post text. Mirrors the `mention-resolve` command "
+            "the Jacquard ghostwriter had."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "username": {
+                    "type": "string",
+                    "description": "LinkedIn username (the part after linkedin.com/in/)",
+                },
+            },
+            "required": ["username"],
         },
     },
     {
@@ -1115,15 +877,107 @@ def _exec_subagent(args: dict) -> str:
         return f"Sub-agent error: {e}"
 
 
+def _dispatch_list_directory(root, args):
+    """Dispatch to remote FS when running in Lineage mode, else local disk."""
+    from backend.src.agents import lineage_fs_client as _lfs
+    if _lfs.is_lineage_mode():
+        return _lfs.exec_list_directory(root, args)
+    return _exec_list_directory(root, args)
+
+
+def _dispatch_read_file(root, args):
+    from backend.src.agents import lineage_fs_client as _lfs
+    if _lfs.is_lineage_mode():
+        return _lfs.exec_read_file(root, args)
+    return _exec_read_file(root, args)
+
+
+def _dispatch_write_file(root, args):
+    """Writes ALWAYS go to fly-local SandboxFs, even in Lineage mode.
+    Scratch (v1/v2/v3 drafts, notes, working files) never leaks to Lineage.
+    The ONLY Lineage-directed write is submit_draft (final posts only)."""
+    return _exec_write_file(root, args)
+
+
+def _dispatch_edit_file(root, args):
+    """Edits ALWAYS go to fly-local SandboxFs. Same rationale as write_file:
+    Stelle's scratch iteration stays private to fly."""
+    return _exec_edit_file(root, args)
+
+
+def _dispatch_search_files(root, args):
+    from backend.src.agents import lineage_fs_client as _lfs
+    if _lfs.is_lineage_mode():
+        return _lfs.exec_search_files(root, args)
+    return _exec_search_files(root, args)
+
+
+def _dispatch_bash(root, args):
+    """Bash in Lineage mode is intentionally disabled — the remote workspace
+    is unreachable via a local shell. Direct agents to structured tools."""
+    from backend.src.agents import lineage_fs_client as _lfs
+    if _lfs.is_lineage_mode():
+        return _lfs.exec_bash_lineage_stub(root, args)
+    return _exec_bash(root, args)
+
+
+def _dispatch_mention_resolve(root, args):
+    """Always goes through HTTP — whether local or Lineage mode. The
+    Lineage endpoint wraps the same Supabase + APImaestro resolver Pi
+    used, so behavior is identical. Falls through to a local error when
+    not in Lineage mode (Stelle never had this tool outside Lineage)."""
+    from backend.src.agents import lineage_fs_client as _lfs
+    if _lfs.is_lineage_mode():
+        return _lfs.exec_mention_resolve(root, args)
+    return "Error: mention_resolve is only available in Lineage mode"
+
+
+def _dispatch_submit_draft(root, args):
+    """Final-draft submission. Only valid in Lineage mode — outside Lineage
+    there is no ``drafts`` table for it to write to. In local mode this is
+    treated as a no-op with a clear error."""
+    from backend.src.agents import lineage_fs_client as _lfs
+    if _lfs.is_lineage_mode():
+        return _lfs.exec_submit_draft(root, args)
+    return (
+        "Error: submit_draft is only available in Lineage mode. "
+        "Use write_file to posts/drafts/<id>/content.md outside Lineage."
+    )
+
+
+def _dispatch_query_observations(root, args):
+    """Query scored observations. In Lineage mode goes through the remote
+    workspace's ``/observations`` endpoint (backed by linkedin_posts +
+    linkedin_reactions + ICP reports). Outside Lineage mode, falls back
+    to the in-process Analyst implementation when scored_observations are
+    pre-computed for this run — else returns empty."""
+    from backend.src.agents import lineage_fs_client as _lfs
+    if _lfs.is_lineage_mode():
+        return _lfs.exec_query_observations(root, args)
+    # Non-Lineage fallback — preserve Amphoreus's local behavior.
+    try:
+        from backend.src.agents.analyst import _tool_query_observations as _q
+        # If the agent loop wired scored_observations into module state,
+        # use them; otherwise return an empty result rather than crash.
+        scored = globals().get("_scored_observations_for_run") or []
+        return _q(args, scored)
+    except Exception as e:
+        import json as _json
+        return _json.dumps({"count": 0, "observations": [], "error": str(e)})
+
+
 _TOOL_HANDLERS = {
-    "list_directory": lambda root, args: _exec_list_directory(root, args),
-    "read_file": lambda root, args: _exec_read_file(root, args),
-    "search_files": lambda root, args: _exec_search_files(root, args),
+    "list_directory": _dispatch_list_directory,
+    "read_file": _dispatch_read_file,
+    "search_files": _dispatch_search_files,
     "web_search": lambda root, args: _exec_web_search(args),
     "fetch_url": lambda root, args: _exec_fetch_url(args),
-    "write_file": lambda root, args: _exec_write_file(root, args),
-    "edit_file": lambda root, args: _exec_edit_file(root, args),
-    "bash": lambda root, args: _exec_bash(root, args),
+    "write_file": _dispatch_write_file,
+    "edit_file": _dispatch_edit_file,
+    "bash": _dispatch_bash,
+    "mention_resolve": _dispatch_mention_resolve,
+    "query_observations": _dispatch_query_observations,
+    "submit_draft": _dispatch_submit_draft,
 }
 
 
@@ -1723,6 +1577,84 @@ def _fetch_research_files(company_keyword: str) -> list[dict]:
     return files
 
 
+
+def _build_observation_digest(company_keyword: str, n: int = 10) -> str:
+    """Compact raw digest of the client's top-N posts by engagement.
+
+    Replaces the `query_observations` tool as Stelle's access to her own
+    performance history. Dumps the N best-reacted-to scored observations
+    as full text + full numbers. No aggregation, no summary: the same raw
+    (draft, published, engagement) triples she used to fetch via the
+    tool, just delivered up-front at workspace-stage time.
+    """
+    try:
+        from backend.src.db.local import ruan_mei_load
+    except Exception:
+        return ""
+
+    state = ruan_mei_load(company_keyword)
+    if not state:
+        return "# Post history\n\n(no scored observations available)\n"
+
+    scored = [
+        o for o in state.get("observations", [])
+        if ((o.get("reward") or {}).get("raw_metrics") or {}).get("impressions")
+    ]
+    if not scored:
+        return "# Post history\n\n(no scored observations available)\n"
+
+    def _reactions(o: dict) -> int:
+        return int(((o.get("reward") or {}).get("raw_metrics") or {}).get("reactions", 0) or 0)
+
+    scored.sort(key=_reactions, reverse=True)
+    top = scored[:n]
+
+    lines: list[str] = []
+    lines.append("# Post history — top performers")
+    lines.append("")
+    lines.append(
+        f"The {len(top)} highest-reacted posts from this client's scored "
+        f"history. Each entry shows the text as Stelle drafted it, the "
+        f"text as the client ultimately published it (may differ after "
+        f"client edits), and the engagement numbers as of the last sync. "
+        f"This is your baseline — everything you write will be compared "
+        f"to this distribution."
+    )
+    lines.append("")
+
+    for i, o in enumerate(top, 1):
+        raw = ((o.get("reward") or {}).get("raw_metrics") or {})
+        r = int(raw.get("reactions", 0) or 0)
+        c = int(raw.get("comments", 0) or 0)
+        rp = int(raw.get("reposts", 0) or 0)
+        imp = int(raw.get("impressions", 0) or 0)
+        posted_at = (o.get("posted_at") or "")[:10]
+        draft = (o.get("post_body") or "").strip()
+        published = (o.get("posted_body") or "").strip()
+
+        lines.append("---")
+        lines.append(f"## Post {i} — {posted_at}")
+        lines.append("")
+        lines.append(f"**Engagement:** {r} reactions · {c} comments · {rp} reposts · {imp} impressions")
+        lines.append("")
+
+        if published and published != draft:
+            lines.append("**Stelle draft:**")
+            lines.append("")
+            lines.append(draft)
+            lines.append("")
+            lines.append("**Client-published version:**")
+            lines.append("")
+            lines.append(published)
+        else:
+            lines.append("**Post text:**")
+            lines.append("")
+            lines.append(draft or published)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Workspace setup (Gap 3, 10 — jacquard directory structure)
 # ---------------------------------------------------------------------------
@@ -1937,9 +1869,14 @@ def _setup_workspace(company_keyword: str) -> Path:
     (scratch_dir / "final").mkdir(exist_ok=True)
     (workspace / "output").mkdir(exist_ok=True)
 
-    # Write tool scripts (validate_draft.py, web_search.py, query_posts.py,
-    # ordinal_analytics.py, semantic_search_posts.py, image_search.py, etc.)
-    # into workspace/tools/ so Stelle can invoke them via bash.
+    # Observation digest: dump top-N scored posts (full text + full
+    # engagement numbers) into memory/post-history.md. Replaces the
+    # query_observations tool — same raw data, delivered up-front,
+    # so Stelle reads it like any other memory file.
+    digest = _build_observation_digest(company_keyword, n=10)
+    if digest:
+        (mem / "post-history.md").write_text(digest, encoding="utf-8")
+
     _write_tool_scripts(workspace)
 
     logger.info(
@@ -1961,18 +1898,269 @@ _OVERRIDE_MIN_EDITS_FOR_CHAR_LIMIT = 5
 # Dynamic directives
 # ---------------------------------------------------------------------------
 
-def _build_dynamic_directives(company_keyword: str) -> str:
-    """Deprecated. Returns empty string.
+_LINEAGE_DIRECTIVES_TOOL_OVERRIDES = """\
+## Tool semantics that differ from the default Amphoreus prompt
 
-    Previously injected ABM targets, client feedback, and before/after
-    revisions into Stelle's system prompt. All three are operator-curated
-    interpretations of the client, which encodes prescriptive framing and
-    violates the "client-direct content only" principle. Anything the
-    client has actually said belongs in ``transcripts/`` where Stelle
-    reads raw text; post deltas + engagement arrive through observation
-    queries; everything else is a tool call.
+Several instructions in the default system prompt referenced paths or files
+that **do not exist in the Lineage workspace**, or suggested workflows that
+create duplicate drafts. Here's how to do the same things correctly:
+
+- `memory/post-history.md` → does not exist. Call the
+  `query_observations` tool instead. Args: ``{min_reward, max_reward,
+  limit, summary_only}``. Output shape is identical to what the default
+  prompt expects — each observation carries ``reward.immediate`` (an
+  engagement score), per-reaction breakdown, topic/format tags,
+  ICP match rate, and the post text itself. Use ``summary_only: true``
+  to get distributions (reward_mean, reward_std, topic_distribution,
+  format_distribution).
+
+- `memory/voice-examples/` → use `posts/published/` instead. Every post
+  file already carries engagement metadata in its header (Reactions /
+  Comments / Reposts / per-reaction breakdown / ICP rate), so you can
+  rank them yourself. For a curated slice, also check `tone/` which
+  exposes ``tone_references`` picks.
+
+- `bash` tool is disabled in Lineage mode — it would run on a scratch
+  filesystem your data isn't on. Use the structured tools instead.
+
+- **FINAL DRAFTS: use `submit_draft`, NOT `write_file`.**
+  Do NOT call `write_file("<slug>/posts/drafts/<name>/content.md", text)`
+  for your final output. Each such write creates a brand-new ``drafts``
+  row in the database. If you iterate (v1 → revise → v2) via write_file,
+  you end up with duplicate drafts cluttering the calendar.
+
+  Correct workflow per finished post:
+    1. Iterate internally: write scratch plans to `notes/plan.md`,
+       use `get_reader_reaction` to test drafts in memory.
+    2. When the text is final, call `submit_draft` ONCE with:
+         user_slug          — which FOC user this post is for
+         content            — the final post markdown
+         scheduled_date     — ISO "YYYY-MM-DD" for the calendar slot
+         publication_order  — 1, 2, 3... when producing multiple drafts
+         approver_user_ids  — optional; defaults to the company's AM
+         why_post           — your rationale (stored as a draft_comment)
+
+  `submit_draft` atomically creates the draft row with all metadata AND
+  creates a ``review_draft`` task for the approver. No follow-up calls
+  needed.
+
+- **Multi-post runs: vary angles, don't riff one topic twice.**
+  When the user asks for N posts, cover N DIFFERENT angles/topics —
+  not the same topic with wording variations. Use
+  ``query_observations({summary_only: true})`` to see the client's
+  topic/format distribution and pick underrepresented angles. Space the
+  publication dates across the cadence (3 posts/week = Mon/Wed/Fri or
+  Mon/Tue/Thu). Pass each post's slot as ``scheduled_date``.
+
+"""
+
+
+_LINEAGE_DIRECTIVES_USER_TARGETED = """\
+# Lineage Mode — USER-TARGETED RUN
+
+You are running against a REMOTE workspace served by Lineage (virio-api).
+All filesystem tool calls (``list_directory``, ``read_file``, ``write_file``,
+``edit_file``) hit that remote over HTTPS, scoped to a single FOC user for
+this run. Every draft you produce will be attributed to that user.
+
+## Workspace layout (paths auto-prefixed to the target user)
+
+Use these bare paths — the path layer prepends the target user's slug
+automatically, and ``memory/`` DOES NOT exist in this workspace.
+
+- ``transcripts/``       — raw client-direct transcripts (read-only)
+- ``research/``          — deep research (read-only)
+- ``engagement/``        — LinkedIn engagement observations (read-only).
+                           Files: ``posts.json``, ``reactions.json``,
+                           ``comments.json``, ``profiles.json``,
+                           ``work_experiences.json``, ``client_info.json``
+- ``reports/``           — latest ICP report JSON + Typst template. The
+                           ICP report names specific engagers and highlights
+                           recurring content themes — read it before
+                           deciding angles.
+- ``context/``           — company context. ``account.md`` is auto-built
+                           (client name, company, posts_per_month target,
+                           Slack channels). Other files are operator-
+                           uploaded brand docs / positioning PDFs.
+- ``posts/published/``   — already-published LinkedIn posts (read-only)
+- ``posts/drafts/``      — unpushed drafts (do NOT write here directly in
+                           Lineage mode — use ``submit_draft`` instead)
+- ``edits/``             — FEEDBACK SIGNAL. For each published draft, a
+                           markdown file showing the earliest snapshot,
+                           the final published text, AND threaded
+                           operator comments. Read these before writing
+                           new drafts — they reveal how operators actually
+                           revise your output.
+                           (Replaces ``memory/feedback/edits/``.)
+- ``tone/``              — style references / voice calibration examples
+- ``notes/``             — working notes (read/write)
+- ``strategy/``          — persistent cross-run strategy memory (read/write).
+                           Update this when you learn something about this
+                           user that future runs should know.
+
+Shared (not user-scoped; don't prepend slug):
+- ``tasks/``             — pending review tasks + their resolution state
+- ``slack/``             — Slack channel context (read-only)
+- ``conversations/``     — ``trigger-log.jsonl``: replay of every prior
+                           trigger (interviews, CE feedback with diffs,
+                           manual runs) in chronological order. This is
+                           your history of prior interactions with this
+                           client — scan it at session start.
+- ``.pi/``               — Jacquard's own agent's skill files. IGNORE.
+
+## Path migration from Amphoreus defaults
+
+- ``memory/source-material/`` → ``transcripts/``
+- ``memory/published-posts/`` → ``posts/published/``
+- ``memory/feedback/edits/``  → ``edits/``
+- ``memory/plan.md``          → ``notes/plan.md``
+- ``scratch/final/``          → call ``submit_draft`` (don't write to ``posts/drafts/``)
+
+## Draft write contract
+
+**Use ``submit_draft`` for finished posts.** It is the atomic Lineage
+submission tool: one call = one draft row in Lineage's ``drafts`` table,
+a ``review_draft`` task for the approver, and a scheduled calendar slot.
+Each ``submit_draft`` call also runs Castorice fact-check on your content
+before the post is written to Lineage — the fact-check report ends up
+attached as a draft comment the reviewer can see.
+
+Do NOT ``write_file`` into ``posts/drafts/`` — it creates a duplicate /
+orphaned row. ``submit_draft`` is the only correct path.
+
+## Ingestion order at session start (Lineage mode)
+
+1. ``list_directory("")`` — confirm the target slug and what's available.
+2. ``read_file("conversations/trigger-log.jsonl")`` — your history with
+   this company (interviews, CE feedback diffs, prior runs). Scan it.
+3. ``read_file("strategy/strategy.md")`` if it exists — cross-run memory
+   left by your previous selves. Update it at the end of this run.
+4. ``list_directory("edits/")`` — operator-edit feedback signal.
+5. ``list_directory("transcripts/")`` + read the latest 2-3 transcripts.
+6. ``list_directory("engagement/")`` — the JSON files are your data
+   substrate for what's actually landing with this user's audience.
+7. ``list_directory("reports/")`` — the ICP report names specific
+   engagers and themes. Read it once.
+8. Spot-read ``tone/``, ``posts/published/``, ``context/account.md`` as
+   needed for voice calibration and company facts.
+"""
+
+
+_LINEAGE_DIRECTIVES_COMPANY_WIDE = """\
+# Lineage Mode — COMPANY-WIDE RUN
+
+You are running against a REMOTE workspace served by Lineage (virio-api).
+All filesystem tool calls hit that remote over HTTPS. ``memory/`` and
+``scratch/`` DO NOT exist — use the layout below.
+
+## Workspace layout
+
+The workspace root contains one top-level directory per FOC user of the
+company. Each user has the same subtree structure:
+
+    /                                  (workspace root)
+    ├── <user-slug>/
+    │   ├── transcripts/               (read-only — client-direct interview text)
+    │   ├── research/                  (read-only — deep research)
+    │   ├── engagement/                (read-only — posts.json / reactions.json /
+    │   │                                comments.json / profiles.json /
+    │   │                                work_experiences.json / client_info.json)
+    │   ├── reports/                   (read-only — latest ICP report + Typst template)
+    │   ├── context/                   (read-only — account.md + uploaded brand docs)
+    │   ├── posts/published/           (read-only — published LinkedIn posts)
+    │   ├── posts/drafts/              (do NOT write directly — use submit_draft)
+    │   ├── edits/                     (read-only — FEEDBACK SIGNAL: per-draft
+    │   │                                first-snapshot vs. final-published diffs
+    │   │                                WITH threaded operator comments.
+    │   │                                Replaces memory/feedback/edits/)
+    │   ├── tone/                      (read-only — voice/style references)
+    │   ├── notes/                     (read/write — working notes)
+    │   └── strategy/                  (read/write — persistent agent memory)
+    ├── tasks/                         (shared, read/write — pending review tasks)
+    ├── slack/                         (shared, read-only)
+    ├── conversations/                 (shared — trigger-log.jsonl: replay of every
+    │                                    prior interview / CE feedback / manual run
+    │                                    for this company, chronological)
+    └── .pi/                           (Jacquard-agent skill files — IGNORE)
+
+You MUST use explicit user-slug prefixes in every filesystem call — do not
+guess. Start by calling ``list_directory("")`` to discover the available
+FOC-user slugs.
+
+## Per-draft author attribution
+
+Each finished post belongs to exactly ONE user. You decide which user by
+passing their slug to ``submit_draft``:
+
+    submit_draft(user_slug="<user-slug>", content=<post text>, ...)
+
+The slug determines attribution — there is no separate ``author`` field.
+
+## Path migration from Amphoreus defaults
+
+- ``memory/<company>/source-material/`` → ``<user-slug>/transcripts/``
+- ``memory/<company>/published-posts/`` → ``<user-slug>/posts/published/``
+- ``memory/<company>/plan.md``          → ``<user-slug>/notes/plan.md``
+- ``scratch/final/``                    → call ``submit_draft`` (don't write
+                                           to ``<user-slug>/posts/drafts/``)
+
+## Draft write contract
+
+**Use ``submit_draft`` for finished posts.** One call = one draft row in
+Lineage's ``drafts`` table, a ``review_draft`` task for the approver, and
+a scheduled calendar slot. Each ``submit_draft`` call also runs Castorice
+fact-check on your content before the post is written to Lineage — the
+fact-check report is attached as a draft comment.
+
+Do NOT ``write_file`` into ``<user-slug>/posts/drafts/`` — it creates a
+duplicate / orphaned row. ``submit_draft`` is the only correct path.
+
+## Ingestion order at session start (Lineage mode)
+
+1. ``list_directory("")`` — discover the FOC-user slugs.
+2. ``read_file("conversations/trigger-log.jsonl")`` — history of prior
+   triggers for this company (interviews, CE feedback diffs, manual runs).
+3. For each slug you plan to write for:
+   a. ``read_file("<slug>/strategy/strategy.md")`` if it exists.
+   b. ``list_directory("<slug>/edits/")`` — operator-edit feedback.
+   c. ``list_directory("<slug>/transcripts/")`` + read latest 2-3.
+   d. ``list_directory("<slug>/engagement/")`` — JSON data substrate.
+   e. ``list_directory("<slug>/reports/")`` — ICP report if present.
+   f. Spot-read ``<slug>/tone/``, ``<slug>/posts/published/``,
+      ``<slug>/context/account.md`` as needed.
+4. Update ``<slug>/strategy/strategy.md`` at the end of the run with
+   anything future you-instances should know.
+"""
+
+
+def _build_dynamic_directives(company_keyword: str) -> str:
+    """Return dynamic directives for the system prompt.
+
+    Emits one of two Lineage-mode overlays when running against the remote
+    workspace:
+
+    - ``USER-TARGETED`` when the runner was given ``--lineage-user-slug``.
+      Every draft is attributed to that user and paths are auto-prefixed.
+    - ``COMPANY-WIDE``  when no user slug was supplied. Stelle sees the
+      full workspace with all FOC-user subtrees and must include the
+      slug in every filesystem call.
+
+    Returns ``""`` when running against local disk (non-Lineage mode).
     """
-    return ""
+    try:
+        from backend.src.agents import lineage_fs_client as _lfs
+        if not _lfs.is_lineage_mode():
+            return ""
+        layout = (
+            _LINEAGE_DIRECTIVES_USER_TARGETED
+            if _lfs.is_user_targeted()
+            else _LINEAGE_DIRECTIVES_COMPANY_WIDE
+        )
+        # Always append the tool-override block so Stelle doesn't try to read
+        # memory/post-history.md or memory/voice-examples/ which don't exist.
+        return layout + "\n\n" + _LINEAGE_DIRECTIVES_TOOL_OVERRIDES
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -2143,508 +2331,13 @@ esac
 # Pi workspace helpers — Python tool scripts
 # ---------------------------------------------------------------------------
 
-_WEB_SEARCH_SCRIPT = '''\
-#!/usr/bin/env python3
-"""Search the web via Parallel API. Usage: python3 web_search.py "query" """
-import hashlib, json, os, sys
-try:
-    import httpx
-except ImportError:
-    import subprocess as _sp
-    _sp.check_call([sys.executable, "-m", "pip", "install", "-q", "httpx"])
-    import httpx
-
-CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scratch", ".cache")
-
-def _cache_get(key):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    path = os.path.join(CACHE_DIR, f"search-{hashlib.md5(key.encode()).hexdigest()}.txt")
-    if os.path.exists(path):
-        return open(path, encoding="utf-8").read()
-    return None
-
-def _cache_set(key, value):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    path = os.path.join(CACHE_DIR, f"search-{hashlib.md5(key.encode()).hexdigest()}.txt")
-    open(path, "w", encoding="utf-8").write(value)
-
-def main():
-    query = " ".join(sys.argv[1:]).strip()
-    if not query:
-        print("Usage: python3 web_search.py \\"your query\\""); return
-    cached = _cache_get(query)
-    if cached:
-        print("[cached]"); print(cached); return
-    key = os.environ.get("PARALLEL_API_KEY", "")
-    if not key:
-        print("PARALLEL_API_KEY not set — web search unavailable"); return
-    try:
-        resp = httpx.post(
-            "https://api.parallel.ai/v1beta/search",
-            json={"objective": query, "mode": "fast", "max_results": 8},
-            headers={"x-api-key": key, "Content-Type": "application/json"},
-            timeout=60.0,
-        )
-        resp.raise_for_status()
-        lines = []
-        for r in resp.json().get("results", []):
-            lines.append(f"Title: {r.get('title', 'N/A')}")
-            lines.append(f"URL: {r.get('url', '')}")
-            d = r.get("publish_date")
-            if d: lines.append(f"Date: {d}")
-            for exc in r.get("excerpts", [])[:2]:
-                lines.append(f"  {exc[:500]}")
-            lines.append("")
-        output = "\\n".join(lines)
-        _cache_set(query, output)
-        print(output)
-    except Exception as e:
-        print(f"Search error: {e}")
-
-if __name__ == "__main__":
-    main()
-'''
-
-_FETCH_URL_SCRIPT = '''\
-#!/usr/bin/env python3
-"""Extract content from a URL via Parallel API. Usage: python3 fetch_url.py "url" """
-import hashlib, json, os, sys
-try:
-    import httpx
-except ImportError:
-    import subprocess as _sp
-    _sp.check_call([sys.executable, "-m", "pip", "install", "-q", "httpx"])
-    import httpx
-
-CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scratch", ".cache")
-
-def _cache_get(key):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    path = os.path.join(CACHE_DIR, f"url-{hashlib.md5(key.encode()).hexdigest()}.txt")
-    if os.path.exists(path):
-        return open(path, encoding="utf-8").read()
-    return None
-
-def _cache_set(key, value):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    path = os.path.join(CACHE_DIR, f"url-{hashlib.md5(key.encode()).hexdigest()}.txt")
-    open(path, "w", encoding="utf-8").write(value)
-
-def main():
-    url = sys.argv[1].strip() if len(sys.argv) > 1 else ""
-    if not url:
-        print("Usage: python3 fetch_url.py \\"https://example.com\\""); return
-    cached = _cache_get(url)
-    if cached:
-        print("[cached]"); print(cached); return
-    key = os.environ.get("PARALLEL_API_KEY", "")
-    if key:
-        try:
-            resp = httpx.post(
-                "https://api.parallel.ai/v1beta/extract",
-                json={"urls": [url], "mode": "excerpt"},
-                headers={"x-api-key": key, "Content-Type": "application/json"},
-                timeout=30.0,
-            )
-            resp.raise_for_status()
-            results = resp.json().get("results", [])
-            if results:
-                content = results[0].get("content") or "\\n\\n".join(results[0].get("excerpts", []))
-                content = content[:12000]
-                _cache_set(url, content)
-                print(content); return
-        except Exception:
-            pass
-    try:
-        resp = httpx.get(url, follow_redirects=True, timeout=15.0)
-        content = resp.text[:12000]
-        _cache_set(url, content)
-        print(content)
-    except Exception as e:
-        print(f"Fetch error: {e}")
-
-if __name__ == "__main__":
-    main()
-'''
 
 
-_QUERY_POSTS_SCRIPT = '''\
-#!/usr/bin/env python3
-"""Search 200K+ LinkedIn posts by keyword or creator, ranked by engagement.
-Usage:
-  python3 query_posts.py "voice AI emotional intelligence"
-  python3 query_posts.py --creator "username"
-"""
-import json, os, sys
-try:
-    import httpx
-except ImportError:
-    import subprocess as _sp
-    _sp.check_call([sys.executable, "-m", "pip", "install", "-q", "httpx"])
-    import httpx
-
-SELECT_COLS = ("hook,post_text,posted_at,creator_username,"
-               "total_reactions,total_comments,total_reposts,"
-               "engagement_score,is_outlier")
-
-def fetch_by_creator(url, key, username):
-    resp = httpx.get(
-        f"{url}/rest/v1/linkedin_posts",
-        params={
-            "select": SELECT_COLS,
-            "creator_username": f"eq.{username}",
-            "is_company_post": "eq.false",
-            "post_text": "not.is.null",
-            "order": "engagement_score.desc",
-            "limit": "20",
-        },
-        headers={"apikey": key, "Authorization": f"Bearer {key}"},
-        timeout=30.0,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-def fetch_by_keyword(url, key, query):
-    keywords = [w.strip() for w in query.split() if len(w.strip()) >= 3]
-    if not keywords:
-        print("Query too short — use 3+ character words"); return []
-    keywords.sort(key=len, reverse=True)
-    primary = keywords[0]
-    resp = httpx.get(
-        f"{url}/rest/v1/linkedin_posts",
-        params={
-            "select": SELECT_COLS,
-            "post_text": f"ilike.*{primary}*",
-            "is_company_post": "eq.false",
-            "order": "engagement_score.desc",
-            "limit": "80",
-        },
-        headers={"apikey": key, "Authorization": f"Bearer {key}"},
-        timeout=30.0,
-    )
-    resp.raise_for_status()
-    rows = resp.json()
-    results = []
-    for row in rows:
-        text = (row.get("post_text") or "").lower()
-        if all(kw.lower() in text for kw in keywords):
-            results.append(row)
-        if len(results) >= 15:
-            break
-    return results
-
-def main():
-    args = sys.argv[1:]
-    if not args:
-        print("Usage: python3 query_posts.py \\"topic or keyword\\"")
-        print("       python3 query_posts.py --creator \\"username\\"")
-        return
-    url = os.environ.get("SUPABASE_URL", "")
-    key = os.environ.get("SUPABASE_KEY", "")
-    if not url or not key:
-        print("SUPABASE_URL / SUPABASE_KEY not set"); return
-
-    try:
-        if args[0] == "--creator" and len(args) >= 2:
-            username = args[1].strip().strip("@")
-            results = fetch_by_creator(url, key, username)
-            label = f"@{username}"
-        else:
-            query = " ".join(args).strip()
-            results = fetch_by_keyword(url, key, query)
-            label = query
-    except Exception as e:
-        print(f"Supabase query error: {e}"); return
-
-    if not results:
-        print(f"No posts found for: {label}")
-        return
-
-    print(f"Found {len(results)} top-engagement posts for: {label}\\n")
-    for row in results:
-        hook = (row.get("hook") or "").strip()
-        text = (row.get("post_text") or "").strip()
-        user = row.get("creator_username") or "unknown"
-        date = (row.get("posted_at") or "")[:10]
-        reactions = row.get("total_reactions") or 0
-        comments = row.get("total_comments") or 0
-        reposts = row.get("total_reposts") or 0
-        eng = row.get("engagement_score") or 0
-        eng_display = eng / 100 if eng else 0
-        outlier = row.get("is_outlier") or False
-
-        print(f"--- Post by @{user} ({date}) ---")
-        metrics = f"Reactions: {reactions} | Comments: {comments} | Reposts: {reposts} | Engagement: {eng_display:.2f}"
-        if outlier:
-            metrics += " | OUTLIER"
-        print(metrics)
-        if hook:
-            print(f"Hook: {hook}")
-        print(text[:2000])
-        print()
-
-if __name__ == "__main__":
-    main()
-'''
 
 
-_ORDINAL_ANALYTICS_SCRIPT = '''\
-#!/usr/bin/env python3
-"""Ordinal LinkedIn analytics: profiles, followers, posts, cadence.
-Usage:
-  python3 ordinal_analytics.py profiles
-  python3 ordinal_analytics.py followers <profileId>
-  python3 ordinal_analytics.py posts <profileId>
-  python3 ordinal_analytics.py cadence <profileId>
-"""
-import json, os, sys
-from datetime import datetime, timedelta
-try:
-    import httpx
-except ImportError:
-    import subprocess as _sp
-    _sp.check_call([sys.executable, "-m", "pip", "install", "-q", "httpx"])
-    import httpx
-
-BASE = "https://app.tryordinal.com/api/v1"
-
-def headers():
-    key = os.environ.get("ORDINAL_API_KEY", "")
-    if not key:
-        print("ORDINAL_API_KEY not set — Ordinal analytics unavailable"); sys.exit(1)
-    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-
-def cmd_profiles():
-    resp = httpx.get(f"{BASE}/profiles/scheduling", headers=headers(), timeout=15)
-    resp.raise_for_status()
-    profiles = resp.json()
-    if isinstance(profiles, list):
-        for p in profiles:
-            pid = p.get("id", "")
-            name = p.get("name") or p.get("displayName") or "unnamed"
-            platform = p.get("platform", "")
-            print(f"  {name} ({platform}): {pid}")
-    else:
-        print(json.dumps(profiles, indent=2))
-
-def cmd_followers(profile_id):
-    start = (datetime.today() - timedelta(days=90)).strftime("%Y-%m-%d")
-    end = datetime.today().strftime("%Y-%m-%d")
-    resp = httpx.get(
-        f"{BASE}/analytics/linkedin/{profile_id}/followers",
-        headers=headers(), params={"startDate": start, "endDate": end}, timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    print(json.dumps(data, indent=2))
-
-def cmd_posts(profile_id):
-    start = (datetime.today() - timedelta(days=90)).strftime("%Y-%m-%d")
-    end = datetime.today().strftime("%Y-%m-%d")
-    resp = httpx.get(
-        f"{BASE}/analytics/linkedin/{profile_id}/posts",
-        headers=headers(), params={"startDate": start, "endDate": end}, timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    print(json.dumps(data, indent=2))
-
-def cmd_cadence(profile_id):
-    start = (datetime.today() - timedelta(days=180)).strftime("%Y-%m-%d")
-    end = datetime.today().strftime("%Y-%m-%d")
-    resp = httpx.get(
-        f"{BASE}/analytics/linkedin/{profile_id}/posts",
-        headers=headers(), params={"startDate": start, "endDate": end}, timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-
-    dates = []
-    posts = data if isinstance(data, list) else data.get("posts", data.get("data", []))
-    for p in posts:
-        d = p.get("publishedAt") or p.get("postedAt") or p.get("date") or ""
-        if d:
-            try:
-                dates.append(datetime.fromisoformat(d.replace("Z", "+00:00")).date())
-            except Exception:
-                pass
-    dates.sort(reverse=True)
-
-    if not dates:
-        print("No post dates found in Ordinal analytics."); return
-
-    print(f"Last {min(10, len(dates))} posts: {', '.join(str(d) for d in dates[:10])}")
-
-    if len(dates) >= 2:
-        gaps = [(dates[i-1] - dates[i]).days for i in range(1, len(dates))]
-        avg_gap = sum(gaps) / len(gaps)
-        max_gap = max(gaps)
-        max_idx = gaps.index(max_gap)
-        print(f"Average gap: {avg_gap:.1f} days")
-        print(f"Longest gap: {max_gap} days ({dates[max_idx+1]} to {dates[max_idx]})")
-
-    days_since = (datetime.today().date() - dates[0]).days
-    print(f"Days since last post: {days_since}")
-    if days_since > (avg_gap * 1.5 if len(dates) >= 2 else 7):
-        print("Recommended: Post soon — gap is above average.")
-    else:
-        print("Cadence looks healthy.")
-
-def main():
-    if len(sys.argv) < 2:
-        print(__doc__); return
-    cmd = sys.argv[1].lower()
-    try:
-        if cmd == "profiles":
-            cmd_profiles()
-        elif cmd == "followers" and len(sys.argv) >= 3:
-            cmd_followers(sys.argv[2])
-        elif cmd == "posts" and len(sys.argv) >= 3:
-            cmd_posts(sys.argv[2])
-        elif cmd == "cadence" and len(sys.argv) >= 3:
-            cmd_cadence(sys.argv[2])
-        else:
-            print(__doc__)
-    except Exception as e:
-        print(f"Ordinal error: {e}")
-
-if __name__ == "__main__":
-    main()
-'''
 
 
-_SEMANTIC_SEARCH_SCRIPT = '''\
-#!/usr/bin/env python3
-"""Semantic search over 200K+ LinkedIn posts using vector similarity.
-Usage: python3 semantic_search_posts.py "emotional intelligence in voice agents"
-"""
-import json, os, sys
 
-def ensure_deps():
-    for pkg in ("pinecone", "openai", "httpx"):
-        try:
-            __import__(pkg)
-        except ImportError:
-            import subprocess as _sp
-            _sp.check_call([sys.executable, "-m", "pip", "install", "-q", pkg])
-
-ensure_deps()
-
-from openai import OpenAI
-from pinecone import Pinecone
-import httpx
-
-INDEX_NAME = "linkedin-posts"
-NAMESPACE = "v2"
-EMBED_MODEL = "text-embedding-3-small"
-TOP_K = 15
-
-def embed_query(client, text, dimensions):
-    resp = client.embeddings.create(input=[text], model=EMBED_MODEL, dimensions=dimensions)
-    return resp.data[0].embedding
-
-def hydrate_from_supabase(urns, sb_url, sb_key):
-    if not urns:
-        return {}
-    urn_filter = ",".join(f"\\"{u}\\"" for u in urns[:TOP_K])
-    try:
-        resp = httpx.get(
-            f"{sb_url}/rest/v1/linkedin_posts",
-            params={
-                "select": "provider_urn,hook,post_text,posted_at,creator_username,"
-                          "total_reactions,total_comments,total_reposts,"
-                          "engagement_score,is_outlier",
-                "provider_urn": f"in.({urn_filter})",
-            },
-            headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"},
-            timeout=30.0,
-        )
-        resp.raise_for_status()
-        rows = resp.json()
-        return {r["provider_urn"]: r for r in rows if r.get("provider_urn")}
-    except Exception as e:
-        print(f"Supabase hydration error: {e}")
-        return {}
-
-def main():
-    query = " ".join(sys.argv[1:]).strip()
-    if not query:
-        print("Usage: python3 semantic_search_posts.py \\"topic or concept\\""); return
-
-    oai_key = os.environ.get("OPENAI_API_KEY", "")
-    pc_key = os.environ.get("PINECONE_API_KEY", "")
-    sb_url = os.environ.get("SUPABASE_URL", "")
-    sb_key = os.environ.get("SUPABASE_KEY", "")
-
-    if not oai_key or not pc_key:
-        print("OPENAI_API_KEY / PINECONE_API_KEY not set"); return
-
-    try:
-        pc = Pinecone(api_key=pc_key)
-        idx = pc.Index(INDEX_NAME)
-        stats = idx.describe_index_stats()
-        dims = stats.get("dimension", 1536)
-    except Exception as e:
-        print(f"Pinecone connection error: {e}"); return
-
-    oai = OpenAI(api_key=oai_key)
-    try:
-        vec = embed_query(oai, query, dims)
-    except Exception as e:
-        print(f"Embedding error: {e}"); return
-
-    try:
-        results = idx.query(vector=vec, top_k=TOP_K, namespace=NAMESPACE, include_metadata=True)
-    except Exception as e:
-        print(f"Pinecone query error: {e}"); return
-
-    matches = results.get("matches", [])
-    if not matches:
-        print(f"No semantically similar posts found for: {query}"); return
-
-    urns = [m["id"] for m in matches]
-    scores = {m["id"]: m.get("score", 0) for m in matches}
-
-    if sb_url and sb_key:
-        posts = hydrate_from_supabase(urns, sb_url, sb_key)
-    else:
-        posts = {}
-
-    print(f"Found {len(matches)} semantically similar posts for: {query}\\n")
-
-    for urn in urns:
-        score = scores.get(urn, 0)
-        row = posts.get(urn)
-        if row:
-            hook = (row.get("hook") or "").strip()
-            text = (row.get("post_text") or "").strip()
-            user = row.get("creator_username") or "unknown"
-            date = (row.get("posted_at") or "")[:10]
-            reactions = row.get("total_reactions") or 0
-            comments = row.get("total_comments") or 0
-            reposts = row.get("total_reposts") or 0
-            eng = row.get("engagement_score") or 0
-            eng_display = eng / 100 if eng else 0
-            outlier = row.get("is_outlier") or False
-
-            print(f"--- Post by @{user} ({date}) [similarity: {score:.3f}] ---")
-            metrics = f"Reactions: {reactions} | Comments: {comments} | Reposts: {reposts} | Engagement: {eng_display:.2f}"
-            if outlier:
-                metrics += " | OUTLIER"
-            print(metrics)
-            if hook:
-                print(f"Hook: {hook}")
-            print(text[:2000])
-        else:
-            meta = matches[[m["id"] for m in matches].index(urn)].get("metadata", {})
-            text = meta.get("post_text") or meta.get("text") or "(no text in metadata)"
-            print(f"--- Post {urn} [similarity: {score:.3f}] ---")
-            print(str(text)[:2000])
-        print()
-
-if __name__ == "__main__":
-    main()
-'''
 
 
 _VALIDATE_DRAFT_SCRIPT = r'''#!/usr/bin/env python3
@@ -2740,57 +2433,6 @@ if __name__ == "__main__":
 '''
 
 
-_IMAGE_SEARCH_SCRIPT = '''\
-#!/usr/bin/env python3
-"""Search for images via Serper Images API.
-Usage: python3 image_search.py "query" [num_results]
-Returns JSON array of image results with url, title, width, height, source.
-"""
-import json, os, sys
-try:
-    import requests
-except ImportError:
-    import subprocess as _sp
-    _sp.check_call([sys.executable, "-m", "pip", "install", "-q", "requests"])
-    import requests
-
-def main():
-    query = sys.argv[1] if len(sys.argv) > 1 else ""
-    num = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-    if not query:
-        print(json.dumps({"error": "No query provided"})); return
-
-    base_url = os.environ.get("SERPER_BASE_URL", "https://google.serper.dev/search")
-    api_url = base_url.replace("/search", "/images")
-    api_key = os.environ.get("SERPER_API_KEY", "")
-    if not api_key:
-        print(json.dumps({"error": "SERPER_API_KEY not set"})); return
-
-    try:
-        resp = requests.post(
-            api_url,
-            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-            json={"q": query, "num": num},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        results = []
-        for img in data.get("images", []):
-            results.append({
-                "url": img.get("imageUrl", ""),
-                "title": img.get("title", ""),
-                "width": img.get("imageWidth", 0),
-                "height": img.get("imageHeight", 0),
-                "source": img.get("link", ""),
-            })
-        print(json.dumps(results, indent=2))
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-
-if __name__ == "__main__":
-    main()
-'''
 
 
 def _write_if_changed(path: Path, content: str) -> None:
@@ -2809,16 +2451,16 @@ def _write_if_changed(path: Path, content: str) -> None:
 
 
 def _write_tool_scripts(workspace_root: Path) -> None:
-    """Write helper scripts for web search, URL extraction, post search, analytics, validation, image search, and draft/edit/memory."""
+    """Write validate_draft.py and the shell aliases.
+
+    Previously emitted web_search.py / fetch_url.py / query_posts.py /
+    ordinal_analytics.py / semantic_search_posts.py / image_search.py
+    into workspace/tools/ for bash invocation. Log analysis across 9
+    sessions showed all had zero invocations. Dropped.
+    """
     tools_dir = workspace_root / "tools"
     tools_dir.mkdir(exist_ok=True)
-    _write_if_changed(tools_dir / "web_search.py", _WEB_SEARCH_SCRIPT)
-    _write_if_changed(tools_dir / "fetch_url.py", _FETCH_URL_SCRIPT)
-    _write_if_changed(tools_dir / "query_posts.py", _QUERY_POSTS_SCRIPT)
-    _write_if_changed(tools_dir / "ordinal_analytics.py", _ORDINAL_ANALYTICS_SCRIPT)
-    _write_if_changed(tools_dir / "semantic_search_posts.py", _SEMANTIC_SEARCH_SCRIPT)
     _write_if_changed(tools_dir / "validate_draft.py", _VALIDATE_DRAFT_SCRIPT)
-    _write_if_changed(tools_dir / "image_search.py", _IMAGE_SEARCH_SCRIPT)
 
     draft_sh = workspace_root / "draft.sh"
     _write_if_changed(draft_sh, _DRAFT_SH_SCRIPT)
@@ -3564,20 +3206,13 @@ def _run_agent_loop(
                 _emb = None
             return _analyst_exec_py(args, scored_observations, embeddings=_emb)
 
-        def _stelle_simulate_flame_chase_handler(_root: Path, args: dict) -> str:
-            """Dispatch a draft to Irontomb for audience simulation.
+        def _stelle_get_reader_reaction_handler(_root: Path, args: dict) -> str:
+            """Dispatch a draft to Irontomb for a rough-reader reaction.
 
-            Stateless turn-based retrieval loop inside Irontomb: each call
-            loads fresh calibration examples from the client's most recent
-            real engagement history, runs the turn loop, returns the
-            prediction. Every call increments simulate_call_count; the
-            write_result validator enforces a minimum of 3 calls per post
-            before accepting submission.
-
-            Returns Irontomb's prediction PLUS a gradient signal showing
-            how the predicted engagement compares to this client's median.
-            This turns Irontomb into a loss function that Stelle optimizes
-            against across revision iterations.
+            Irontomb runs a short retrieval+react loop internally and
+            returns {reaction, anchor}. The reaction is reader-voice
+            (not critique, not prescription). Stelle interprets what
+            caused the reaction and decides how to revise.
             """
             if not company_keyword:
                 return json.dumps({"_error": "company not set"})
@@ -3598,69 +3233,69 @@ def _run_agent_loop(
                     "result": result,
                 })
 
-                # --- Gradient signal ---
-                # Append loss function context: how this prediction
-                # compares to client median, and whether revisions are
-                # improving the prediction (trajectory).
-                pred_eng = result.get("engagement_prediction", 0) or 0
-                pred_imp = result.get("impression_prediction", 0) or 0
-                gradient: dict[str, Any] = {}
-
-                if client_median_engagement is not None:
-                    delta_eng = pred_eng - client_median_engagement
-                    gradient["client_median_engagement"] = round(client_median_engagement, 2)
-                    gradient["predicted_engagement"] = round(pred_eng, 2)
-                    gradient["delta_vs_median"] = round(delta_eng, 2)
-                    if delta_eng < 0:
-                        gradient["signal"] = (
-                            f"BELOW median by {abs(delta_eng):.1f}. "
-                            f"This draft would underperform the client's "
-                            f"historical baseline. Revise and re-simulate."
-                        )
-                    else:
-                        gradient["signal"] = (
-                            f"ABOVE median by {delta_eng:.1f}. "
-                            f"This draft is predicted to outperform baseline."
-                        )
-
-                if client_median_impressions is not None:
-                    gradient["client_median_impressions"] = client_median_impressions
-                    gradient["predicted_impressions"] = pred_imp
-
-                # Trajectory: compare with previous sims of this same draft
-                _prev_preds = [
-                    sr["result"].get("engagement_prediction", 0) or 0
-                    for sr in simulate_results[:-1]
-                    if sr["draft_hash"] == _dh
-                ]
-                if _prev_preds:
-                    gradient["revision_trajectory"] = [
-                        round(p, 2) for p in _prev_preds
-                    ] + [round(pred_eng, 2)]
-                    _improvement = pred_eng - _prev_preds[-1]
-                    gradient["last_revision_delta"] = round(_improvement, 2)
-                    if abs(_improvement) < 0.5 and len(_prev_preds) >= 2:
-                        gradient["plateau_detected"] = True
-                        gradient["plateau_note"] = (
-                            "Engagement prediction has plateaued across "
-                            "last 2+ revisions. Consider: (1) ship if "
-                            "above median, (2) try a fundamentally "
-                            "different hook/angle if below median."
-                        )
-
-                if gradient:
-                    result["_gradient"] = gradient
-
+                # Irontomb now outputs {reaction, anchor}. No
+                # scalar prediction, so no gradient block.
                 return json.dumps(result, default=str)
             except Exception as _e:
-                logger.warning("[Stelle] Irontomb simulate failed: %s", _e)
+                logger.warning("[Stelle] Irontomb reader-reaction call failed: %s", _e)
                 return json.dumps({"_error": f"simulate failed: {str(_e)[:200]}"})
 
-        run_handlers["query_observations"] = _stelle_query_observations_handler
-        run_handlers["query_top_engagers"] = _stelle_query_top_engagers_handler
-        run_handlers["search_linkedin_corpus"] = _stelle_search_corpus_handler
-        run_handlers["execute_python"] = _stelle_execute_python_handler
-        run_handlers["simulate_flame_chase_journey"] = _stelle_simulate_flame_chase_handler
+        # Register the session-scoped handler. It closes over
+        # simulate_call_count + simulate_results for iteration discipline,
+        # so it must live in the per-run dict, not module-level _TOOL_HANDLERS.
+        run_handlers["get_reader_reaction"] = _stelle_get_reader_reaction_handler
+
+        # Wrap submit_draft with a Castorice fact-check gate. The wrapper
+        # runs Castorice.fact_check_post on `content` first, replaces the
+        # content with the corrected post, and appends the fact-check
+        # report to why_post so the reviewer in Lineage sees Castorice's
+        # findings in the draft_comment thread. Failures in Castorice
+        # surface as a visible error back to Stelle — she can retry or
+        # submit unchecked after acknowledging the failure.
+        _original_submit_draft = run_handlers.get("submit_draft")
+
+        def _stelle_submit_draft_with_castorice(_root: Path, args: dict) -> str:
+            if not company_keyword:
+                return "Error: company not set"
+            content = args.get("content") or ""
+            if not content:
+                return "Error: content is required"
+            # Run Castorice on the clean post text before the Lineage POST.
+            try:
+                from backend.src.agents.castorice import Castorice
+                fc = Castorice().fact_check_post(company_keyword, content)
+                corrected = fc.get("corrected_post") or content
+                report = fc.get("report") or ""
+                citation_comments = fc.get("citation_comments") or []
+            except Exception as _e:
+                logger.warning("[Stelle] Castorice fact-check failed: %s", _e)
+                corrected = content
+                report = f"[Castorice unavailable: {str(_e)[:200]}]"
+                citation_comments = []
+
+            # Build the enriched payload. Keep Stelle's own why_post text
+            # and append the fact-check summary so the reviewer sees both.
+            forwarded = dict(args)
+            forwarded["content"] = corrected
+            existing_why = forwarded.get("why_post") or ""
+            fc_summary_parts: list[str] = []
+            if existing_why:
+                fc_summary_parts.append(existing_why)
+            if report:
+                fc_summary_parts.append("## Castorice fact-check\n\n" + report)
+            if citation_comments:
+                fc_summary_parts.append(
+                    "## Citations (Castorice)\n\n"
+                    + "\n".join(f"- {c}" for c in citation_comments)
+                )
+            if fc_summary_parts:
+                forwarded["why_post"] = "\n\n---\n\n".join(fc_summary_parts)
+
+            if _original_submit_draft is None:
+                return "Error: submit_draft dispatcher not wired"
+            return _original_submit_draft(_root, forwarded)
+
+        run_handlers["submit_draft"] = _stelle_submit_draft_with_castorice
 
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": user_prompt},
@@ -3688,7 +3323,7 @@ def _run_agent_loop(
         while turn < MAX_AGENT_TURNS:
             turn += 1
             t0 = time.time()
-            logger.info("[Stelle] Turn %d — calling Claude...", turn)
+            logger.info("[Stelle] Amphoreus cycle %d — calling Claude...", turn)
 
             _inject_cache_breakpoint(messages)
 
@@ -3772,14 +3407,14 @@ def _run_agent_loop(
             turn_context = usage["input_tokens"] + usage["cache_read_input_tokens"] + usage["cache_creation_input_tokens"]
             turn_cache_pct = (usage["cache_read_input_tokens"] / turn_context * 100) if turn_context > 0 else 0
             status_msg = (
-                f"Turn {turn} done in {elapsed:.1f}s — "
+                f"Amphoreus cycle {turn} done in {elapsed:.1f}s — "
                 f"in={usage['input_tokens']} out={usage['output_tokens']} "
                 f"cache_read={usage['cache_read_input_tokens']} "
                 f"cache_write={usage['cache_creation_input_tokens']} "
                 f"({turn_cache_pct:.0f}% cached)"
             )
             logger.info(
-                "[Stelle] Turn %d done in %.1fs — stop=%s blocks=%d "
+                "[Stelle] Amphoreus cycle %d done in %.1fs — stop=%s blocks=%d "
                 "in=%d out=%d cache_read=%d cache_write=%d (%.0f%% cached)",
                 turn, elapsed, response.stop_reason, len(response.content),
                 usage["input_tokens"], usage["output_tokens"],
@@ -3836,97 +3471,24 @@ def _run_agent_loop(
                             })
                             continue
 
-                        # Iteration discipline guard: enforce a minimum of 3
-                        # simulate_flame_chase_journey calls per post before
-                        # accepting submission. A draft that hasn't been
-                        # iterated against Irontomb at least 3 times is an
-                        # under-tested draft; reject it back to Stelle with
-                        # a specific error so she goes back and iterates.
-                        _n_posts = len(parsed.get("posts", []))
-                        _min_required_simulate_calls = max(3 * _n_posts, 3)
-                        _actual_simulate_calls = simulate_call_count[0]
-                        if _actual_simulate_calls < _min_required_simulate_calls:
-                            error_msg = (
-                                f"Iteration discipline check failed: you made "
-                                f"{_actual_simulate_calls} simulate_flame_chase_journey "
-                                f"calls across {_n_posts} post(s), but the minimum "
-                                f"is {_min_required_simulate_calls} "
-                                f"(3 per post).\n\n"
-                                f"Irontomb exists to fight you. A post that hasn't "
-                                f"been iterated against her at least 3 times is an "
-                                f"under-tested draft and cannot ship. Go back to "
-                                f"each post that hasn't been simulated enough, "
-                                f"revise based on Irontomb's prediction (compare "
-                                f"her engagement_prediction against this client's "
-                                f"real historical performance via query_observations), "
-                                f"call simulate_flame_chase_journey again, and keep "
-                                f"iterating until the prediction is at or above "
-                                f"what comparable past posts actually achieved.\n\n"
-                                f"Then call write_result again."
-                            )
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": error_msg,
-                                "is_error": True,
-                            })
-                            tool_result_log.append({
-                                "tool_name": name, "tool_call_id": block.id,
-                                "result_chars": len(error_msg), "is_error": True,
-                                "iteration_discipline_failed": True,
-                                "simulate_calls": _actual_simulate_calls,
-                                "required": _min_required_simulate_calls,
-                            })
-                            continue
-
-                        # Guard 2: would_stop_scrolling check.
-                        # For each submitted post, find its latest Irontomb
-                        # prediction by draft_hash. If would_stop_scrolling
-                        # is False, the post is dead on arrival — reject.
-                        _failed_posts: list[str] = []
-                        for _pi, _post in enumerate(parsed.get("posts", []), 1):
-                            _post_text = (_post.get("text") or "").strip()
-                            if not _post_text:
-                                continue
-                            _ph = hashlib.sha256(_post_text.encode("utf-8")).hexdigest()[:16]
-                            # Find last simulate result for this draft
-                            _last = None
-                            for _sr in reversed(simulate_results):
-                                if _sr["draft_hash"] == _ph:
-                                    _last = _sr["result"]
-                                    break
-                            if _last and _last.get("would_stop_scrolling") is False:
-                                _iv = (_last.get("inner_voice") or "")[:120]
-                                _failed_posts.append(
-                                    f"  Post {_pi}: would_stop_scrolling=False "
-                                    f"(inner_voice: \"{_iv}\")"
-                                )
-                        if _failed_posts:
-                            error_msg = (
-                                f"Scroll-stop check failed. Irontomb says the "
-                                f"audience would NOT stop scrolling for "
-                                f"{len(_failed_posts)} post(s):\n\n"
-                                + "\n".join(_failed_posts) + "\n\n"
-                                f"A post nobody stops for is dead on arrival. "
-                                f"Revise the hook — make it specific, personal, "
-                                f"unexpected — then call "
-                                f"simulate_flame_chase_journey again. Repeat "
-                                f"until would_stop_scrolling is True.\n\n"
-                                f"Then call write_result again."
-                            )
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": error_msg,
-                                "is_error": True,
-                            })
-                            tool_result_log.append({
-                                "tool_name": name, "tool_call_id": block.id,
-                                "result_chars": len(error_msg), "is_error": True,
-                                "scroll_stop_failed": True,
-                                "failed_posts": len(_failed_posts),
-                            })
-                            continue
+                        # (Iteration discipline gate removed — no more
+                        # minimum-simulate-count requirement.)
+                        #
+                        # (Scroll-stop gate removed — no more
+                        # would_stop_scrolling boolean to gate on.)
+                        #
+                        # NOTE: An earlier refactor intended to delete the
+                        # scroll-stop enforcement block but left orphaned
+                        # code that referenced ``_failed_posts`` / ``_ph``
+                        # / ``_post_text`` — variables only defined inside
+                        # a parent ``for _pi, _post in enumerate(posts):``
+                        # loop that was also deleted. That orphaned block
+                        # produced a ``NameError: _failed_posts`` crash
+                        # every time ``write_result`` succeeded validation,
+                        # which dropped the entire structured output on the
+                        # floor. The dead code has been removed here; if
+                        # you want scroll-stop enforcement back, re-add the
+                        # loop + variable declarations explicitly.
 
 
                     except json.JSONDecodeError as e:
@@ -3955,8 +3517,8 @@ def _run_agent_loop(
                         for _sr in reversed(simulate_results):
                             if _sr["draft_hash"] == _ph:
                                 _r = _sr["result"]
-                                _post["predicted_engagement"] = _r.get("engagement_prediction")
-                                _post["predicted_impressions"] = _r.get("impression_prediction")
+                                _post["last_reader_reaction"] = _r.get("reaction")
+                                _post["last_reader_anchor"] = _r.get("anchor")
                                 break
                     result_json = json.dumps(parsed)
                     result_text = f"Result accepted. {len(parsed.get('posts', []))} post(s). Session complete."
@@ -4428,6 +3990,33 @@ def _process_result(
             except Exception as _e:
                 logger.warning("[Stelle] Could not save post %d to local SQLite: %s", i, _e)
 
+        # Lineage-mode parallel write: when the run is user-targeted, push
+        # the draft to the Lineage workspace under the target user's slug
+        # so it lands in Supabase's ``drafts`` table (surfaces in the
+        # Lineage calendar). Non-fatal on failure.
+        #
+        # In COMPANY-WIDE Lineage runs we do NOT auto-attribute here —
+        # Stelle is expected to have issued her own ``write_file`` calls
+        # with explicit ``<slug>/posts/drafts/...`` paths during the loop,
+        # so those writes already landed. Auto-writing here would pick the
+        # wrong user.
+        try:
+            from backend.src.agents import lineage_fs_client as _lfs
+            if _lfs.is_lineage_mode() and _lfs.is_user_targeted():
+                _ok, _msg = _lfs.write_draft_for_current_run(_draft_id, corrected)
+                if _ok:
+                    logger.info("[Stelle][Lineage] attributed draft %s (%d chars) to target user", _draft_id, len(corrected))
+                    # Mirror Pi's post-run hook at trigger-router.ts:556 —
+                    # create a review_draft task so the CS queue populates.
+                    _task_title = (hook[:120] if hook else "Review draft").strip() or "Review draft"
+                    _task_ok, _task_msg = _lfs.create_review_task(_draft_id, f"Review draft: {_task_title}")
+                    if not _task_ok:
+                        logger.warning("[Stelle][Lineage] review_task for %s failed: %s", _draft_id, _task_msg)
+                else:
+                    logger.warning("[Stelle][Lineage] draft %s attribution failed: %s", _draft_id, _msg)
+        except Exception as _e:
+            logger.warning("[Stelle][Lineage] draft %s cross-write crashed: %s", _draft_id, _e)
+
     Path(output_filepath).parent.mkdir(parents=True, exist_ok=True)
     with open(output_filepath, "w", encoding="utf-8") as f:
         f.write("\n".join(output_lines))
@@ -4462,20 +4051,31 @@ def generate_one_shot(
     NOT injected — everything beyond transcripts + observations is a tool
     call.
     """
-    username_path = P.linkedin_username_path(company_keyword)
-    if not username_path.exists():
-        raise FileNotFoundError(
-            f"Missing memory/{company_keyword}/linkedin_username.txt — "
-            f"create this file with the client's LinkedIn username "
-            f"(the part after linkedin.com/in/) before running the pipeline."
-        )
+    # In Lineage mode the workspace lives remotely; there's no local
+    # ``memory/<company>/linkedin_username.txt`` to read. The display name
+    # flows in through Lineage's ``context/account.md`` which Stelle reads
+    # via a tool call during the agent loop. Skip the local preamble.
+    try:
+        from backend.src.agents.lineage_fs_client import is_lineage_mode
+        _lineage_active = is_lineage_mode()
+    except Exception:
+        _lineage_active = False
 
-    # Resolve proper display name from Supabase (falls back to slug)
-    username = username_path.read_text().strip()
-    if username:
-        _, _, display_name = _resolve_supabase_ids(username)
-        if display_name:
-            client_name = display_name
+    if not _lineage_active:
+        username_path = P.linkedin_username_path(company_keyword)
+        if not username_path.exists():
+            raise FileNotFoundError(
+                f"Missing memory/{company_keyword}/linkedin_username.txt — "
+                f"create this file with the client's LinkedIn username "
+                f"(the part after linkedin.com/in/) before running the pipeline."
+            )
+
+        # Resolve proper display name from Supabase (falls back to slug)
+        username = username_path.read_text().strip()
+        if username:
+            _, _, display_name = _resolve_supabase_ids(username)
+            if display_name:
+                client_name = display_name
 
     # --- CLI mode: run through Claude CLI with Max plan (no API cost) ---
     from backend.src.mcp_bridge.claude_cli import use_cli

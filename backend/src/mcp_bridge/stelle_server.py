@@ -9,17 +9,21 @@ custom tools that don't map to built-in CLI capabilities:
   - query_top_engagers — aggregated top ICP engagers
   - search_linkedin_corpus — 200K+ LinkedIn post corpus
   - execute_python — sandboxed Python with pre-loaded observations
-  - simulate_flame_chase_journey — Irontomb audience simulation
-  - write_result — terminal tool with validation guards
+  - write_result — terminal tool with structural validation
 
-Stateful within a run: tracks simulate call count and results for
-the write_result guards (iteration discipline, would_stop_scrolling,
-engagement gradient).
+Irontomb (simulate_flame_chase_journey) is deliberately NOT exposed
+to Stelle during generation. Previously, requiring Stelle to iterate
+against Irontomb's engagement predictions collapsed her writing toward
+Irontomb's taste bias (precedent-favored, LinkedIn-average). Stelle
+now writes authentically; Irontomb evaluates her final drafts
+post-hoc (see _process_result in stelle.py) so its predictions can
+be calibrated against real engagement without distorting the writing.
 
 Launched as a subprocess by Claude CLI via --mcp-config.
 Reads config from environment variables:
   STELLE_COMPANY — client slug
-  STELLE_USE_CLI_IRONTOMB — "1" to run Irontomb through CLI too (default)
+  STELLE_USE_CLI_IRONTOMB — "1" to run Irontomb through CLI too (default,
+    used by post-hoc evaluator, not by Stelle directly)
 """
 
 from __future__ import annotations
@@ -105,26 +109,10 @@ def _handle_query_observations(args: dict) -> str:
     from backend.src.agents.analyst import _tool_query_observations
     return _tool_query_observations(args, _scored_observations)
 
-server.register(
-    name="query_observations",
-    description=(
-        "Inspect this client's scored post history. Returns every scored "
-        "post with draft text, published text (read side-by-side for client "
-        "preferences), engagement metrics (reactions/comments/reposts/impressions), "
-        "icp_match_rate, and per-post reactor list with ICP scores. "
-        "Filters: min_reward, max_reward, limit, summary_only."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "min_reward": {"type": "number"},
-            "max_reward": {"type": "number"},
-            "limit": {"type": "integer"},
-            "summary_only": {"type": "boolean"},
-        },
-    },
-    handler=_handle_query_observations,
-)
+# query_observations intentionally NOT registered. Observation data is
+# now injected up-front via memory/post-history.md at workspace stage
+# time (see _build_observation_digest in stelle.py). Same raw data,
+# delivered as a readable file — no tool call required.
 
 
 # ---------------------------------------------------------------------------
@@ -141,21 +129,9 @@ def _handle_query_top_engagers(args: dict) -> str:
     except Exception as e:
         return json.dumps({"error": str(e)[:200]})
 
-server.register(
-    name="query_top_engagers",
-    description=(
-        "Get aggregated top engagers across all scored posts, ranked by "
-        "ICP fit x engagement count. Returns name, headline, company, "
-        "icp_score, engagement_count, posts_engaged."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "limit": {"type": "integer", "description": "Max engagers (default 20, max 50)"},
-        },
-    },
-    handler=_handle_query_top_engagers,
-)
+# query_top_engagers intentionally NOT registered. Went unused in
+# production (5 calls across 9 sessions). We want Stelle optimizing for
+# engagement first; ICP-specific scoring is a downstream concern.
 
 
 # ---------------------------------------------------------------------------
@@ -165,24 +141,12 @@ def _handle_search_corpus(args: dict) -> str:
     from backend.src.agents.analyst import _tool_search_linkedin_bank
     return _tool_search_linkedin_bank(args)
 
-server.register(
-    name="search_linkedin_corpus",
-    description=(
-        "Search 200K+ real LinkedIn posts. Modes: 'keyword' (exact text) "
-        "or 'semantic' (meaning-based). Returns post text, engagement "
-        "metrics, creator info."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string"},
-            "mode": {"type": "string", "enum": ["keyword", "semantic"]},
-            "limit": {"type": "integer", "default": 20},
-        },
-        "required": ["query", "mode"],
-    },
-    handler=_handle_search_corpus,
-)
+# search_linkedin_corpus intentionally NOT registered. Went unused in
+# production (0 calls across 9 sessions). LinkedIn-wide corpus pulls
+# Stelle's taste toward LinkedIn-average polish and away from the
+# client's own voice; the reference distribution she should learn from
+# is her client's past top performers, which lives in
+# memory/post-history.md.
 
 
 # ---------------------------------------------------------------------------
@@ -197,21 +161,10 @@ def _handle_execute_python(args: dict) -> str:
         emb = None
     return _tool_execute_python(args, _scored_observations, embeddings=emb)
 
-server.register(
-    name="execute_python",
-    description=(
-        "Run Python with pre-loaded obs (scored observations), numpy, "
-        "scipy, sklearn, pandas. Use print() for output. 60s timeout."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "code": {"type": "string", "description": "Python code to execute"},
-        },
-        "required": ["code"],
-    },
-    handler=_handle_execute_python,
-)
+# execute_python intentionally NOT registered. Went nearly unused in
+# production (4 calls across 9 sessions). Stelle's job is writing, not
+# data analysis; observation data is delivered via
+# memory/post-history.md already.
 
 
 # ---------------------------------------------------------------------------
@@ -284,24 +237,80 @@ def _handle_simulate(args: dict) -> str:
 
     return json.dumps(result, default=str)
 
+# simulate_flame_chase_journey intentionally NOT registered. Irontomb
+# has been unplugged from Stelle's generation loop — she writes
+# authentically, and Irontomb runs post-hoc on her final drafts (see
+# _process_result in stelle.py). The _handle_simulate function above
+# is kept dormant in case we want to expose it again as an optional
+# sanity-check tool in the future, but it is not part of Stelle's
+# toolbelt right now.
+
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_reader_reaction (Irontomb rough-reader adversarial loop)
+# ---------------------------------------------------------------------------
+def _handle_get_reader_reaction(args: dict) -> str:
+    global _simulate_call_count
+    _simulate_call_count += 1
+    draft = args.get("draft_text", "")
+    if not draft:
+        return json.dumps({"_error": "draft_text is required"})
+    try:
+        from backend.src.mcp_bridge.claude_cli import use_cli
+        if _USE_CLI_IRONTOMB and use_cli():
+            from backend.src.mcp_bridge.claude_cli import simulate_flame_chase_journey_cli
+            result = simulate_flame_chase_journey_cli(_COMPANY, draft)
+        else:
+            from backend.src.agents.irontomb import simulate_flame_chase_journey
+            result = simulate_flame_chase_journey(_COMPANY, draft)
+    except Exception as e:
+        return json.dumps({"_error": f"reader call failed: {str(e)[:200]}"})
+
+    # Build a trajectory snapshot: the last 5 reactions from this session,
+    # each with the draft's first line and length so Stelle can distinguish
+    # "recent reactions on the post I'm iterating on now" from "earlier
+    # reactions on a different post." Lets her see whether her edits are
+    # moving the signal, not just the latest data point.
+    trajectory: list[dict] = []
+    for prior in _simulate_results[-5:]:
+        pr_result = prior.get("result", {}) or {}
+        pr_draft = prior.get("draft", "") or ""
+        trajectory.append({
+            "draft_first_line": pr_draft.split("\n")[0][:80] if pr_draft else "",
+            "draft_len": len(pr_draft),
+            "reaction": pr_result.get("reaction", ""),
+            "anchor": pr_result.get("anchor", ""),
+        })
+
+    # Persist THIS call so future invocations can see it as prior history.
+    _dh = result.get("_draft_hash", "")
+    _simulate_results.append({"draft_hash": _dh, "draft": draft, "result": result})
+
+    # Compose the return: current reaction + trajectory so Stelle can
+    # read both in one response.
+    enriched = dict(result)
+    if trajectory:
+        enriched["_prior_reactions"] = trajectory
+    return json.dumps(enriched, default=str)
+
+
 server.register(
-    name="simulate_flame_chase_journey",
+    name="get_reader_reaction",
     description=(
-        "MANDATORY before submitting any post. Send a draft through "
-        "Irontomb, the adversarial audience simulator. Returns "
-        "engagement_prediction, impression_prediction, would_stop_scrolling, "
-        "and a _gradient block showing predicted vs client median engagement. "
-        "Irontomb is your loss function — minimize the gap between predicted "
-        "and median engagement through revision."
+        "Send a draft to Irontomb, a rough-reader simulator. Returns "
+        "{reaction, anchor} — a short visceral reader-voice reaction and "
+        "a pointer to where in the post the reader reacted. Not a critique. "
+        "Stelle interprets and revises."
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "draft_text": {"type": "string", "description": "The full draft post text"},
+            "draft_text": {"type": "string"},
         },
         "required": ["draft_text"],
     },
-    handler=_handle_simulate,
+    handler=_handle_get_reader_reaction,
 )
 
 
@@ -325,52 +334,9 @@ def _handle_write_result(args: dict) -> str:
             "warnings": val_warnings,
         })
 
-    # Guard 1: iteration discipline
-    n_posts = len(parsed.get("posts", []))
-    min_required = max(3 * n_posts, 3)
-    if _simulate_call_count < min_required:
-        return json.dumps({
-            "_error": (
-                f"Iteration discipline: {_simulate_call_count} simulate calls "
-                f"but need {min_required} (3 per post). Go back and iterate."
-            ),
-        })
-
-    # Guard 2: would_stop_scrolling
-    failed_posts = []
-    for pi, post in enumerate(parsed.get("posts", []), 1):
-        pt = (post.get("text") or "").strip()
-        if not pt:
-            continue
-        ph = hashlib.sha256(pt.encode("utf-8")).hexdigest()[:16]
-        last = None
-        for sr in reversed(_simulate_results):
-            if sr["draft_hash"] == ph:
-                last = sr["result"]
-                break
-        if last and last.get("would_stop_scrolling") is False:
-            iv = (last.get("inner_voice") or "")[:120]
-            failed_posts.append(f"Post {pi}: would_stop_scrolling=False ({iv})")
-
-    if failed_posts:
-        return json.dumps({
-            "_error": "Scroll-stop check failed",
-            "failed_posts": failed_posts,
-            "instruction": "Revise hooks and re-simulate until would_stop_scrolling is True.",
-        })
-
-    # Stamp Irontomb predictions onto each post
-    for post in parsed.get("posts", []):
-        pt = (post.get("text") or "").strip()
-        if not pt:
-            continue
-        ph = hashlib.sha256(pt.encode("utf-8")).hexdigest()[:16]
-        for sr in reversed(_simulate_results):
-            if sr["draft_hash"] == ph:
-                r = sr["result"]
-                post["predicted_engagement"] = r.get("engagement_prediction")
-                post["predicted_impressions"] = r.get("impression_prediction")
-                break
+    # (Irontomb gates removed — simulate_flame_chase_journey is no
+    # longer part of Stelle's toolbelt during generation. Final-post
+    # Irontomb evaluation happens post-hoc in _process_result.)
 
     # Write the result to a known location so the caller can read it
     result_path = os.path.join(_PROJECT_ROOT, ".stelle_cli_result.json")
@@ -388,9 +354,7 @@ server.register(
     name="write_result",
     description=(
         "Submit your final posts (ends the session). Validates output "
-        "structure, enforces iteration discipline (min 3 simulate calls "
-        "per post), and checks would_stop_scrolling. Pass the full output "
-        "as a JSON string in result_json."
+        "structure. Pass the full output as a JSON string in result_json."
     ),
     input_schema={
         "type": "object",

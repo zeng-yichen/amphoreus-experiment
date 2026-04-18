@@ -30,3 +30,9 @@ data/
 _push_sync.tar.gz
 _memory_sync.tar.gz
 .runner-logs/
+
+# Run artifacts — CLI result caches, scratch drafts, generated reports
+.cyrene_cli_result.json
+.stelle_cli_result.json
+scratch/
+output/

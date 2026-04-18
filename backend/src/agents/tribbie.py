@@ -4,12 +4,13 @@ Tribbie — Live interview companion.
 Captures system audio via BlackHole virtual audio device, streams it to
 Deepgram Nova-3 (when DEEPGRAM_API_KEY is set) or transcribes locally with
 faster-whisper as fallback, and suggests follow-up questions using Claude
-Haiku with client context from memory files and Aglaea briefings.
+Opus 4.6 (via Claude CLI when AMPHOREUS_USE_CLI=1, else the Anthropic API)
+with client context from the Cyrene brief and past interview transcripts.
 
 Deepgram Nova-3 gives streaming diarization (who is speaking), domain
-keyterm prompting, and much lower WER than local Whisper — at ~$0.01-0.02
-per interview-hour. Falls back to faster-whisper's large-v3-turbo when no
-Deepgram key is configured.
+keyterm prompting, and much lower WER than local Whisper — at $0.0077/min
+monolingual (~$0.46 per 1-hour interview) pay-as-you-go. Falls back to
+faster-whisper's large-v3-turbo when no Deepgram key is configured.
 
 One-time BlackHole setup (Mac):
   1. brew install blackhole-2ch
@@ -27,7 +28,8 @@ import queue
 import re
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Callable
 
@@ -50,9 +52,15 @@ CHUNK_SECONDS = 0.1            # sounddevice callback interval (100ms for fast s
 SILENCE_THRESHOLD = 0.005      # RMS below this counts as silence
 SILENCE_GAP_SECONDS = 0.4      # consecutive silence → flush & transcribe buffer
 MAX_BUFFER_SECONDS = 8.0       # force-flush after this many seconds regardless
-MIN_SEGMENT_WORDS = 2          # min words in a segment to qualify for a Haiku suggestion
-SUGGESTION_COOLDOWN_SECONDS = 15  # minimum gap between Haiku calls
+MIN_SEGMENT_WORDS = 2          # min words in a segment to qualify for a follow-up suggestion
+SUGGESTION_COOLDOWN_SECONDS = 15  # minimum gap between Opus suggestion calls
 MAX_CONTEXT_CHARS = 150_000    # max chars of client context sent to Opus (200k ctx window)
+
+# Deepgram session reliability
+KEEPALIVE_INTERVAL_SECONDS = 5.0      # send {"type":"KeepAlive"} every N s to prevent idle close
+RECONNECT_BACKOFF_INITIAL = 1.0       # starting retry delay after a dropped connection
+RECONNECT_BACKOFF_MAX = 8.0           # cap on retry delay (exponential)
+RECONNECT_AUDIO_BUFFER_SECONDS = 2.0  # recent-audio replay window after a successful reconnect
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +272,7 @@ def _suggest_followup(
     transcript_so_far: str,
     anthropic_client,
 ) -> str | None:
-    """Suggest the single best follow-up question for the interviewer.
+    """Suggest three varied follow-up questions with a recommended pick.
 
     Routes through Claude CLI when AMPHOREUS_USE_CLI=1 (Max plan, no API
     spend). Falls through to the API path only when the flag is off —
@@ -283,34 +291,49 @@ def _suggest_followup(
 
     prompt = (
         "You are assisting a LinkedIn ghostwriter during a live 1-hour content "
-        "interview. Your job is to suggest the single next question that opens "
-        "up a rich conversational thread the client WANTS to talk about — one "
-        "that produces valuable raw material for posts without making the client "
-        "feel interrogated.\n\n"
+        "interview. Your job is to suggest THREE varied next-question options "
+        "the interviewer can choose from — one clearly marked as your top pick "
+        "— that open up rich conversational threads the client WANTS to talk "
+        "about and produce valuable raw material for posts without making the "
+        "client feel interrogated.\n\n"
         "## The quality bar\n\n"
-        "The interviewer should hear your question and think: *\"Oh — that's "
+        "The interviewer should hear a question and think: *\"Oh — that's "
         "something I actually have an opinion on.\"* That means the question "
         "found a topic the client cares about and has real experience with, "
         "but hasn't thought to talk about yet on LinkedIn. Generic prompts "
         "(\"tell me about hiring\", \"what are your thoughts on AI\") fail "
         "this bar automatically.\n\n"
-        "CRITICAL: Do NOT constantly push for specific memories, specific "
-        "moments, exact numbers, or named anecdotes. That pattern frustrates "
-        "clients — they feel cross-examined, not interviewed. Stelle can "
-        "extrapolate, composite, and fictionalize scenarios from general "
-        "conversation. Your job is to open doors to TOPICS, not to extract "
-        "depositions. If a specific story emerges naturally, great. If not, "
-        "a rich general answer about the client's perspective, beliefs, or "
-        "experience is just as valuable.\n\n"
-        "Good question shapes:\n"
-        "  - Opens a topic the client hasn't covered yet: *\"How do you think "
-        "    about X differently than most people in your space?\"*\n"
+        "## DO NOT over-drill for specifics — this is the #1 failure mode\n\n"
+        "Clients rarely recall exact moments, exact numbers, or named "
+        "anecdotes on demand. Constantly asking *\"what was the exact "
+        "moment…\"*, *\"can you tell me the specific time when…\"*, *\"what "
+        "was the exact number…\"* makes them feel cross-examined — they "
+        "stall, hedge, and disengage. Stelle (the post-writer downstream) can "
+        "extrapolate, composite, and fictionalize scenarios from a general "
+        "answer about the client's perspective or beliefs — a rich general "
+        "answer is just as valuable as a specific story. Asking for "
+        "specifics is fine IN MODERATION: across your three options, AT "
+        "MOST ONE may probe for a concrete moment/number/anecdote, and only "
+        "when the client has already hinted one exists. The other two must "
+        "open TOPICAL doors, not extract depositions.\n\n"
+        "Good question shapes (mix these across the three):\n"
+        "  - Opens a new topic the client hasn't covered yet: *\"How do you "
+        "    think about X differently than most people in your space?\"*\n"
         "  - Follows energy — builds on something the client was clearly "
         "    engaged by: *\"You seemed to light up when you mentioned Y — "
         "    what's the bigger story there?\"*\n"
         "  - Inverts the obvious: *\"Most people would frame this as a win — "
         "    what's the part nobody talks about?\"*\n"
-        "  - Surfaces a tension the client lives with but hasn't articulated.\n\n"
+        "  - Surfaces a tension the client lives with but hasn't articulated.\n"
+        "  - Invites a belief/stance: *\"What's a take you hold about Z that "
+        "    most of your peers would push back on?\"*\n\n"
+        "## Variety requirement\n\n"
+        "The three options must be MEANINGFULLY different — not paraphrases. "
+        "Good variety comes from mixing angle or topic, e.g.:\n"
+        "  - one that drills deeper on the CURRENT thread,\n"
+        "  - one that PIVOTS to an unaddressed item from content_priorities,\n"
+        "  - one that INVERTS or reframes what was just said.\n"
+        "If two options would produce roughly the same post, replace one.\n\n"
         "## Your three judgments, in order\n\n"
         "  1. REDUNDANCY. Has this topic — or the natural follow-up to what was "
         "just said — already been covered in <past_transcripts> or earlier in "
@@ -335,27 +358,30 @@ def _suggest_followup(
         f"{context_blocks}\n\n"
         f"<current_session>\n{snippet}\n</current_session>\n\n"
         f"<just_said>\n{segment}\n</just_said>\n\n"
-        "Reply in exactly two lines:\n"
-        "Line 1: one short italicised note naming which judgment drove this — "
-        "e.g. *Pivoting: the MTTR thread is saturated, haven't touched the "
-        "50→200 hiring angle from content_priorities yet* or *Drilling: inverting "
-        "the obvious win-framing because the cost hasn't surfaced* or *Skipping "
-        "the obvious follow-up — that ground was covered in the Q2 transcript*.\n"
-        "Line 2: the question itself — natural, conversational, specific, one "
-        "sentence, and meeting the \"amazing post idea\" bar."
+        "## Reply format — follow EXACTLY, no preamble\n\n"
+        "Line 1: one short italicised note naming which judgment drove your "
+        "recommended pick, and briefly what angles the three cover — e.g. "
+        "*Pivoting: MTTR thread saturated. Recommending the 50→200 hiring "
+        "angle; alts drill on current thread and invert the win-framing.*\n"
+        "Line 2: blank.\n"
+        "Line 3: ★ RECOMMENDED: <your top-pick question, one sentence>\n"
+        "Line 4: · <alternative angle, one sentence>\n"
+        "Line 5: · <alternative angle, one sentence>\n"
+        "Each question must be natural, conversational, and meet the "
+        "\"amazing post idea\" bar. No numbering, no extra commentary."
     )
 
     from backend.src.mcp_bridge.claude_cli import use_cli as _use_cli, cli_single_shot as _cli_ss
     if _use_cli():
-        # 60s timeout is plenty for a 200-token opus response; live
-        # interview cadence tolerates 2-5s per suggestion.
-        txt = _cli_ss(prompt, model="opus", max_tokens=250, timeout=60)
+        # 60s timeout fits a ~600-token opus response; live interview
+        # cadence tolerates 3-6s per suggestion.
+        txt = _cli_ss(prompt, model="opus", max_tokens=600, timeout=60)
         return txt.strip() if txt else None
 
     try:
         response = anthropic_client.messages.create(
             model="claude-opus-4-6",
-            max_tokens=250,
+            max_tokens=600,
             messages=[{"role": "user", "content": prompt}],
         )
         return response.content[0].text.strip() if response.content else None
@@ -497,7 +523,38 @@ def _run_deepgram_session(
 
     keyterms = _extract_keyterms(company)
     dg_client = DeepgramClient(os.environ["DEEPGRAM_API_KEY"])
-    conn = dg_client.listen.websocket.v("1")
+
+    # Connection state shared across reconnects. A list holding the live
+    # connection object lets the audio/keepalive callbacks indirect through
+    # a mutable slot without re-entrancy gymnastics.
+    conn_ref: list = [None]
+    conn_lock = threading.Lock()
+    needs_reconnect = threading.Event()
+
+    # LEVEL 3 — Suggestion executor. Running _suggest_followup inline in
+    # on_transcript blocked the Deepgram SDK's event thread during the
+    # synchronous Claude call (seconds). That starved its keepalive ping
+    # and Deepgram closed the socket with 1011. Fire-and-forget on a
+    # dedicated worker keeps the ws thread responsive.
+    suggestion_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tribbie-suggest")
+
+    # LEVEL 2 — Ring buffer of recent PCM chunks. After a reconnect we
+    # replay the tail so words spoken during the gap aren't lost.
+    chunk_frames = int(SAMPLE_RATE * CHUNK_SECONDS)
+    max_buffered_chunks = max(1, int(RECONNECT_AUDIO_BUFFER_SECONDS / CHUNK_SECONDS))
+    audio_ring: deque[bytes] = deque(maxlen=max_buffered_chunks)
+
+    def _run_suggestion(text: str, transcript_so_far: str) -> None:
+        try:
+            suggestion = _suggest_followup(text, context, transcript_so_far, anthropic_client)
+            if suggestion:
+                event_callback("tool_result", {
+                    "name": "follow_up",
+                    "result": suggestion,
+                    "is_error": False,
+                })
+        except Exception as e:
+            logger.warning("[Tribbie] suggestion worker error: %s", e)
 
     def on_transcript(_client, result, **_kwargs) -> None:
         try:
@@ -538,50 +595,69 @@ def _run_deepgram_session(
             ):
                 last_suggestion_time[0] = now
                 transcript_so_far = "\n".join(transcript_lines)
-                suggestion = _suggest_followup(text, context, transcript_so_far, anthropic_client)
-                if suggestion:
-                    event_callback("tool_result", {
-                        "name": "follow_up",
-                        "result": suggestion,
-                        "is_error": False,
-                    })
+                # Dispatch to the suggestion worker so the ws thread returns
+                # immediately (LEVEL 3).
+                try:
+                    suggestion_pool.submit(_run_suggestion, text, transcript_so_far)
+                except Exception as e:
+                    logger.debug("[Tribbie] suggestion submit failed: %s", e)
         except Exception as e:
             logger.warning("[Tribbie] Deepgram on_transcript error: %s", e)
 
     def on_error(_client, error, **_kwargs) -> None:
         msg = getattr(error, "message", None) or str(error)
         logger.warning("[Tribbie] Deepgram error event: %s", msg)
-        event_callback("status", {"message": f"Deepgram: {msg}"})
+        if not stop_event.is_set():
+            event_callback("error", {"message": f"Deepgram error: {msg} (will reconnect)"})
+            needs_reconnect.set()
 
-    conn.on(LiveTranscriptionEvents.Transcript, on_transcript)
-    conn.on(LiveTranscriptionEvents.Error, on_error)
+    def on_close(_client, close, **_kwargs) -> None:
+        code = getattr(close, "code", None)
+        reason = (
+            getattr(close, "reason", None)
+            or getattr(close, "message", None)
+            or ""
+        )
+        logger.warning("[Tribbie] Deepgram connection closed (code=%s, reason=%s)", code, reason)
+        if not stop_event.is_set():
+            event_callback("status", {"message": f"Deepgram disconnected (code={code}), reconnecting…"})
+            needs_reconnect.set()
 
-    options_kwargs = dict(
-        model="nova-3",
-        language="en-US",
-        smart_format=True,
-        punctuate=True,
-        encoding="linear16",
-        sample_rate=SAMPLE_RATE,
-        channels=1,
-        diarize=True,
-        interim_results=False,
-        vad_events=True,
-        endpointing=500,  # ms silence → emit final transcript
-    )
-    if keyterms:
-        # Nova-3 feature. Older SDKs may not know this kwarg; try it, and
-        # drop it silently if LiveOptions rejects it.
-        try:
-            options = LiveOptions(**options_kwargs, keyterm=keyterms)
-        except TypeError:
-            logger.info("[Tribbie] Deepgram SDK doesn't accept keyterm kwarg — proceeding without.")
-            options = LiveOptions(**options_kwargs)
-    else:
-        options = LiveOptions(**options_kwargs)
+    def _build_options() -> "LiveOptions":
+        options_kwargs = dict(
+            model="nova-3",
+            language="en-US",
+            smart_format=True,
+            punctuate=True,
+            encoding="linear16",
+            sample_rate=SAMPLE_RATE,
+            channels=1,
+            diarize=True,
+            interim_results=False,
+            vad_events=True,
+            endpointing=500,  # ms silence → emit final transcript
+        )
+        if keyterms:
+            # Nova-3 feature. Older SDKs may not know this kwarg; try it, and
+            # drop it silently if LiveOptions rejects it.
+            try:
+                return LiveOptions(**options_kwargs, keyterm=keyterms)
+            except TypeError:
+                logger.info("[Tribbie] Deepgram SDK doesn't accept keyterm kwarg — proceeding without.")
+        return LiveOptions(**options_kwargs)
 
-    if not conn.start(options):
-        raise RuntimeError("Deepgram start() returned False")
+    def _open_connection():
+        conn = dg_client.listen.websocket.v("1")
+        conn.on(LiveTranscriptionEvents.Transcript, on_transcript)
+        conn.on(LiveTranscriptionEvents.Error, on_error)
+        conn.on(LiveTranscriptionEvents.Close, on_close)
+        if not conn.start(_build_options()):
+            raise RuntimeError("Deepgram start() returned False")
+        return conn
+
+    # Initial open.
+    with conn_lock:
+        conn_ref[0] = _open_connection()
 
     event_callback("status", {
         "message": (
@@ -595,11 +671,109 @@ def _run_deepgram_session(
             return
         try:
             pcm = (np.clip(indata, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
-            conn.send(pcm)
+            audio_ring.append(pcm)  # always buffer so reconnect can replay
+            if needs_reconnect.is_set():
+                return  # socket is being rebuilt; don't spam send()
+            conn = conn_ref[0]
+            if conn is None:
+                return
+            try:
+                conn.send(pcm)
+            except Exception as e:
+                logger.debug("[Tribbie] Deepgram send failed, marking reconnect: %s", e)
+                needs_reconnect.set()
         except Exception as e:
-            logger.debug("[Tribbie] Deepgram send failed: %s", e)
+            logger.debug("[Tribbie] audio_cb outer error: %s", e)
 
-    chunk_frames = int(SAMPLE_RATE * CHUNK_SECONDS)
+    # LEVEL 1 — KeepAlive thread. Deepgram's docs: sending a
+    # `{"type":"KeepAlive"}` control message every <12s prevents the server
+    # from closing an idle socket when the audio source goes quiet. Today's
+    # drop at 14:12:50 was a keepalive ping timeout during a silent stretch.
+    def _keepalive_loop() -> None:
+        while not stop_event.is_set():
+            # Responsive to stop_event; don't sleep the whole interval blindly.
+            slept = 0.0
+            while slept < KEEPALIVE_INTERVAL_SECONDS and not stop_event.is_set():
+                time.sleep(0.25)
+                slept += 0.25
+            if stop_event.is_set():
+                break
+            if needs_reconnect.is_set():
+                continue
+            conn = conn_ref[0]
+            if conn is None:
+                continue
+            try:
+                conn.keep_alive()
+            except Exception as e:
+                logger.debug("[Tribbie] keepalive failed, marking reconnect: %s", e)
+                needs_reconnect.set()
+
+    keepalive_thread = threading.Thread(
+        target=_keepalive_loop, name="tribbie-keepalive", daemon=True,
+    )
+    keepalive_thread.start()
+
+    # LEVEL 2 — Reconnect supervisor. Watches needs_reconnect, tears down
+    # the dead conn, rebuilds with exponential backoff, replays the recent
+    # audio buffer so the gap is near-invisible to the interviewer.
+    def _reconnect_supervisor() -> None:
+        backoff = RECONNECT_BACKOFF_INITIAL
+        while not stop_event.is_set():
+            if not needs_reconnect.wait(timeout=0.5):
+                continue
+            if stop_event.is_set():
+                break
+            logger.warning("[Tribbie] reconnect triggered")
+            event_callback("status", {"message": "Reconnecting to Deepgram…"})
+
+            # Tear down the dead connection.
+            with conn_lock:
+                old_conn = conn_ref[0]
+                conn_ref[0] = None
+            if old_conn is not None:
+                try:
+                    old_conn.finish()
+                except Exception:
+                    pass
+
+            # Backoff sleep, responsive to stop_event.
+            slept = 0.0
+            while slept < backoff and not stop_event.is_set():
+                time.sleep(0.1)
+                slept += 0.1
+            if stop_event.is_set():
+                break
+
+            # Rebuild.
+            try:
+                new_conn = _open_connection()
+            except Exception as e:
+                logger.warning("[Tribbie] reconnect failed: %s (retrying)", e)
+                backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX)
+                # Keep needs_reconnect set so the loop immediately retries.
+                continue
+
+            with conn_lock:
+                conn_ref[0] = new_conn
+
+            # Replay the last ~RECONNECT_AUDIO_BUFFER_SECONDS of audio so we
+            # don't lose words spoken during the drop.
+            try:
+                for buffered in list(audio_ring):
+                    new_conn.send(buffered)
+            except Exception as e:
+                logger.debug("[Tribbie] audio replay failed (will continue): %s", e)
+
+            needs_reconnect.clear()
+            backoff = RECONNECT_BACKOFF_INITIAL
+            event_callback("status", {"message": "Deepgram reconnected. Recording resumed."})
+
+    reconnect_thread = threading.Thread(
+        target=_reconnect_supervisor, name="tribbie-reconnect", daemon=True,
+    )
+    reconnect_thread.start()
+
     try:
         with sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -616,8 +790,18 @@ def _run_deepgram_session(
         logger.exception("[Tribbie] Fatal error in Deepgram capture loop")
         event_callback("error", {"message": str(e)})
     finally:
+        stop_event.set()
+        needs_reconnect.set()  # wake the supervisor so it can exit
         try:
-            conn.finish()
+            with conn_lock:
+                conn = conn_ref[0]
+                conn_ref[0] = None
+            if conn is not None:
+                conn.finish()
+        except Exception:
+            pass
+        try:
+            suggestion_pool.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
         _sessions.pop(job_id, None)

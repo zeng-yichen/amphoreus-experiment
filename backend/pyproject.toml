@@ -27,7 +27,7 @@ dependencies = [
 
     # Audio capture + transcription
     "faster-whisper>=1.0.0",          # local fallback path
-    "deepgram-sdk>=3.7.0",            # Nova-3 streaming (primary path)
+    "deepgram-sdk>=3.7.0,<4.0.0",     # Nova-3 streaming (primary path). v4+ is a breaking rewrite (no LiveOptions / LiveTranscriptionEvents) — stay on the v3 line used by tribbie.py.
     "sounddevice>=0.5.0",
     "numpy>=1.26.0",
 

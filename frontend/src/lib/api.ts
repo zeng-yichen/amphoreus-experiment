@@ -408,34 +408,6 @@ export const imagesApi = {
     `${API_BASE}/api/images/${company}/${imageId}`,
 };
 
-// --- Research ---
-
-export const researchApi = {
-  web: (highlightedText: string, query: string) =>
-    apiFetch<{ result: string }>("/api/research/web", {
-      method: "POST",
-      body: JSON.stringify({ highlighted_text: highlightedText, query }),
-    }),
-
-  documents: (company: string, question: string, draftText?: string) =>
-    apiFetch<{ result: string }>("/api/research/documents", {
-      method: "POST",
-      body: JSON.stringify({ company, question, draft_text: draftText }),
-    }),
-
-  source: (snippet: string, company: string) =>
-    apiFetch<{ result: string }>("/api/research/source", {
-      method: "POST",
-      body: JSON.stringify({ snippet, company }),
-    }),
-
-  abm: (company: string) =>
-    apiFetch<{ result: string }>("/api/research/abm", {
-      method: "POST",
-      body: JSON.stringify({ company }),
-    }),
-};
-
 // --- Clients ---
 
 export const clientsApi = {

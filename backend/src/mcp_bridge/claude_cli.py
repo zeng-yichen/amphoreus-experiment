@@ -331,15 +331,10 @@ def simulate_flame_chase_journey_cli(
                 "_raw_stdout_tail": proc.stdout[-500:] if proc.stdout else "",
             }
 
-        # Build the same return shape as the API path
+        # Build the same return shape as the API path (2-field schema).
         result = {
-            "engagement_prediction": reaction.get("engagement_prediction"),
-            "impression_prediction": reaction.get("impression_prediction"),
-            "would_stop_scrolling": reaction.get("would_stop_scrolling"),
-            "would_react": reaction.get("would_react"),
-            "would_comment": reaction.get("would_comment"),
-            "would_share": reaction.get("would_share"),
-            "inner_voice": reaction.get("inner_voice", ""),
+            "reaction": reaction.get("reaction", ""),
+            "anchor": reaction.get("anchor", ""),
             "_draft_hash": dh,
             "_via": "cli",
             "_elapsed_s": round(elapsed, 1),
@@ -418,7 +413,7 @@ def _extract_reaction_from_json(stdout: str) -> Optional[dict]:
     loop — its arguments were passed to the MCP server which echoed
     them back. The model's `result` text often summarizes its prediction.
 
-    Strategy: look for engagement_prediction in the result text
+    Strategy: look for the reaction/anchor fields in the result text
     (the MCP server echoes back the submitted fields as JSON).
     """
     try:
@@ -428,14 +423,12 @@ def _extract_reaction_from_json(stdout: str) -> Optional[dict]:
 
     result_text = cli_result.get("result", "")
 
-    # Try to find a JSON object with engagement_prediction in the text
-    # The model might include it inline or the tool result echoed it
+    # Look for a JSON block containing the new 2-field schema
     import re
-    # Look for JSON-like blocks in the result
-    for match in re.finditer(r'\{[^{}]*"engagement_prediction"[^{}]*\}', result_text):
+    for match in re.finditer(r'\{[^{}]*"reaction"[^{}]*\}', result_text):
         try:
             data = json.loads(match.group())
-            if "engagement_prediction" in data:
+            if "reaction" in data:
                 return data
         except json.JSONDecodeError:
             continue
@@ -443,29 +436,14 @@ def _extract_reaction_from_json(stdout: str) -> Optional[dict]:
     # Try parsing the entire result as JSON
     try:
         data = json.loads(result_text)
-        if "engagement_prediction" in data:
+        if isinstance(data, dict) and "reaction" in data:
             return data
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # The submit_reaction tool echoes {"submitted": true, ...} back.
-    # The model sees this and might report the numbers in prose.
-    # Try to extract from prose patterns.
-    eng_match = re.search(r'engagement_prediction["\s:]+(\d+\.?\d*)', result_text)
-    imp_match = re.search(r'impression_prediction["\s:]+(\d+)', result_text)
-    stop_match = re.search(r'would_stop_scrolling["\s:]+(\w+)', result_text)
-
-    if eng_match:
-        return {
-            "engagement_prediction": float(eng_match.group(1)),
-            "impression_prediction": int(imp_match.group(1)) if imp_match else 0,
-            "would_stop_scrolling": stop_match.group(1).lower() == "true" if stop_match else True,
-            "would_react": True,
-            "would_comment": False,
-            "would_share": False,
-            "_parsed_from_prose": True,
-        }
-
+    # No prose-extraction fallback — if the tool call didn't surface
+    # structured reaction/anchor fields, return None so the caller can
+    # error cleanly rather than synthesize spurious content.
     return None
 
 

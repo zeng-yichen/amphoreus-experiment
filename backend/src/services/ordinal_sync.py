@@ -34,7 +34,12 @@ _SYNC_MUTEX = threading.Lock()
 # commenda profiles (Sam and Logan — same Ordinal workspace, different
 # LinkedIn profiles, different content). The CSV slug is authoritative:
 # commenda-eb4e93-sam and commenda-eb4e93-logan, not commenda-eb4e93.
+# 2026-04-17: added Marghi's and Millie's full rosters so ordinal sync +
+# Apify engager fetch run for them on each cycle. Slugs without a CSV row
+# (caspian, commenda-eb4e93-{logan,sam}) will still be skipped at the CSV
+# iteration step — allowlist membership is necessary but not sufficient.
 _ACTIVE_CLIENT_ALLOWLIST: set[str] | None = {
+    # Original active set
     "innovocommerce",
     "hensley-biostats",
     "trimble-mark",
@@ -44,6 +49,22 @@ _ACTIVE_CLIENT_ALLOWLIST: set[str] | None = {
     "commenda-eb4e93-sam",
     "commenda-eb4e93-logan",
     "caspian",
+    # Marghi's roster (2026-04-17). commenda-eb4e93 root removed — the
+    # workspace is shared; sync runs via commenda-eb4e93-{logan,sam} sub-slugs
+    # (same api_key, filtered by linkedin_username.txt per sub-slug).
+    "crescendo",
+    "flex-e08208",
+    "futurify",
+    "levelup",
+    "percents",
+    # Millie's roster (2026-04-17)
+    "aicro",
+    "hobbes-0498a8",
+    "koah",
+    "overwolf",
+    "tandem-rafi",
+    "vendelux-alex",
+    "virioai",
 }
 
 
@@ -194,14 +215,16 @@ def _sync_recent_engagement_impl() -> None:
         with open(csv_path, mode="r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                api_key = row.get("api_key", "").strip()
-                company = row.get("provider_org_slug", "").strip() or row.get("company_id", "").strip()
+                # csv.DictReader can yield None for empty/missing cells, which
+                # would crash .strip() — (x or "") handles both None and absent.
+                api_key = (row.get("api_key") or "").strip()
+                company = (row.get("provider_org_slug") or "").strip() or (row.get("company_id") or "").strip()
                 if not api_key or not company:
                     continue
                 if _ACTIVE_CLIENT_ALLOWLIST is not None and company not in _ACTIVE_CLIENT_ALLOWLIST:
                     continue
 
-                profile_id = row.get("profile_id", "").strip()
+                profile_id = (row.get("profile_id") or "").strip()
                 if not profile_id:
                     profile_id = vortex.resolve_profile_id(company)
                 if not profile_id:
@@ -255,8 +278,8 @@ def sync_all_companies() -> None:
         with open(csv_path, mode="r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                api_key = row.get("api_key", "").strip()
-                company = row.get("provider_org_slug", "").strip() or row.get("company_id", "").strip()
+                api_key = (row.get("api_key") or "").strip()
+                company = (row.get("provider_org_slug") or "").strip() or (row.get("company_id") or "").strip()
                 if api_key and company:
                     # Gate: skip per-client processing for inactive clients
                     if _ACTIVE_CLIENT_ALLOWLIST is not None and company not in _ACTIVE_CLIENT_ALLOWLIST:
@@ -270,7 +293,7 @@ def sync_all_companies() -> None:
                     current_client_slug.set(company)
 
                     # RuanMei: ingest all posts + update pending observations.
-                    profile_id = row.get("profile_id", "").strip()
+                    profile_id = (row.get("profile_id") or "").strip()
                     if not profile_id:
                         profile_id = vortex.resolve_profile_id(company)
                     if profile_id:
@@ -598,15 +621,15 @@ def fetch_ordinal_posts_for(company: str) -> list[dict] | None:
         with open(csv_path, mode="r", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 slug = (
-                    row.get("provider_org_slug", "").strip()
-                    or row.get("company_id", "").strip()
+                    (row.get("provider_org_slug") or "").strip()
+                    or (row.get("company_id") or "").strip()
                 )
                 if slug != company:
                     continue
-                api_key = row.get("api_key", "").strip()
+                api_key = (row.get("api_key") or "").strip()
                 if not api_key:
                     return None
-                profile_id = row.get("profile_id", "").strip() or vortex.resolve_profile_id(company)
+                profile_id = (row.get("profile_id") or "").strip() or vortex.resolve_profile_id(company)
                 if not profile_id:
                     return None
                 return _fetch_ordinal_analytics(profile_id, api_key, company)

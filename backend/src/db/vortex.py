@@ -210,7 +210,7 @@ def resolve_profile_id(company: str) -> str:
 
     target_row = None
     for row in rows:
-        slug = row.get("provider_org_slug", "").strip()
+        slug = (row.get("provider_org_slug") or "").strip()
         if slug == company:
             target_row = row
             break
@@ -218,11 +218,11 @@ def resolve_profile_id(company: str) -> str:
     if target_row is None:
         return ""
 
-    existing = target_row.get("profile_id", "").strip()
+    existing = (target_row.get("profile_id") or "").strip()
     if existing:
         return existing
 
-    api_key = target_row.get("api_key", "").strip()
+    api_key = (target_row.get("api_key") or "").strip()
     if not api_key:
         return ""
 

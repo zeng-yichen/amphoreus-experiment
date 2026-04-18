@@ -229,12 +229,13 @@ class Hyacinthia:
             with open(self.auth_csv_path, mode='r', encoding='utf-8') as file:
                 reader = csv.DictReader(file)
                 for row in reader:
-                    c_id = row.get("company_id", "").strip().lower()
-                    slug = row.get("provider_org_slug", "").strip().lower()
+                    # csv.DictReader yields None for empty cells — coerce to "".
+                    c_id = (row.get("company_id") or "").strip().lower()
+                    slug = (row.get("provider_org_slug") or "").strip().lower()
                     target = company_keyword.strip().lower()
-                    
+
                     if c_id == target or slug == target:
-                        key = row.get("api_key", "").strip()
+                        key = (row.get("api_key") or "").strip()
                         if key:
                             return key
         except Exception as e:

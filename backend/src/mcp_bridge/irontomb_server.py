@@ -132,45 +132,33 @@ server.register(
 server.register(
     name="submit_reaction",
     description=(
-        "Submit your general-audience prediction for a draft LinkedIn post. "
-        "Six fields + one optional debug field. No prose critique, no "
-        "fix suggestions. You are predicting how the BROAD LinkedIn "
-        "audience will react, not a narrow target segment."
+        "Submit your reader reaction. Ends the session.\n"
+        "  reaction — under-15-word reader-voice reaction\n"
+        "  anchor   — where in the post you reacted"
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "engagement_prediction": {
-                "type": "number",
+            "reaction": {
+                "type": "string",
                 "description": (
-                    "Predicted reactions per 1000 impressions for a post "
-                    "like this one from this client."
+                    "Your raw, visceral, under-15-word reaction as a "
+                    "LinkedIn reader. Not a critique. Not writing-teacher "
+                    "vocabulary. The thing that actually flashes through "
+                    "your head while scrolling."
                 ),
             },
-            "impression_prediction": {
-                "type": "integer",
-                "description": "Predicted total impressions this post would receive.",
-            },
-            "would_stop_scrolling": {
-                "type": "boolean",
-                "description": "Would a typical LinkedIn user stop and read this?",
-            },
-            "would_react": {"type": "boolean", "description": "Would they tap a reaction?"},
-            "would_comment": {"type": "boolean", "description": "Would they comment?"},
-            "would_share": {"type": "boolean", "description": "Would they share/repost?"},
-            "inner_voice": {
+            "anchor": {
                 "type": "string",
-                "description": "Optional: one-sentence gut reaction from a reader's perspective.",
+                "description": (
+                    "Where in the post you reacted. Quote 3-5 words "
+                    "from the post, OR \"paragraph N\", OR \"at the "
+                    "end\", OR \"hook\", OR \"never got past the first "
+                    "line\"."
+                ),
             },
         },
-        "required": [
-            "engagement_prediction",
-            "impression_prediction",
-            "would_stop_scrolling",
-            "would_react",
-            "would_comment",
-            "would_share",
-        ],
+        "required": ["reaction", "anchor"],
     },
     # submit_reaction just echoes back — the caller parses it from the output
     handler=lambda args: json.dumps({"submitted": True, **args}),

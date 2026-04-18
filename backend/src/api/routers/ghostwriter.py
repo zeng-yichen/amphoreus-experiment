@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -14,14 +14,37 @@ router = APIRouter(prefix="/api/ghostwriter", tags=["ghostwriter"])
 
 
 class GenerateRequest(BaseModel):
-    company: str
+    """Request body for /api/ghostwriter/generate.
+
+    Accepts either ``company`` (historical slug like "hume-andrew") or
+    ``companyId`` (Lineage UUID like "9abcb96e-..."). When both are present
+    the slug wins. When only companyId is present we treat this as a
+    Lineage-mode run and resolve the workspace via HTTP tool calls back
+    into virio-api rather than local /data/memory/.
+    """
+
+    company: str | None = None
+    companyId: str | None = None
     prompt: str | None = None
     model: str = "claude-opus-4-6"
 
 
 class InlineEditRequest(BaseModel):
-    company: str
-    post_text: str
+    """Inline-edit request body.
+
+    Accepts two shapes for backward compat:
+      - Amphoreus-native:  {company, post_text, instruction}
+      - Jacquard proxy:    {companyId, draftId, selectedText, instruction,
+                            selectionStart?, selectionEnd?}
+
+    The handler normalizes both into (identifier, text, instruction).
+    """
+
+    company: str | None = None
+    companyId: str | None = None
+    draftId: str | None = None
+    post_text: str | None = None
+    selectedText: str | None = None
     instruction: str
 
 
@@ -32,30 +55,93 @@ class LinkedInUsernameRequest(BaseModel):
 
 
 @router.post("/generate")
-async def generate(req: GenerateRequest):
+async def generate(req: GenerateRequest, request: Request):
     """Start a ghostwriter generation job as a DETACHED subprocess.
 
-    Previously this handler spawned Stelle as an in-process background
-    thread. That was fatal under ``uvicorn --reload``: any edit to a
-    backend .py file during a 20-minute generation run would hot-reload
-    the FastAPI process and kill the in-flight thread, losing the batch
-    (or half of it, as happened on April 11).
+    Accepts either ``company`` (local slug) or ``companyId`` (Lineage UUID).
+    When ``companyId`` is present AND the request carries an
+    ``X-Lineage-Workspace-URL`` header, the runner operates in Lineage
+    mode: all filesystem tool calls go through HTTP to that workspace
+    URL (backed by ``Authorization`` bearer), and drafts land in Lineage's
+    Supabase ``drafts`` table rather than Amphoreus SQLite.
 
-    The new flow:
+    Behind CF Access (service-token bypass). Email auth is disabled on
+    this deployment — see ``cf_access.py`` for the bypass path.
 
-      1. Create a run record + job_id in SQLite (same as before)
-      2. Spawn ``backend.src.agents.stelle_runner`` as a subprocess with
-         ``start_new_session=True`` so it lives in its own process group
-         and survives parent process death
-      3. Return the job_id immediately; the frontend connects to
-         ``/stream/{job_id}`` for SSE events
-      4. The runner writes events directly to the ``run_events`` SQLite
-         table, and ``drain_events`` polls that table in addition to
-         the in-memory queue, so the SSE endpoint sees subprocess events
-      5. On parent restart, the runner keeps going; a new SSE
-         connection simply reconnects and resumes streaming from the
-         last-seen event id
+    The detached subprocess pattern survives uvicorn hot-reloads via
+    ``start_new_session=True`` (new process group not signaled on parent
+    death). Frontend reconnects to ``/stream/{job_id}`` for resumable SSE.
     """
+    # Pick the identifier: slug preferred (it's human-readable and matches
+    # every downstream path Stelle constructs). If only the Lineage UUID
+    # was supplied we use it as-is and let Lineage mode take over.
+    identifier = req.company or req.companyId
+    if not identifier:
+        raise HTTPException(
+            status_code=400,
+            detail="generate requires either 'company' (slug) or 'companyId' (UUID)",
+        )
+
+    # Only run the body-based ACL check when we have a real slug and the
+    # request came through a user identity. Lineage-mode requests via the
+    # CF service token have no user.email and skip this anyway (admin bypass
+    # in middleware.py:138-145).
+    from backend.src.auth.middleware import require_client_body
+    if req.company:
+        require_client_body(request, req.company)
+
+    # Lineage mode: the proxy forwards the workspace URL (for reverse tool
+    # calls) and a per-run JWT (as Authorization). We forward both to the
+    # runner via env vars since ContextVars don't cross process boundaries.
+    lineage_workspace_url = request.headers.get("x-lineage-workspace-url")
+    lineage_run_token: str | None = None
+    auth_header = request.headers.get("authorization") or ""
+    if auth_header.lower().startswith("bearer "):
+        lineage_run_token = auth_header.split(" ", 1)[1].strip()
+    lineage_mode = bool(lineage_workspace_url and lineage_run_token and req.companyId)
+
+    # User-targeted mode (optional): Jacquard forwards a FOC-user UUID
+    # via ``X-Lineage-User-Id``. We resolve it to a slug here (Amphoreus
+    # owns the FOC-slug convention — Jacquard stays decoupled). The slug
+    # is what the runner and filesystem client need downstream.
+    lineage_user_slug: str | None = None
+    lineage_user_id = request.headers.get("x-lineage-user-id") or None
+    if lineage_mode and lineage_user_id:
+        from backend.src.db.supabase_client import get_supabase
+        sb = get_supabase()
+        row = (
+            sb.table("users")
+              .select("id, first_name, last_name, company_id")
+              .eq("id", lineage_user_id)
+              .limit(1)
+              .execute()
+        )
+        users = row.data or []
+        if not users:
+            raise HTTPException(
+                status_code=404,
+                detail=f"userId {lineage_user_id} not found",
+            )
+        user = users[0]
+        if req.companyId and user.get("company_id") != req.companyId:
+            raise HTTPException(
+                status_code=403,
+                detail=f"user {lineage_user_id} does not belong to company {req.companyId}",
+            )
+        # Match the slug convention used by Jacquard's supabase-fs
+        # (``{first} {last}`` → lowercase, non-alnum → dash, trimmed).
+        import re
+        name = " ".join(
+            filter(None, [user.get("first_name"), user.get("last_name")])
+        )
+        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+        if not slug:
+            raise HTTPException(
+                status_code=422,
+                detail=f"user {lineage_user_id} has no first_name/last_name to slugify",
+            )
+        lineage_user_slug = slug
+
     import subprocess
     import sys
     from pathlib import Path
@@ -63,10 +149,12 @@ async def generate(req: GenerateRequest):
 
     # Capture the authenticated user's email from the ContextVar before
     # spawning the subprocess (ContextVars don't cross process boundaries).
-    user_email = current_user_email.get()
+    # In Lineage mode the user email may come from the X-Lineage-User-Email
+    # header rather than the CF identity (which is a service token).
+    user_email = current_user_email.get() or request.headers.get("x-lineage-user-email")
 
     job_id = job_manager.create_job(
-        client_slug=req.company,
+        client_slug=identifier,
         agent="stelle",
         prompt=req.prompt,
         creator_id=user_email,
@@ -79,7 +167,7 @@ async def generate(req: GenerateRequest):
     cmd = [
         sys.executable,
         "-m", "backend.src.agents.stelle_runner",
-        "--company", req.company,
+        "--company", identifier,
         "--job-id", job_id,
         "--model", req.model,
     ]
@@ -87,6 +175,14 @@ async def generate(req: GenerateRequest):
         cmd.extend(["--prompt", req.prompt])
     if user_email:
         cmd.extend(["--user-email", user_email])
+    if lineage_mode:
+        cmd.extend([
+            "--lineage-workspace-url", lineage_workspace_url,  # type: ignore[arg-type]
+            "--lineage-run-token", lineage_run_token,           # type: ignore[arg-type]
+            "--company-id", req.companyId or "",
+        ])
+        if lineage_user_slug:
+            cmd.extend(["--lineage-user-slug", lineage_user_slug])
 
     # Subprocess log file (separate from Stelle's session log so we can
     # debug runner-level issues independently)
@@ -122,6 +218,68 @@ async def generate(req: GenerateRequest):
     return {"job_id": job_id, "status": "pending", "runner_pid": proc.pid}
 
 
+@router.get("/sandbox/stream")
+async def stream_for_company(companyId: str, after_id: int = 0):
+    """Per-company bridge that streams the latest run's events.
+
+    Jacquard's ``GhostwriterTerminal`` opens one long-lived SSE connection
+    per company (not per job), because in Pi's architecture the event bus
+    was per-company. Amphoreus's native stream is per-job, so this endpoint
+    resolves ``companyId`` → most recent run → forwards to the per-job
+    SSE generator.
+
+    If no run exists for the company, we emit an ``idle`` status event and
+    close. If a run is in-flight, we stream its events (with ``after_id``
+    resumption) until ``done``/``error`` or the client disconnects.
+    """
+    from backend.src.db.local import list_runs
+    runs = list_runs(companyId, limit=1)
+    if not runs:
+        # No run yet for this company. Hold the connection open with SSE
+        # COMMENT lines (ignored by the client) while polling for a new
+        # run every few seconds. When one appears, PIVOT the same open
+        # connection into streaming that run's events — so the user's
+        # click on Generate immediately starts filling the terminal without
+        # needing to reconnect.
+        import asyncio as _asyncio
+        async def _idle_then_pivot():
+            yield ": idle - no run for this company yet\n\n"
+            try:
+                while True:
+                    await _asyncio.sleep(3)
+                    yield ": keepalive\n\n"
+                    new_runs = list_runs(companyId, limit=1)
+                    if new_runs:
+                        new_job_id = new_runs[0].get("id")
+                        if new_job_id:
+                            # Hand off to the per-job SSE generator —
+                            # same one /stream/{job_id} uses — so the
+                            # client sees a continuous stream of events
+                            # for the newly-started run.
+                            for chunk in job_manager.sse_stream(
+                                new_job_id,
+                                timeout=3600,
+                                heartbeat_interval=15,
+                                after_id=after_id,
+                            ):
+                                yield chunk
+                            return
+            except _asyncio.CancelledError:
+                return
+        return StreamingResponse(_idle_then_pivot(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    job_id = runs[0].get("id")
+    if not job_id:
+        raise HTTPException(status_code=500, detail="run row missing id")
+
+    return StreamingResponse(
+        job_manager.sse_stream(job_id, timeout=3600, heartbeat_interval=15, after_id=after_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/stream/{job_id}")
 async def stream_events(job_id: str, after_id: int = 0):
     """SSE endpoint — streams AgentEvents from the job's queue.
@@ -143,6 +301,67 @@ async def stream_events(job_id: str, after_id: int = 0):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/stop")
+async def stop_run(request: Request):
+    """Kill any running stelle_runner subprocess for the given company.
+
+    Called by Jacquard's ``POST /api/ghostwriter/stop`` proxy when a user
+    clicks Stop in the Lineage UI. We find the latest ``running`` run for
+    the company, identify its runner PID (via /proc scan for the
+    ``--job-id`` CLI arg), and send SIGTERM. Also marks the run as
+    ``failed`` with reason "stopped by user" so the SSE stream closes.
+    """
+    body = await request.json()
+    company_id_or_slug = body.get("companyId") or body.get("company") or ""
+    if not company_id_or_slug:
+        raise HTTPException(status_code=400, detail="companyId required")
+
+    import os
+    import signal
+    import time as _time
+    from backend.src.db.local import list_runs, complete_run
+
+    runs = list_runs(company_id_or_slug, limit=5)
+    running = [r for r in runs if r.get("status") == "running"]
+    if not running:
+        return {"stopped": True, "killed_pids": [], "note": "no running run found"}
+
+    killed: list[dict] = []
+    for run in running:
+        job_id = run.get("id")
+        if not job_id:
+            continue
+        # Scan /proc for the matching runner subprocess. stelle_runner is
+        # spawned with start_new_session=True — it's in its own process
+        # group — so SIGTERM to the pid is enough.
+        for pid_str in os.listdir("/proc"):
+            if not pid_str.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid_str}/cmdline", "rb") as f:
+                    cmd = f.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+            except Exception:
+                continue
+            if "stelle_runner" not in cmd or job_id not in cmd:
+                continue
+            try:
+                os.kill(int(pid_str), signal.SIGTERM)
+                killed.append({"pid": int(pid_str), "job_id": job_id})
+                logger.info("[stop] SIGTERM sent to stelle_runner pid=%s job_id=%s", pid_str, job_id)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                logger.warning("[stop] kill failed for pid=%s: %s", pid_str, exc)
+
+        # Flip run status so the SSE stream can close and the UI reflects it.
+        try:
+            complete_run(job_id, output=None, error="stopped by user")
+        except Exception:
+            logger.warning("[stop] complete_run failed for %s", job_id, exc_info=True)
+
+    return {"stopped": True, "killed_pids": killed, "count": len(killed)}
 
 
 @router.get("/jobs/{job_id}")
@@ -171,10 +390,59 @@ async def provision_workspace(req: GenerateRequest):
 
 
 @router.post("/inline-edit")
-async def inline_edit(req: InlineEditRequest):
-    """Inline text editing via Stelle — returns a job_id for SSE streaming."""
+async def inline_edit(req: InlineEditRequest, request: Request):
+    """Inline text editing via Stelle — returns a job_id for SSE streaming.
+
+    **Lineage mode: unsupported.** If the request carries Lineage headers
+    (``X-Lineage-Workspace-URL`` + ``Authorization`` bearer), we refuse
+    up-front rather than silently operating on the wrong workspace. The
+    caller gets a job_id whose SSE stream immediately emits a ``done``
+    event with an explanatory message, so the UI doesn't hang. This is
+    deliberate: inline-edit in Lineage would need its own workspace-aware
+    implementation (Castorice, span-scoped edit, etc.) and is not
+    currently implemented.
+
+    Accepts both Amphoreus-native ({company, post_text}) and Jacquard-proxy
+    ({companyId, selectedText}) body shapes. The selection is treated as
+    ``post_text`` — Stelle returns a revised version of just the passed
+    span, which is what the Lineage inline-edit UX splices back in.
+    """
+    identifier = req.company or req.companyId
+    text = req.post_text or req.selectedText or ""
+
+    # Detect Lineage mode by presence of the workspace-URL header the
+    # Jacquard proxy always sets when it invokes Amphoreus.
+    lineage_workspace = request.headers.get("x-lineage-workspace-url")
+    if lineage_workspace:
+        job_id = job_manager.create_job(
+            client_slug=identifier or "unknown",
+            agent="stelle-inline-edit",
+            prompt=req.instruction,
+            creator_id=None,
+        )
+        job_manager.emit_event(
+            job_id,
+            done_event(
+                "Inline-edit is not supported when running via Lineage. "
+                "Edit the draft directly in the Lineage UI or regenerate "
+                "with a fresh Stelle run."
+            ),
+        )
+        return {"job_id": job_id, "status": "unsupported"}
+
+    if not identifier:
+        raise HTTPException(
+            status_code=400,
+            detail="inline-edit requires 'company' (slug) or 'companyId' (UUID)",
+        )
+    if not text:
+        raise HTTPException(
+            status_code=400,
+            detail="inline-edit requires 'post_text' or 'selectedText'",
+        )
+
     job_id = job_manager.create_job(
-        client_slug=req.company,
+        client_slug=identifier,
         agent="stelle-inline-edit",
         prompt=req.instruction,
         creator_id=None,
@@ -189,7 +457,7 @@ async def inline_edit(req: InlineEditRequest):
     job_manager.run_in_background(
         job_id,
         target=_run_edit,
-        args=(job_id, req.company, req.post_text, req.instruction),
+        args=(job_id, identifier, text, req.instruction),
     )
     return {"job_id": job_id, "status": "pending"}
 

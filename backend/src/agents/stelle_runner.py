@@ -135,6 +135,22 @@ def main() -> int:
         default=".runner-logs",
         help="Directory for the runner's own log file (separate from Stelle's session log)",
     )
+    # ------------------------------------------------------------------
+    # Lineage-mode plumbing. When the spawning /api/ghostwriter/generate
+    # handler sees an ``X-Lineage-Workspace-URL`` header + Authorization
+    # bearer, it forwards both here as env-var sources. Stelle's FS tools
+    # then route through ``lineage_fs_client`` instead of local disk.
+    # ------------------------------------------------------------------
+    parser.add_argument("--lineage-workspace-url", default=None,
+                        help="Remote workspace base URL, e.g. http://localhost:3001/api/workspace")
+    parser.add_argument("--lineage-run-token", default=None,
+                        help="HS256 JWT scoping FS ops to the originating companyId")
+    parser.add_argument("--company-id", default=None,
+                        help="Lineage UUID for the company (distinct from --company slug)")
+    parser.add_argument("--lineage-user-slug", default=None,
+                        help="FOC-user slug. When set, the run is user-targeted: "
+                             "every draft is attributed to this user and filesystem "
+                             "reads are scoped to their subtree. Absent = company-wide.")
     args = parser.parse_args()
 
     # Ensure our cwd is the project root. When spawned via subprocess from
@@ -143,6 +159,17 @@ def main() -> int:
     project_root = Path(__file__).resolve().parents[3]
     os.chdir(project_root)
     sys.path.insert(0, str(project_root))
+
+    # Surface Lineage-mode inputs as env vars BEFORE we import Stelle so
+    # the module-level ``is_lineage_mode()`` check in lineage_fs_client
+    # sees them. ContextVars don't cross process boundaries; env vars do.
+    if args.lineage_workspace_url and args.lineage_run_token:
+        os.environ["LINEAGE_WORKSPACE_URL"] = args.lineage_workspace_url
+        os.environ["LINEAGE_RUN_TOKEN"] = args.lineage_run_token
+        if args.company_id:
+            os.environ["LINEAGE_COMPANY_ID"] = args.company_id
+        if args.lineage_user_slug:
+            os.environ["LINEAGE_USER_SLUG"] = args.lineage_user_slug
 
     _configure_logging(args.job_id, project_root / args.log_dir)
 
@@ -174,6 +201,20 @@ def main() -> int:
         _mark_run_running(args.job_id)
     except Exception:
         logger.exception("[stelle_runner] could not mark run as running (non-fatal)")
+
+    # Install SIGTERM handler so the /stop endpoint can cleanly interrupt
+    # mid-generation work. Python's default SIGTERM behavior kills the
+    # process with no chance to flush the event stream — we convert it to
+    # KeyboardInterrupt so the except block below emits a closing event
+    # and marks the run failed with a proper reason before exit.
+    import signal as _signal
+    def _on_sigterm(_signum, _frame):
+        logger.info("[stelle_runner] SIGTERM received — raising KeyboardInterrupt")
+        raise KeyboardInterrupt("SIGTERM")
+    try:
+        _signal.signal(_signal.SIGTERM, _on_sigterm)
+    except Exception:
+        logger.warning("[stelle_runner] could not install SIGTERM handler (non-fatal)")
 
     # Emit an initial status event so the frontend sees immediate activity
     try:
@@ -217,6 +258,31 @@ def main() -> int:
         _mark_run_completed(args.job_id, result_path or "")
         logger.info("[stelle_runner] completed successfully: %s", result_path)
         return 0
+
+    except KeyboardInterrupt:
+        # Clean stop from SIGTERM (user clicked Stop in Lineage UI).
+        # Flush a final status+error event pair so the SSE stream closes
+        # cleanly and the UI reflects "stopped by user" rather than an
+        # abrupt disconnect. Scratch files on fly are preserved as-is.
+        logger.info("[stelle_runner] stop requested — flushing closing events")
+        try:
+            from backend.src.db import local as db
+            from backend.src.core.events import status_event, error_event
+            db.record_event(
+                args.job_id, "status",
+                status_event("Stopped by user. Partial scratch preserved on fly.").data,
+            )
+            db.record_event(
+                args.job_id, "error",
+                error_event("stopped by user").data,
+            )
+        except Exception:
+            logger.exception("[stelle_runner] failed to flush closing events")
+        try:
+            _mark_run_failed(args.job_id, "stopped by user")
+        except Exception:
+            pass
+        return 130  # conventional exit code for SIGTERM
 
     except Exception as e:
         tb = traceback.format_exc()

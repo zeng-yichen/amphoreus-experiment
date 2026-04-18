@@ -13,9 +13,12 @@ the agent sees what an unauthenticated fetcher would see.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 from html.parser import HTMLParser
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -134,6 +137,25 @@ def fetch_url(url: str, max_chars: int = _MAX_RETURN_CHARS, timeout: float = _DE
             "truncated": False,
             "content_type": None,
         }
+
+    # SSRF protection: block requests to private/internal IPs
+    try:
+        hostname = urlparse(url).hostname or ""
+        resolved = socket.getaddrinfo(hostname, None)
+        for _family, _type, _proto, _canonname, sockaddr in resolved:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return {
+                    "url": url,
+                    "status": 0,
+                    "title": None,
+                    "text": "(blocked: URL resolves to a private/internal address)",
+                    "n_chars": 0,
+                    "truncated": False,
+                    "content_type": None,
+                }
+    except Exception:
+        pass  # DNS resolution failure will be caught by httpx below
 
     try:
         resp = httpx.get(

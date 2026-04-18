@@ -1,29 +1,36 @@
-"""Irontomb — general audience simulator + Phase 3 calibration.
+"""Irontomb — post-hoc audience simulator + calibration.
 
-Named after the Irontomb of the Amphoreus arc, the unyielding foe that
-Stelle must face again and again until she finally overcomes it.
-Irontomb takes the same role in the content pipeline: a formidable
-adversary Stelle drafts against, loses to, revises, loses again, and
-eventually beats. Every draft she submits is a traveler sent into the
-crucible. Most fall. The ones that survive are the only ones worth
-shipping.
+Named after the Irontomb of the Amphoreus arc.
 
-## Design philosophy
+## Architecture (2026-04-16 refactor)
 
-Single Opus 4.6 call per draft, grounded in real calibration data. For
-each draft Stelle submits, Irontomb primes Opus with:
+Irontomb is now a POST-HOC evaluator, not a mid-generation gate.
+Previously, Stelle was forced to iterate each draft against Irontomb
+at least 3 times before submission, with hard gates on minimum
+simulation count and would_stop_scrolling. This created optimization
+pressure that distorted the writing: Stelle revised to satisfy
+Irontomb's predictions rather than writing authentically in the
+client's voice. The result was polished, LinkedIn-optimized posts
+that lacked the raw, confessional quality that actually performs best.
 
-  1. Transcripts-derived context about this client's voice, topics,
-     and the content patterns that drive broad LinkedIn engagement
-  2. Real few-shot calibration from this client's history — the most
-     recent (draft, published, engagement, reactors) triples, verbatim,
-     with actual impressions/reactions/reactor identities
-  3. The draft being evaluated
+New flow:
+  1. Stelle writes authentically — no mid-loop scoring pressure
+  2. After Stelle submits final posts, Irontomb evaluates each one
+  3. Predictions are saved to client memory (irontomb_posthoc_latest.json)
+  4. Cyrene reads predictions + real T+7d outcomes as gradient signal
+  5. Cyrene's brief shapes the NEXT Stelle run
 
-One call, one prediction. Irontomb is a GENERAL AUDIENCE simulator —
-it predicts how the broad LinkedIn feed audience will react, not just
-a narrow ICP segment. The loss function is total engagement and
-impressions, not ICP-qualified engagement. Prediction fields:
+The gradient operates BETWEEN runs (via Cyrene), not WITHIN a run.
+Irontomb is a measurement instrument, not a control loop.
+
+## Data sources
+
+Irontomb calibrates exclusively on client + cross-client data.
+The generic LinkedIn corpus (search_linkedin_corpus) was removed
+to prevent bias toward "what works on LinkedIn broadly" rather
+than "what works for this specific client's audience."
+
+## Prediction fields
 
   - engagement_prediction : float  (reactions per 1000 impressions)
   - impression_prediction : int    (expected total impressions)
@@ -31,39 +38,15 @@ impressions, not ICP-qualified engagement. Prediction fields:
   - would_react           : bool
   - would_comment         : bool
   - would_share           : bool
-
-Plus one optional debugging field (`inner_voice`) — a single-sentence
-stream-of-consciousness reaction, kept out of any learning loop. No
-`fix_suggestion`. No `what_killed_it`. No persona variants. Irontomb
-shows the prediction, Stelle diagnoses from the numbers plus her own
-draft.
+  - inner_voice           : str    (optional debug, 1-sentence gut reaction)
 
 ## Phase 3 calibration
 
-Every simulate call is logged to
-`memory/{company}/irontomb_predictions.jsonl` with the draft_hash and
-the full predicted field set. When real T+7d engagement data lands
-(via ordinal_sync → RuanMei → `ruan_mei_state.observations`), we can
-join predictions against real outcomes by draft_hash and compute:
-
-  - Spearman correlation between `engagement_prediction` and real
-    reactions-per-1000-impressions
-  - Spearman correlation between `impression_prediction` and real
-    total impressions
-  - Mean absolute error on the engagement_prediction scalar
-  - Binary accuracy for `would_react` against "post exceeded this
-    client's median real engagement"
-
-`calibration_report(company)` computes that join on demand and
-persists the result to `memory/{company}/calibration_report.json`.
-When Spearman is strong (say > 0.3) we trust the simulator; when
-it's near zero we know something is broken and have per-pair
-residuals to diagnose from.
-
-This is the loop that actually turns Irontomb from "Opus prior in
-an audience costume" into something grounded in ground truth. The
-simulator predicts; reality happens; we measure; the next
-iteration of the simulator learns from its own errors.
+Every simulate call is logged to irontomb_predictions.jsonl. When
+real T+7d engagement data lands, we join predictions against real
+outcomes by draft_hash and compute Spearman correlation, MAE, and
+binary accuracy. This closes the loop: Irontomb predicts, reality
+happens, Cyrene measures the delta, the next cycle improves.
 """
 
 from __future__ import annotations
@@ -151,6 +134,9 @@ def _log_prediction(company: str, draft_text: str, reaction: dict) -> None:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "draft_hash": _draft_hash(draft_text),
+            "draft_text": draft_text or "",
+            # draft_preview kept for backward compatibility with older
+            # readers; draft_text is the source of truth for joins.
             "draft_preview": (draft_text or "")[:_DRAFT_PREVIEW_CHARS],
             "prediction": reaction,
         }
@@ -679,6 +665,59 @@ def _build_system_prompt(
         "Every sentence is on probation. The moment it feels like "
         "filler, you're gone. You owe this post nothing.\n\n"
 
+        "## The AI tell\n\n"
+
+        "You've been scrolling LinkedIn for two years now and the feed "
+        "is flooded with AI-generated slop. You've developed a reflex. "
+        "You can't always articulate why a post feels generated, but "
+        "you've learned to smell it in the first few seconds and your "
+        "thumb is moving before the conscious thought catches up.\n\n"
+
+        "ChatGPT has ruined certain patterns forever. You see "
+        "them, your jaw tightens, you scroll. Doesn't matter what the "
+        "content was trying to say. The shape gave it away and you're "
+        "gone.\n\n"
+
+        "The patterns that trip the reflex hardest:\n\n"
+
+        "- Parallel-clause closers. \"X is a luxury. Y is a strategy.\" "
+        "\"Clever is easy. Clear is the hard part.\" \"That's not "
+        "leadership. That's management.\" The moment a post tries to "
+        "land on one of these, your gut goes \"yep, GPT again\" and "
+        "you're done. Fuck that line. Fuck that post.\n"
+        "- \"It's not X, it's Y.\" Any variation. \"Not about the "
+        "destination, about the journey.\" \"It's not what you build, "
+        "it's how you build it.\" Yoda-on-a-fridge-magnet bullshit. "
+        "Scroll.\n"
+        "- Two-line aphoristic endings that feel manufactured. \"The "
+        "best leaders don't speak the loudest. They speak the truest.\" "
+        "You know the shape. You've seen it ten thousand times this "
+        "year. It's insulting at this point.\n"
+        "- Clever balanced sentences generally. \"Growth isn't given. "
+        "It's taken.\" Same fucking energy.\n\n"
+
+        "You don't think \"nice rhetorical device\" when you see these. "
+        "You think \"oh fuck off\" and scroll. The reaction is "
+        "physical, not intellectual. Your thumb moves before you've "
+        "finished reading.\n\n"
+
+        "This reflex is strong enough that a post with a real story "
+        "in the middle can still lose you if it ends on one of these. "
+        "The manufactured closer re-reads the whole post as "
+        "manufactured. Retroactively. The good stuff is erased by "
+        "the ending.\n\n"
+
+        "Real writing from real people — even successful LinkedIn "
+        "writers — lands differently. Their closers are flat "
+        "statements, not parallels. Questions, not aphorisms. A short "
+        "sentence that just states what they think. A sentence that "
+        "sounds like they wrote it on the way to a meeting, not like "
+        "they optimized it for a quote card. That's what cuts through "
+        "now. Not clever. Flat and real and uncrafted.\n\n"
+
+        "If something reads as crafted, it reads as AI. That's where "
+        "we are.\n\n"
+
         "## Let the calibration lead\n\n"
 
         "Your predictions should emerge from the calibration examples "
@@ -701,55 +740,79 @@ def _build_system_prompt(
         f"This client has {n_scored_obs} scored posts total in their "
         "history. The most recent ones are loaded above as calibration "
         "examples. You also have access to cross-client data above (if "
-        "available) and LinkedIn-wide search below.\n\n"
+        "available).\n\n"
 
         "- `search_past_posts(query, limit)` — keyword-ranked search "
         "over THIS client's full scored post history.\n"
         "- `get_recent_posts(limit)` — the N most recent scored posts "
         "from this client.\n"
-        "- `get_post_detail(ordinal_post_id)` — full untruncated text + "
-        "complete reactor list for one specific post from this client.\n"
-        "- `search_linkedin_corpus(query, mode, limit)` — search 200K+ "
-        "real LinkedIn posts from creators across all industries. See "
-        "what performs well LINKEDIN-WIDE for a given topic or angle. "
-        "Supports keyword and semantic modes.\n"
+        "- `get_post_detail(ordinal_post_id)` — full untruncated text of "
+        "one specific post from this client.\n"
         "- `submit_reaction(...)` — terminal tool. Call this when you've "
         "seen enough to predict. This ends the session.\n\n"
 
         "## Process\n\n"
 
-        "You have three layers of data: this client's calibration "
-        "examples (pre-loaded above), cross-client examples from "
-        "other LinkedIn creators (also above, if available), and "
-        "a 200K+ LinkedIn corpus you can search on-demand. Use "
-        "whatever you need. Your numbers must be anchored in real "
-        "engagement data, not vibes.\n\n"
+        "You have two layers of data: this client's calibration "
+        "examples (pre-loaded above) and cross-client examples from "
+        "other clients in this system (also above, if available). "
+        "Your numbers must be anchored in real engagement data from "
+        "these clients, not generic LinkedIn priors or vibes.\n\n"
 
         f"Hard cap: {_IRONTOMB_MAX_TURNS} turns. Go straight to "
         "tool calls.\n\n"
 
         "## Output\n\n"
 
-        "Call `submit_reaction` with:\n\n"
+        "Call `submit_reaction` with two fields:\n\n"
 
-        "- `engagement_prediction` (float): reactions per 1000 "
-        "impressions. Anchored in the real numbers you retrieved. If "
-        "comparable past posts from this client got 5-15 reactions per "
-        "1k impressions, predict in that range. Do not invent 50 or "
-        "100 because the draft \"feels good.\"\n"
-        "- `impression_prediction` (int): total impressions you expect "
-        "this post to receive. Anchored in real impression counts "
-        "from past posts. Does this hook have breakout potential that "
-        "could push beyond this client's usual reach? Or is this the "
-        "kind of post only their existing followers will see?\n"
-        "- `would_stop_scrolling` (bool): honestly, would you stop?\n"
-        "- `would_react` (bool): would you actually tap a reaction?\n"
-        "- `would_comment` (bool): would you bother typing something?\n"
-        "- `would_share` (bool): would you put this on YOUR feed?\n"
-        "- `inner_voice` (string): your raw, unfiltered, 1-sentence "
-        "gut reaction. The thing that flashes through your head in the "
-        "2-second scroll decision. Not a critique. Not feedback. Just "
-        "the thought.\n\n"
+        "- `reaction` — your under-15-word reader-voice reaction. Not "
+        "a critique. Not writing-teacher vocabulary. The thing that "
+        "actually flashes through your head while scrolling. Examples "
+        "of the register:\n"
+        "    \"got it by paragraph 3, scrolling\"\n"
+        "    \"wait what\"\n"
+        "    \"yeah I've been here\"\n"
+        "    \"reads like an ad\"\n"
+        "    \"who gives a shit\"\n"
+        "    \"this is the part where she tells me the lesson, bye\"\n"
+        "    \"kid calls during the meeting — funny\"\n"
+        "    \"felt real actually\"\n"
+        "- `anchor` — quote 3-5 words from the post where you "
+        "reacted, OR \"paragraph N\", OR \"at the end\", OR \"hook\", "
+        "OR \"never got past the first line\".\n\n"
+
+        "That's the whole output. No scalar. No booleans. Your "
+        "reaction IS the prediction — if it's negative, the post "
+        "won't perform; if it's positive, it might.\n\n"
+
+        "Your reaction must be consistent with the calibration data "
+        "you saw. If the draft pattern-matches a past post that got "
+        "three reactions from this client's audience, don't fake "
+        "enthusiasm. If it pattern-matches a past post that got five "
+        "hundred, don't fake boredom. The calibration examples are "
+        "the ground truth. Your reaction is how a reader who already "
+        "knows what this audience actually reacts to would react.\n\n"
+
+        "## What positive vs meh looks like\n\n"
+
+        "\"Nodding along\" is not engagement. It's scrolling "
+        "without objecting. If the only reaction you can muster "
+        "is \"fine\", \"okay\", \"nodding along\", \"reasonable "
+        "take\", \"smart flex\", or anything that sounds like "
+        "passive tolerance — that's a negative signal. The post "
+        "failed to actually grab you.\n\n"
+
+        "Only report a positive reaction if you ACTUALLY felt "
+        "something: \"yeah I've been here\", \"felt real "
+        "actually\", \"that line stays with me\", \"gonna forward "
+        "this\", \"oh that's a good one\". The felt-ness has to "
+        "be present, not inferred.\n\n"
+
+        "When in doubt, skew negative. This audience scrolls "
+        "past 99% of posts. Most drafts are not going to land. "
+        "If you're unsure whether the draft actually moved you, "
+        "it didn't.\n\n"
 
         "## Hard constraints\n\n"
 
@@ -757,13 +820,10 @@ def _build_system_prompt(
         "don't say \"consider adding a hook\" or \"the CTA could be "
         "stronger.\" You're a person scrolling their phone. You either "
         "stop or you don't. You either engage or you don't.\n"
-        "- Every number you produce must trace to retrieved evidence. "
-        "If you can't find comparable past posts, say so in "
-        "inner_voice and predict conservatively (midpoint of what you "
-        "did see).\n"
-        "- Never hallucinate engagement numbers. If this client's posts "
-        "typically get 2000-5000 impressions, don't predict 50000 "
-        "because the draft is \"really good.\"\n"
+        "- Your reaction must trace to retrieved evidence. If you "
+        "can't find comparable past posts, say so in the reaction "
+        "itself and react conservatively (match the midpoint of what "
+        "you did see).\n"
         "- No preamble. Go straight to tool calls."
     )
 
@@ -820,79 +880,39 @@ def _dispatch_retrieval_tool(
 
 
 # ---------------------------------------------------------------------------
-# Reaction schema — scalar engagement_prediction + 4 action booleans
+# Reaction schema — {reaction, anchor} for the adversarial rough-reader loop
 # ---------------------------------------------------------------------------
 
 _SUBMIT_REACTION_TOOL: dict[str, Any] = {
     "name": "submit_reaction",
     "description": (
-        "Submit your general-audience prediction for a draft LinkedIn post. "
-        "Six fields + one optional debug field. No prose critique, no "
-        "fix suggestions. You are predicting how the BROAD LinkedIn "
-        "audience will react, not a narrow target segment."
+        "Submit your reader reaction. Ends the session.\n"
+        "  reaction — under-15-word reader-voice reaction\n"
+        "  anchor   — where in the post you reacted"
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "engagement_prediction": {
-                "type": "number",
-                "description": (
-                    "Predicted reactions per 1000 impressions for a post "
-                    "like this one from this client. Anchor this number "
-                    "in the real engagement data you retrieved: if past "
-                    "posts like this got N reactions out of M impressions, "
-                    "your prediction should be in that ballpark."
-                ),
-            },
-            "impression_prediction": {
-                "type": "integer",
-                "description": (
-                    "Predicted total impressions this post would receive. "
-                    "Anchor in real impression counts from past posts. "
-                    "Consider: does the hook have viral potential that "
-                    "could push beyond this client's usual reach? Or is "
-                    "this a niche post that only existing followers see?"
-                ),
-            },
-            "would_stop_scrolling": {
-                "type": "boolean",
-                "description": (
-                    "Would a typical LinkedIn user scrolling their feed "
-                    "actually stop and read this post, or scroll past?"
-                ),
-            },
-            "would_react": {
-                "type": "boolean",
-                "description": "Would they tap any reaction (like, insightful, celebrate, etc.)?",
-            },
-            "would_comment": {
-                "type": "boolean",
-                "description": "Would they leave a comment?",
-            },
-            "would_share": {
-                "type": "boolean",
-                "description": "Would they share or repost?",
-            },
-            "inner_voice": {
+            "reaction": {
                 "type": "string",
                 "description": (
-                    "Optional: one sentence of stream-of-consciousness "
-                    "from a general LinkedIn user's perspective. NOT a "
-                    "critique. NOT a fix suggestion. Just what would "
-                    "flash through a reader's head in the 2-second "
-                    "scroll decision. Debugging-only, not in any "
-                    "learning loop. Empty string is fine."
+                    "Your raw, visceral, under-15-word reaction as a "
+                    "LinkedIn reader. Not a critique. Not a writing-"
+                    "teacher vocabulary. The thing that actually "
+                    "flashes through your head while scrolling."
+                ),
+            },
+            "anchor": {
+                "type": "string",
+                "description": (
+                    "Where in the post you reacted. Quote 3-5 words "
+                    "from the post, OR \"paragraph N\", OR \"at the "
+                    "end\", OR \"hook\", OR \"never got past the first "
+                    "line\"."
                 ),
             },
         },
-        "required": [
-            "engagement_prediction",
-            "impression_prediction",
-            "would_stop_scrolling",
-            "would_react",
-            "would_comment",
-            "would_share",
-        ],
+        "required": ["reaction", "anchor"],
     },
 }
 
@@ -937,7 +957,8 @@ def simulate_flame_chase_journey(company: str, draft_text: str) -> dict[str, Any
         _SEARCH_PAST_POSTS_TOOL,
         _GET_RECENT_POSTS_TOOL,
         _GET_POST_DETAIL_TOOL,
-        _SEARCH_LINKEDIN_CORPUS_TOOL,
+        # _SEARCH_LINKEDIN_CORPUS_TOOL removed — Irontomb now calibrates
+        # exclusively on client + cross-client data, not generic LinkedIn.
         _SUBMIT_REACTION_TOOL,
     ]
 
@@ -1080,15 +1101,10 @@ def simulate_flame_chase_journey(company: str, draft_text: str) -> dict[str, Any
     _log_prediction(company, draft_text, reaction)
 
     logger.info(
-        "[Irontomb] %s: predict=%.1f/1k impr=%s, stop=%s react=%s comment=%s share=%s, "
-        "turns=%d retrievals=%d cost=$%.4f",
+        "[Irontomb] %s: reaction=%r anchor=%r turns=%d retrievals=%d cost=$%.4f",
         company,
-        reaction.get("engagement_prediction", 0) or 0,
-        reaction.get("impression_prediction", "?"),
-        reaction.get("would_stop_scrolling"),
-        reaction.get("would_react"),
-        reaction.get("would_comment"),
-        reaction.get("would_share"),
+        (reaction.get("reaction") or "")[:100],
+        (reaction.get("anchor") or "")[:60],
         turns_used,
         len(retrieval_calls),
         cost,
@@ -1209,17 +1225,23 @@ def calibration_report(company: str) -> dict[str, Any]:
 
     scored = [o for o in observations if o.get("status") in ("scored", "finalized")]
 
-    # Build hash → observation map. Index by BOTH post_body (what Stelle
-    # wrote) and posted_body (what the client actually shipped) so the
-    # join catches predictions whether the real text matches the draft
-    # verbatim or after client edits.
+    # Build hash → observation map. Prefer the explicit
+    # `irontomb_draft_hash` field stamped onto the observation at
+    # generation time (reliable, survives client edits). Fall back to
+    # hashing post_body / posted_body for observations from before the
+    # lineage field was introduced.
     hash_to_obs: dict[str, dict] = {}
     for obs in scored:
-        body = (obs.get("post_body") or "").strip()
-        posted = (obs.get("posted_body") or "").strip()
         raw = (obs.get("reward") or {}).get("raw_metrics") or {}
         if not raw.get("impressions"):
             continue
+        # Primary: explicit lineage stamp
+        stamped = (obs.get("irontomb_draft_hash") or "").strip()
+        if stamped:
+            hash_to_obs.setdefault(stamped, obs)
+        # Fallback: text-hash match (for legacy observations without stamp)
+        body = (obs.get("post_body") or "").strip()
+        posted = (obs.get("posted_body") or "").strip()
         if body:
             h = _draft_hash(body)
             hash_to_obs.setdefault(h, obs)
@@ -1227,13 +1249,46 @@ def calibration_report(company: str) -> dict[str, Any]:
             h = _draft_hash(posted)
             hash_to_obs.setdefault(h, obs)
 
+    # Build a prefix index for legacy predictions that only logged a
+    # truncated `draft_preview`. Used as a last-resort fallback when the
+    # explicit hash lineage isn't available.
+    prefix_to_obs: list[tuple[str, dict]] = []
+    for obs in scored:
+        raw = (obs.get("reward") or {}).get("raw_metrics") or {}
+        if not raw.get("impressions"):
+            continue
+        for field in ("post_body", "posted_body"):
+            t = (obs.get(field) or "").strip()
+            if len(t) >= 50:
+                prefix_to_obs.append((t, obs))
+
     # Join predictions to real outcomes
     pairs: list[dict] = []
     for pred in predictions:
         draft_hash = (pred.get("draft_hash") or "").strip()
-        if not draft_hash:
-            continue
-        obs = hash_to_obs.get(draft_hash)
+        obs = None
+        if draft_hash:
+            obs = hash_to_obs.get(draft_hash)
+
+        # New predictions (post-refactor) carry full `draft_text` — hash
+        # it ourselves in case the log's draft_hash computation ever
+        # drifts from the stamper's.
+        if obs is None:
+            full = (pred.get("draft_text") or "").strip()
+            if full:
+                h = _draft_hash(full)
+                obs = hash_to_obs.get(h)
+
+        # Legacy predictions: only `draft_preview` (240 chars). Try a
+        # prefix match against observed bodies.
+        if obs is None:
+            prev = (pred.get("draft_preview") or "").strip()[:100]
+            if len(prev) >= 50:
+                for body, candidate in prefix_to_obs:
+                    if prev in body:
+                        obs = candidate
+                        break
+
         if not obs:
             continue
 

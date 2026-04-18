@@ -1,6 +1,7 @@
 """Amphoreus FastAPI application."""
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -93,12 +94,17 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Startup catch-up failed (non-fatal).")
 
-    # Start Ordinal sync loop (runs every hour in a background thread).
-    # Feeds RuanMei with Ordinal LinkedIn analytics only (no Supabase writes).
-    # ONLY on localhost — sync writes to local memory/, which the user then
-    # pushes to Fly via push-to-fly.sh. This avoids paying for duplicate
-    # sync loops on both local and Fly.
-    if not CF_VERIFIER.enabled:
+    # Ordinal sync loops — DISABLED BY DEFAULT as of 2026-04-18.
+    # Stelle now runs primarily in Lineage mode (invoked from Jacquard's
+    # virio-api) where engagement data is sourced via Jacquard's Supabase
+    # through ``POST /api/workspace/observations``. The local memory/ mirror
+    # is no longer the primary data path.
+    #
+    # Set ``ENABLE_SYNC_LOOPS=true`` to re-enable (legacy local-mode runs,
+    # or to refresh memory/{company}/ artifacts that Cyrene still reads).
+    # The ordinal_sync code remains intact so manual invocations still work.
+    enable_sync = os.getenv("ENABLE_SYNC_LOOPS", "").strip().lower() in ("true", "1", "yes")
+    if enable_sync and not CF_VERIFIER.enabled:
         try:
             from backend.src.services.ordinal_sync import start_sync_loop, start_fast_sync_loop, stop_sync_loop
             start_sync_loop()           # hourly: full pipeline
@@ -106,14 +112,19 @@ async def lifespan(app: FastAPI):
             logger.info("Ordinal sync loops started (slow=3600s, fast=900s).")
         except Exception:
             logger.exception("Failed to start Ordinal sync loop (non-fatal).")
+    elif CF_VERIFIER.enabled:
+        logger.info("Ordinal sync loops SKIPPED (Fly — run sync locally if needed via ENABLE_SYNC_LOOPS).")
     else:
-        logger.info("Ordinal sync loops SKIPPED (Fly — run sync locally and push via push-to-fly.sh).")
+        logger.info("Ordinal sync loops SKIPPED (default — set ENABLE_SYNC_LOOPS=true to enable).")
 
     yield
 
-    # Graceful shutdown.
+    # Graceful shutdown. Only call stop_sync_loop if the module was
+    # imported by the startup branch above — otherwise the import would
+    # re-trigger every shutdown for no reason.
     try:
-        stop_sync_loop()
+        from backend.src.services.ordinal_sync import stop_sync_loop as _stop
+        _stop()
     except Exception:
         pass
     logger.info("Shutting down Amphoreus backend.")
@@ -162,7 +173,6 @@ from backend.src.api.routers import (
     learning,
     posts,
     report,
-    research,
     strategy,
     transcripts,
     usage,
@@ -178,7 +188,6 @@ app.include_router(interview.router)
 app.include_router(strategy.router)
 app.include_router(posts.router)
 app.include_router(images.router)
-app.include_router(research.router)
 app.include_router(cs.router)
 app.include_router(learning.router)
 app.include_router(report.router)

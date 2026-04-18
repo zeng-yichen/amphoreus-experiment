@@ -63,6 +63,61 @@ export default function GhostwriterIDE() {
   const [savingUsername, setSavingUsername] = useState(false);
   const terminalRef = useRef<HTMLDivElement>(null);
 
+  // Story mode: show Amphoreus story lines instead of raw tool calls.
+  // We start with production-safe defaults on BOTH server and client
+  // (isLocalhost=false, storyMode=true) to avoid a hydration mismatch.
+  // After mount, the effect below flips these if we're actually on
+  // localhost — so devs still get the debug view and toggle by default.
+  const [isLocalhost, setIsLocalhost] = useState(false);
+  const [storyMode, setStoryMode] = useState(true);
+  const [storyLines, setStoryLines] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const host = window.location.hostname;
+    if (host === "localhost" || host === "127.0.0.1") {
+      setIsLocalhost(true);
+      setStoryMode(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetch("/amphoreus_story.json")
+      .then((r) => r.json())
+      .then((raw: string[]) => {
+        // Pre-process: strip decorative separators, drop blanks, then
+        // split paragraphs into individual sentences so each SSE event
+        // reveals one sentence at a time.
+        const sentences: string[] = [];
+        for (const line of raw) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          if (/^[═─]{3,}$/.test(trimmed)) continue; // decorative separator
+          // Book titles / chapter headers (all caps, no sentence-ending
+          // punctuation) stay as one unit.
+          const isHeader = /^(BOOK |EPILOGUE|THE AMPHOREUS|As remembered|End of)/i.test(trimmed)
+            || trimmed === trimmed.toUpperCase();
+          if (isHeader) {
+            sentences.push(trimmed);
+            continue;
+          }
+          // Split on sentence-ending punctuation followed by a space.
+          // Keep the punctuation with the preceding sentence.
+          const parts = trimmed.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g);
+          if (parts) {
+            for (const p of parts) {
+              const s = p.trim();
+              if (s) sentences.push(s);
+            }
+          } else {
+            sentences.push(trimmed);
+          }
+        }
+        setStoryLines(sentences);
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (terminalRef.current) {
       terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
@@ -138,11 +193,14 @@ export default function GhostwriterIDE() {
     async (jobId: string, afterId = 0) => {
       try {
         for await (const data of ghostwriterApi.streamJob(jobId, afterId)) {
+          // Always store the raw event. Story-mode vs debug-mode
+          // presentation is decided at render time so toggling the
+          // button instantly swaps all lines (past and future).
           const text = extractText(data);
           setLines((prev) => [
             ...prev,
             {
-              type: data.type,
+              type: data.type === "done" ? "done" : data.type === "error" ? "error" : (data.type as string),
               text,
               timestamp: (data.timestamp || Date.now() / 1000) * 1000,
             },
@@ -270,6 +328,15 @@ export default function GhostwriterIDE() {
         >
           {isGenerating ? "Generating..." : "Generate"}
         </button>
+        {isLocalhost && (
+          <button
+            onClick={() => setStoryMode((v) => !v)}
+            className="rounded-lg border border-stone-300 px-3 py-1.5 text-xs text-stone-500 transition-colors hover:bg-stone-100"
+            title={storyMode ? "Switch to debug view (tool calls)" : "Switch to story mode"}
+          >
+            {storyMode ? "Debug" : "Story"}
+          </button>
+        )}
       </header>
 
       {/* LinkedIn username prompt */}
@@ -330,15 +397,35 @@ export default function GhostwriterIDE() {
             {lines.length === 0 && (
               <p className="text-stone-500">Ready. Click Generate to start.</p>
             )}
-            {lines.map((line, i) => (
-              <div key={i} className={getLineColor(line.type)}>
-                <span className="mr-2 text-stone-600">
-                  {new Date(line.timestamp).toLocaleTimeString()}
-                </span>
-                <span className="mr-2 text-stone-500">[{line.type}]</span>
-                <span className="whitespace-pre-wrap">{line.text}</span>
-              </div>
-            ))}
+            {(() => {
+              // In story mode, map non-terminal events (anything
+              // that isn't done/error) to story lines by position.
+              // done/error always render as themselves so the user
+              // sees completion regardless of mode.
+              let storyIdx = 0;
+              return lines.map((line, i) => {
+                const isTerminal = line.type === "done" || line.type === "error";
+                if (storyMode && storyLines.length > 0 && !isTerminal) {
+                  if (storyIdx >= storyLines.length) return null;
+                  const storyText = storyLines[storyIdx];
+                  storyIdx += 1;
+                  return (
+                    <div key={i} className={`${getLineColor("story")} font-mono text-sm leading-loose py-1`}>
+                      {storyText}
+                    </div>
+                  );
+                }
+                return (
+                  <div key={i} className={getLineColor(line.type)}>
+                    <span className="mr-2 text-stone-600">
+                      {new Date(line.timestamp).toLocaleTimeString()}
+                    </span>
+                    <span className="mr-2 text-stone-500">[{line.type}]</span>
+                    <span className="whitespace-pre-wrap">{line.text}</span>
+                  </div>
+                );
+              });
+            })()}
           </div>
         )}
 
@@ -540,6 +627,7 @@ function getLineColor(type: string): string {
     case "error": return "text-red-400";
     case "done": return "text-green-400";
     case "status": return "text-cyan-400";
+    case "story": return "text-amber-200/90";
     default: return "text-stone-400";
   }
 }
