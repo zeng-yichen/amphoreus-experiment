@@ -514,50 +514,75 @@ def fetch_icp_data(user: dict[str, Any]) -> dict[str, str]:
     files["posts.json"] = json.dumps(posts, default=str, indent=2)
 
     # Reactions + comments are keyed by provider_post_urn, not numeric id.
+    # Chunked for the same URL-length reason as profiles below — safer
+    # in case the 200-post cap is ever raised.
     post_urns = [p.get("provider_urn") for p in posts if p.get("provider_urn")]
+    _POST_URN_CHUNK = 100
 
-    reactions: list[dict[str, Any]] = []
-    if post_urns:
-        reactions = (
-            sb.table("linkedin_reactions")
-            .select("*")
-            .in_("provider_post_urn", post_urns)
-            .limit(5000)
-            .execute()
-            .data
-            or []
-        )
+    def _fetch_chunked_in(table: str, col: str, values: list[str], limit: int) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for i in range(0, len(values), _POST_URN_CHUNK):
+            batch = values[i : i + _POST_URN_CHUNK]
+            try:
+                page = (
+                    sb.table(table)
+                    .select("*")
+                    .in_(col, batch)
+                    .limit(limit)
+                    .execute()
+                    .data
+                    or []
+                )
+            except Exception as e:
+                logger.warning(
+                    "[jacquard_direct] %s chunk %d-%d failed: %s",
+                    table, i, i + len(batch), e,
+                )
+                continue
+            out.extend(page)
+        return out
+
+    reactions = _fetch_chunked_in("linkedin_reactions", "provider_post_urn", post_urns, 5000) if post_urns else []
     files["reactions.json"] = json.dumps(reactions, default=str, indent=2)
 
-    comments: list[dict[str, Any]] = []
-    if post_urns:
-        comments = (
-            sb.table("linkedin_comments")
-            .select("*")
-            .in_("provider_post_urn", post_urns)
-            .limit(2000)
-            .execute()
-            .data
-            or []
-        )
+    comments = _fetch_chunked_in("linkedin_comments", "provider_post_urn", post_urns, 2000) if post_urns else []
     files["comments.json"] = json.dumps(comments, default=str, indent=2)
 
     # Reactor + commenter profiles — join on provider_urn.
+    # Chunked because `.in_()` bakes the entire list into the query
+    # string of a single GET, and a popular user's engager set
+    # (thousands of URNs, each ~45 chars URL-encoded) blows past
+    # Supabase/PostgREST's URL length limit and the server returns
+    # "JSON could not be generated" / 400. 100 URNs per chunk keeps
+    # each URL well under the limit with room to spare.
     engager_urns = sorted({
         *(r.get("provider_profile_urn") for r in reactions if r.get("provider_profile_urn")),
         *(c.get("provider_profile_urn") for c in comments if c.get("provider_profile_urn")),
     })
 
     profiles: list[dict[str, Any]] = []
-    if engager_urns:
-        profiles = (
-            sb.table("linkedin_profiles")
-            .select("*")
-            .in_("provider_urn", engager_urns)
-            .execute()
-            .data
-            or []
-        )
+    _PROFILE_CHUNK = 100
+    for i in range(0, len(engager_urns), _PROFILE_CHUNK):
+        batch = engager_urns[i : i + _PROFILE_CHUNK]
+        try:
+            page = (
+                sb.table("linkedin_profiles")
+                .select("*")
+                .in_("provider_urn", batch)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as e:
+            # One bad batch shouldn't kill the whole engagement/
+            # listing — log and move on. The agent will still get
+            # the posts/reactions/comments blobs.
+            logger.warning(
+                "[jacquard_direct] linkedin_profiles chunk %d-%d failed: %s",
+                i, i + len(batch), e,
+            )
+            continue
+        profiles.extend(page)
     files["profiles.json"] = json.dumps(profiles, default=str, indent=2)
 
     files["client_info.json"] = json.dumps({
