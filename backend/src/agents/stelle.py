@@ -888,64 +888,41 @@ def _dispatch_read_file(root, args):
     return _exec_read_file(root, args)
 
 
-def _posts_drafts_blocked_message() -> str:
-    """Stelle shouldn't write to posts/drafts/* in Lineage mode — that's
-    DraftsFs territory and every write creates a duplicate drafts row.
-    Use submit_draft instead. Returned as an error when she tries."""
+def _lineage_write_blocked_message() -> str:
+    """In Lineage mode, nothing Stelle writes should land on Lineage's
+    workspace — it's the client's space. Final posts go through
+    ``submit_draft``; everything else is in-context iteration.
+
+    Returned when Stelle tries to write while running in Lineage mode.
+    """
     return (
-        "Error: write_file/edit_file under `posts/drafts/` is disabled in "
-        "Lineage mode. Each such write would create a duplicate row in "
-        "Lineage's drafts table. Use the `submit_draft` tool for finished "
-        "posts instead. For scratch iteration, write to `notes/` "
-        "(e.g., `<slug>/notes/drafts/post1-v1.md`) — those stay on the "
-        "Lineage workspace and can be read back with `read_file` for "
-        "flame-chase iteration with Irontomb."
+        "Error: write_file and edit_file are disabled in Lineage mode. "
+        "Lineage's workspace is the client's space — Stelle never writes "
+        "there except through `submit_draft` (final posts only).\n\n"
+        "For flame-chase iteration: call `get_reader_reaction(draft_text=...)` "
+        "with your draft text directly — you do NOT need to persist drafts "
+        "to files. Keep v1 → v2 → v3 in your own reasoning; the tool takes "
+        "the full current draft on each call. When a draft is ready, call "
+        "`submit_draft` with the final text."
     )
 
 
-def _path_under_posts_drafts(path: str) -> bool:
-    """True if the path targets a FOC user's posts/drafts/ subtree.
-
-    Accepts bare ``posts/drafts/...`` (user-targeted mode, auto-prefixed)
-    or ``<slug>/posts/drafts/...`` (company-wide mode).
-    """
-    if not path:
-        return False
-    norm = path.lstrip("/").replace("\\", "/")
-    parts = [p for p in norm.split("/") if p and p != "."]
-    if len(parts) >= 2 and parts[0] == "posts" and parts[1] == "drafts":
-        return True
-    if len(parts) >= 3 and parts[1] == "posts" and parts[2] == "drafts":
-        return True
-    return False
-
-
 def _dispatch_write_file(root, args):
-    """Writes in Lineage mode proxy to virio-api EXCEPT for `posts/drafts/`
-    which must go through submit_draft. In local mode falls back to the
-    on-disk SandboxFs writer.
-
-    Rationale: Stelle's flame-chase iteration writes v1 drafts to
-    `notes/drafts/`, reads them back to iterate with Irontomb, then writes
-    v2/v3, etc. If writes go fly-local but reads go to Lineage (or vice
-    versa), the loop breaks with file-not-found. Both have to live on the
-    same workspace — Lineage's — so read-your-own-write works."""
+    """Writes go to fly-local SandboxFs in local mode. In Lineage mode
+    writes are refused — Stelle iterates in-context via get_reader_reaction
+    and ships final posts via submit_draft."""
     from backend.src.agents import lineage_fs_client as _lfs
     if _lfs.is_lineage_mode():
-        if _path_under_posts_drafts(args.get("path", "")):
-            return _posts_drafts_blocked_message()
-        return _lfs.exec_write_file(root, args)
+        return _lineage_write_blocked_message()
     return _exec_write_file(root, args)
 
 
 def _dispatch_edit_file(root, args):
-    """Edits mirror _dispatch_write_file's Lineage routing. Same rationale:
-    read-your-own-write must hit the same workspace."""
+    """Same policy as _dispatch_write_file — refused in Lineage mode,
+    fly-local in local mode."""
     from backend.src.agents import lineage_fs_client as _lfs
     if _lfs.is_lineage_mode():
-        if _path_under_posts_drafts(args.get("path", "")):
-            return _posts_drafts_blocked_message()
-        return _lfs.exec_edit_file(root, args)
+        return _lineage_write_blocked_message()
     return _exec_edit_file(root, args)
 
 
@@ -1964,29 +1941,38 @@ create duplicate drafts. Here's how to do the same things correctly:
   rank them yourself. For a curated slice, also check `tone/` which
   exposes ``tone_references`` picks.
 
-- `bash` tool is disabled in Lineage mode — it would run on a scratch
-  filesystem your data isn't on. Use the structured tools instead.
+- `bash`, `write_file`, `edit_file` are ALL DISABLED in Lineage mode.
+  Lineage's workspace is the CLIENT's space — you never write to it
+  except through `submit_draft` (final posts only). Any call to
+  write_file or edit_file will be refused with an error.
 
-- **FINAL DRAFTS: use `submit_draft`, NOT `write_file`.**
-  Do NOT call `write_file("<slug>/posts/drafts/<name>/content.md", text)`
-  for your final output. Each such write creates a brand-new ``drafts``
-  row in the database. If you iterate (v1 → revise → v2) via write_file,
-  you end up with duplicate drafts cluttering the calendar.
+- **Iteration is entirely in-context. No scratch files.**
+  Don't try to write a v1 draft to `notes/drafts/post1-v1.md` and read
+  it back. Keep drafts in your reasoning. When you want a reader
+  reaction, call:
 
-  Correct workflow per finished post:
-    1. Iterate internally: write scratch plans to `notes/plan.md`,
-       use `get_reader_reaction` to test drafts in memory.
-    2. When the text is final, call `submit_draft` ONCE with:
-         user_slug          — which FOC user this post is for
-         content            — the final post markdown
-         scheduled_date     — ISO "YYYY-MM-DD" for the calendar slot
-         publication_order  — 1, 2, 3... when producing multiple drafts
-         approver_user_ids  — optional; defaults to the company's AM
-         why_post           — your rationale (stored as a draft_comment)
+      get_reader_reaction(draft_text="<the full current draft>")
 
-  `submit_draft` atomically creates the draft row with all metadata AND
-  creates a ``review_draft`` task for the approver. No follow-up calls
-  needed.
+  Irontomb returns `{reaction, anchor}` — you interpret and decide
+  whether to revise. Iterate v1 → v2 → v3 by just keeping the text
+  in your context. No file round-trip.
+
+- **FINAL DRAFTS: use `submit_draft`.** It is the ONLY Lineage-bound
+  write tool. One call per finished post:
+
+      submit_draft(
+        user_slug="<slug>",          # which FOC user this post is for
+        content="<final markdown>",   # the final post, plain markdown
+        scheduled_date="YYYY-MM-DD",  # calendar slot (tomorrow or later)
+        publication_order=1,          # 1, 2, 3… for multi-post runs
+        approver_user_ids=[...],      # optional; defaults to company AM
+        why_post="<rationale>",       # stored as a draft_comment
+      )
+
+  `submit_draft` atomically creates the draft row + a ``review_draft``
+  task for the approver. It also runs Castorice fact-check on your
+  content before writing — the fact-check report + citations land in
+  the draft_comment thread for the reviewer.
 
 - **Multi-post runs: vary angles, don't riff one topic twice.**
   When the user asks for N posts, cover N DIFFERENT angles/topics —
@@ -2002,19 +1988,28 @@ create duplicate drafts. Here's how to do the same things correctly:
 _LINEAGE_DIRECTIVES_USER_TARGETED = """\
 # Lineage Mode — USER-TARGETED RUN
 
-You are running against a REMOTE workspace served by Lineage (virio-api).
-All filesystem tool calls (``list_directory``, ``read_file``, ``write_file``,
-``edit_file``) hit that remote over HTTPS, scoped to a single FOC user for
-this run. Every draft you produce will be attributed to that user.
+You are running against a REMOTE workspace served by Lineage (virio-api),
+scoped to a single FOC user for this run. Every draft you produce will
+be attributed to that user.
 
-## Workspace layout (paths auto-prefixed to the target user)
+**Lineage's workspace is READ-ONLY to you.** You may call `list_directory`,
+`read_file`, and `search_files` freely. You may NOT call `write_file`,
+`edit_file`, or `bash` — all three are disabled in Lineage mode and will
+return an error. The only tool that writes to Lineage is `submit_draft`,
+which submits a finished post atomically.
 
-Use these bare paths — the path layer prepends the target user's slug
-automatically, and ``memory/`` DOES NOT exist in this workspace.
+Iteration happens entirely in your own context — no scratch files.
+When you want a reader reaction on a draft, pass it directly:
 
-- ``transcripts/``       — raw client-direct transcripts (read-only)
-- ``research/``          — deep research (read-only)
-- ``engagement/``        — LinkedIn engagement observations (read-only).
+    get_reader_reaction(draft_text="<full current draft>")
+
+Keep v1 → v2 → v3 in your own reasoning. No file round-trip needed.
+
+## Workspace layout (read-only; paths auto-prefixed to the target user)
+
+- ``transcripts/``       — raw client-direct transcripts
+- ``research/``          — deep research
+- ``engagement/``        — LinkedIn engagement observations.
                            Files: ``posts.json``, ``reactions.json``,
                            ``comments.json``, ``profiles.json``,
                            ``work_experiences.json``, ``client_info.json``
@@ -2026,24 +2021,21 @@ automatically, and ``memory/`` DOES NOT exist in this workspace.
                            (client name, company, posts_per_month target,
                            Slack channels). Other files are operator-
                            uploaded brand docs / positioning PDFs.
-- ``posts/published/``   — already-published LinkedIn posts (read-only)
-- ``posts/drafts/``      — unpushed drafts (do NOT write here directly in
-                           Lineage mode — use ``submit_draft`` instead)
+- ``posts/published/``   — already-published LinkedIn posts
+- ``posts/drafts/``      — unpushed drafts (do NOT attempt to write here —
+                           use ``submit_draft``)
 - ``edits/``             — FEEDBACK SIGNAL. For each published draft, a
                            markdown file showing the earliest snapshot,
                            the final published text, AND threaded
-                           operator comments. Read these before writing
-                           new drafts — they reveal how operators actually
-                           revise your output.
-                           (Replaces ``memory/feedback/edits/``.)
+                           operator comments. Read these before drafting
+                           — they reveal how operators actually revise
+                           your output.
 - ``tone/``              — style references / voice calibration examples
-- ``notes/``             — working notes (read/write)
-- ``strategy/``          — persistent cross-run strategy memory (read/write).
-                           Update this when you learn something about this
-                           user that future runs should know.
+- ``strategy/``          — persistent cross-run strategy memory. Read
+                           it; you cannot write to it in Lineage mode.
 
 Shared (not user-scoped; don't prepend slug):
-- ``tasks/``             — pending review tasks + their resolution state
+- ``tasks/``             — pending review tasks (read-only)
 - ``slack/``             — Slack channel context (read-only)
 - ``conversations/``     — ``trigger-log.jsonl``: replay of every prior
                            trigger (interviews, CE feedback with diffs,
@@ -2052,25 +2044,14 @@ Shared (not user-scoped; don't prepend slug):
                            client — scan it at session start.
 - ``.pi/``               — Jacquard's own agent's skill files. IGNORE.
 
-## Path migration from Amphoreus defaults
-
-- ``memory/source-material/`` → ``transcripts/``
-- ``memory/published-posts/`` → ``posts/published/``
-- ``memory/feedback/edits/``  → ``edits/``
-- ``memory/plan.md``          → ``notes/plan.md``
-- ``scratch/final/``          → call ``submit_draft`` (don't write to ``posts/drafts/``)
-
 ## Draft write contract
 
-**Use ``submit_draft`` for finished posts.** It is the atomic Lineage
-submission tool: one call = one draft row in Lineage's ``drafts`` table,
-a ``review_draft`` task for the approver, and a scheduled calendar slot.
-Each ``submit_draft`` call also runs Castorice fact-check on your content
-before the post is written to Lineage — the fact-check report ends up
-attached as a draft comment the reviewer can see.
-
-Do NOT ``write_file`` into ``posts/drafts/`` — it creates a duplicate /
-orphaned row. ``submit_draft`` is the only correct path.
+**Use ``submit_draft`` for finished posts.** It is the ONLY Lineage-bound
+write tool. One call = one draft row in Lineage's ``drafts`` table, one
+``review_draft`` task for the approver, one calendar slot at
+``scheduled_date``. `submit_draft` also runs Castorice fact-check on your
+content before writing — the fact-check report + citations land in the
+draft_comment thread for the reviewer.
 
 ## Ingestion order at session start (Lineage mode)
 
@@ -2078,7 +2059,7 @@ orphaned row. ``submit_draft`` is the only correct path.
 2. ``read_file("conversations/trigger-log.jsonl")`` — your history with
    this company (interviews, CE feedback diffs, prior runs). Scan it.
 3. ``read_file("strategy/strategy.md")`` if it exists — cross-run memory
-   left by your previous selves. Update it at the end of this run.
+   left by your previous selves.
 4. ``list_directory("edits/")`` — operator-edit feedback signal.
 5. ``list_directory("transcripts/")`` + read the latest 2-3 transcripts.
 6. ``list_directory("engagement/")`` — the JSON files are your data
@@ -2097,30 +2078,37 @@ You are running against a REMOTE workspace served by Lineage (virio-api).
 All filesystem tool calls hit that remote over HTTPS. ``memory/`` and
 ``scratch/`` DO NOT exist — use the layout below.
 
-## Workspace layout
+**Lineage's workspace is READ-ONLY to you.** `list_directory`, `read_file`,
+and `search_files` work. `write_file`, `edit_file`, and `bash` are
+disabled and will error. The only tool that writes to Lineage is
+`submit_draft`. Iteration (v1 → v2 → v3) happens entirely in your own
+context — call `get_reader_reaction(draft_text=...)` directly with the
+current draft text; no scratch files.
+
+## Workspace layout (all read-only)
 
 The workspace root contains one top-level directory per FOC user of the
 company. Each user has the same subtree structure:
 
     /                                  (workspace root)
     ├── <user-slug>/
-    │   ├── transcripts/               (read-only — client-direct interview text)
-    │   ├── research/                  (read-only — deep research)
-    │   ├── engagement/                (read-only — posts.json / reactions.json /
+    │   ├── transcripts/               (client-direct interview text)
+    │   ├── research/                  (deep research)
+    │   ├── engagement/                (posts.json / reactions.json /
     │   │                                comments.json / profiles.json /
     │   │                                work_experiences.json / client_info.json)
-    │   ├── reports/                   (read-only — latest ICP report + Typst template)
-    │   ├── context/                   (read-only — account.md + uploaded brand docs)
-    │   ├── posts/published/           (read-only — published LinkedIn posts)
-    │   ├── posts/drafts/              (do NOT write directly — use submit_draft)
-    │   ├── edits/                     (read-only — FEEDBACK SIGNAL: per-draft
-    │   │                                first-snapshot vs. final-published diffs
-    │   │                                WITH threaded operator comments.
-    │   │                                Replaces memory/feedback/edits/)
-    │   ├── tone/                      (read-only — voice/style references)
-    │   ├── notes/                     (read/write — working notes)
-    │   └── strategy/                  (read/write — persistent agent memory)
-    ├── tasks/                         (shared, read/write — pending review tasks)
+    │   ├── reports/                   (latest ICP report + Typst template)
+    │   ├── context/                   (account.md + uploaded brand docs)
+    │   ├── posts/published/           (published LinkedIn posts)
+    │   ├── posts/drafts/              (existing unpushed drafts — use submit_draft
+    │   │                                for new ones)
+    │   ├── edits/                     (FEEDBACK SIGNAL: per-draft first-snapshot
+    │   │                                vs. final-published diffs WITH threaded
+    │   │                                operator comments)
+    │   ├── tone/                      (voice/style references)
+    │   └── strategy/                  (persistent cross-run strategy memory —
+    │                                    you can read it, you cannot write to it)
+    ├── tasks/                         (shared — pending review tasks, read-only)
     ├── slack/                         (shared, read-only)
     ├── conversations/                 (shared — trigger-log.jsonl: replay of every
     │                                    prior interview / CE feedback / manual run
@@ -2140,14 +2128,6 @@ passing their slug to ``submit_draft``:
 
 The slug determines attribution — there is no separate ``author`` field.
 
-## Path migration from Amphoreus defaults
-
-- ``memory/<company>/source-material/`` → ``<user-slug>/transcripts/``
-- ``memory/<company>/published-posts/`` → ``<user-slug>/posts/published/``
-- ``memory/<company>/plan.md``          → ``<user-slug>/notes/plan.md``
-- ``scratch/final/``                    → call ``submit_draft`` (don't write
-                                           to ``<user-slug>/posts/drafts/``)
-
 ## Draft write contract
 
 **Use ``submit_draft`` for finished posts.** One call = one draft row in
@@ -2156,8 +2136,7 @@ a scheduled calendar slot. Each ``submit_draft`` call also runs Castorice
 fact-check on your content before the post is written to Lineage — the
 fact-check report is attached as a draft comment.
 
-Do NOT ``write_file`` into ``<user-slug>/posts/drafts/`` — it creates a
-duplicate / orphaned row. ``submit_draft`` is the only correct path.
+`submit_draft` is the ONLY write operation available in Lineage mode.
 
 ## Ingestion order at session start (Lineage mode)
 
@@ -2172,8 +2151,6 @@ duplicate / orphaned row. ``submit_draft`` is the only correct path.
    e. ``list_directory("<slug>/reports/")`` — ICP report if present.
    f. Spot-read ``<slug>/tone/``, ``<slug>/posts/published/``,
       ``<slug>/context/account.md`` as needed.
-4. Update ``<slug>/strategy/strategy.md`` at the end of the run with
-   anything future you-instances should know.
 """
 
 
