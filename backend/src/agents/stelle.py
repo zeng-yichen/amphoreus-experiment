@@ -4239,32 +4239,11 @@ def _process_result(
             except Exception as _e:
                 logger.warning("[Stelle] Could not save post %d to local SQLite: %s", i, _e)
 
-        # Lineage-mode parallel write: when the run is user-targeted, push
-        # the draft to the Lineage workspace under the target user's slug
-        # so it lands in Supabase's ``drafts`` table (surfaces in the
-        # Lineage calendar). Non-fatal on failure.
-        #
-        # In COMPANY-WIDE Lineage runs we do NOT auto-attribute here —
-        # Stelle is expected to have issued her own ``write_file`` calls
-        # with explicit ``<slug>/posts/drafts/...`` paths during the loop,
-        # so those writes already landed. Auto-writing here would pick the
-        # wrong user.
-        try:
-            from backend.src.agents import lineage_fs_client as _lfs
-            if _lfs.is_lineage_mode() and _lfs.is_user_targeted():
-                _ok, _msg = _lfs.write_draft_for_current_run(_draft_id, corrected)
-                if _ok:
-                    logger.info("[Stelle][Lineage] attributed draft %s (%d chars) to target user", _draft_id, len(corrected))
-                    # Mirror Pi's post-run hook at trigger-router.ts:556 —
-                    # create a review_draft task so the CS queue populates.
-                    _task_title = (hook[:120] if hook else "Review draft").strip() or "Review draft"
-                    _task_ok, _task_msg = _lfs.create_review_task(_draft_id, f"Review draft: {_task_title}")
-                    if not _task_ok:
-                        logger.warning("[Stelle][Lineage] review_task for %s failed: %s", _draft_id, _task_msg)
-                else:
-                    logger.warning("[Stelle][Lineage] draft %s attribution failed: %s", _draft_id, _msg)
-        except Exception as _e:
-            logger.warning("[Stelle][Lineage] draft %s cross-write crashed: %s", _draft_id, _e)
+        # DELETED: the old Lineage-parallel-write path.
+        # Stelle is read-only against Jacquard. Drafts land exclusively in
+        # Amphoreus's local_posts table + output/ markdown mirror; the
+        # operator pushes to Ordinal from Amphoreus's Posts tab. Nothing
+        # is ever POSTed back to Jacquard's workspace or drafts table.
 
     Path(output_filepath).parent.mkdir(parents=True, exist_ok=True)
     with open(output_filepath, "w", encoding="utf-8") as f:
