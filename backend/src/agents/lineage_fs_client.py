@@ -326,10 +326,12 @@ def is_lineage_path(rel: str) -> bool:
     # user mount.
     if len(parts) >= 2 and parts[1] in _USER_MOUNTS:
         return True
-    # Bare-slug path (``weber-wong``, ``weber-wong/``) — route to
-    # Lineage so ``_direct_list(slug)`` can surface the user's subdirs.
-    # Cached set makes this free after first query.
-    if len(parts) == 1 and first in _known_foc_slugs():
+    # Known FOC slug prefix — route anything under it (bare slug,
+    # synthesized user-root files like ``post-history.md`` / ``profile.md``,
+    # and any other slug-scoped path) to Lineage. Without this branch the
+    # allowlist only caught ``<slug>/<known-mount>/...`` and slipped the
+    # two synthesized files through to fly-local, where they 404.
+    if first in _known_foc_slugs():
         return True
     return False
 
