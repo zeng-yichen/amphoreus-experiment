@@ -2254,42 +2254,27 @@ Only ``submit_draft`` writes to Lineage (finished posts only).
 
 ## Workspace layout (read-only; paths auto-prefixed to the target user)
 
-- ``transcripts/``       — raw client-direct transcripts
-- ``research/``          — deep research
-- ``engagement/``        — LinkedIn engagement observations.
-                           Files: ``posts.json``, ``reactions.json``,
-                           ``comments.json``, ``profiles.json``,
-                           ``work_experiences.json``, ``client_info.json``
-- ``reports/``           — latest ICP report JSON + Typst template. The
-                           ICP report names specific engagers and highlights
-                           recurring content themes — read it before
-                           deciding angles.
-- ``context/``           — company context. ``account.md`` is auto-built
-                           (client name, company, posts_per_month target,
-                           Slack channels). Other files are operator-
-                           uploaded brand docs / positioning PDFs.
-- ``posts/published/``   — already-published LinkedIn posts
-- ``posts/drafts/``      — unpushed drafts (do NOT attempt to write here —
-                           use ``submit_draft``)
-- ``edits/``             — FEEDBACK SIGNAL. For each published draft, a
-                           markdown file showing the earliest snapshot,
-                           the final published text, AND threaded
-                           operator comments. Read these before drafting
-                           — they reveal how operators actually revise
-                           your output.
-- ``tone/``              — style references / voice calibration examples
-- ``strategy/``          — persistent cross-run strategy memory. Read
-                           it; you cannot write to it in Lineage mode.
+- `transcripts/` — raw client interview transcripts. Every claim traces here.
+- `research/` — deep research (company + person). Supplementary source material.
+- `engagement/posts.json` — this user's authored LinkedIn posts with engagement metrics.
+- `engagement/reactions.json` / `comments.json` / `profiles.json` — engagement rows + reactor/commenter profiles.
+- `engagement/client_info.json` — summary metadata for this user.
+- `context/account.md` — auto-built: client name, company, posts_per_month target, Slack channels.
+- `context/` — operator-uploaded brand docs / positioning PDFs.
+- `reports/` — latest ICP report + Typst template. Names specific engagers and recurring themes — read before deciding angles.
+- `posts/published/` — published LinkedIn posts; engagement metrics in each file header. Rank for voice examples.
+- `posts/drafts/` — existing unpushed drafts. Do NOT write here — use `submit_draft`.
+- `edits/` — FEEDBACK SIGNAL. Per-draft first-snapshot vs. final-published diffs with threaded operator comments. Read before drafting.
+- `tone/` — curated voice/style references.
+- `strategy/` — persistent cross-run strategy memory. Read-only in Lineage.
+- `post-history.md` — synthesized top-performing posts. Baseline — everything you write is compared to this distribution.
+- `profile.md` — synthesized LinkedIn profile.
 
 Shared (not user-scoped; don't prepend slug):
-- ``tasks/``             — pending review tasks (read-only)
-- ``slack/``             — Slack channel context (read-only)
-- ``conversations/``     — ``trigger-log.jsonl``: replay of every prior
-                           trigger (interviews, CE feedback with diffs,
-                           manual runs) in chronological order. This is
-                           your history of prior interactions with this
-                           client — scan it at session start.
-- ``.pi/``               — Jacquard's own agent's skill files. IGNORE.
+- `conversations/trigger-log.jsonl` — chronological replay of every prior trigger (interviews, CE feedback with diffs, manual runs). Scan at session start.
+- `tasks/<id>.json` — pending review tasks.
+- `slack/` — Slack channel snapshots.
+- `.pi/` — Jacquard-agent skill files. IGNORE.
 
 ## Draft write contract
 
@@ -2340,37 +2325,31 @@ Only ``submit_draft`` writes to Lineage (finished posts only).
 
 ## Workspace layout (all read-only)
 
-The workspace root contains one top-level directory per FOC user of the
-company. Each user has the same subtree structure:
+The workspace root contains one `<slug>/` per FOC user of the company plus
+shared roots. Call `list_directory("")` once to discover available slugs,
+then use explicit slug prefixes in every filesystem call.
 
-    /                                  (workspace root)
-    ├── <user-slug>/
-    │   ├── transcripts/               (client-direct interview text)
-    │   ├── research/                  (deep research)
-    │   ├── engagement/                (posts.json / reactions.json /
-    │   │                                comments.json / profiles.json /
-    │   │                                work_experiences.json / client_info.json)
-    │   ├── reports/                   (latest ICP report + Typst template)
-    │   ├── context/                   (account.md + uploaded brand docs)
-    │   ├── posts/published/           (published LinkedIn posts)
-    │   ├── posts/drafts/              (existing unpushed drafts — use submit_draft
-    │   │                                for new ones)
-    │   ├── edits/                     (FEEDBACK SIGNAL: per-draft first-snapshot
-    │   │                                vs. final-published diffs WITH threaded
-    │   │                                operator comments)
-    │   ├── tone/                      (voice/style references)
-    │   └── strategy/                  (persistent cross-run strategy memory —
-    │                                    you can read it, you cannot write to it)
-    ├── tasks/                         (shared — pending review tasks, read-only)
-    ├── slack/                         (shared, read-only)
-    ├── conversations/                 (shared — trigger-log.jsonl: replay of every
-    │                                    prior interview / CE feedback / manual run
-    │                                    for this company, chronological)
-    └── .pi/                           (Jacquard-agent skill files — IGNORE)
+- `<slug>/transcripts/` — raw client interview transcripts. Every claim traces here.
+- `<slug>/research/` — deep research (company + person). Supplementary source material.
+- `<slug>/engagement/posts.json` — this user's authored LinkedIn posts with engagement metrics.
+- `<slug>/engagement/reactions.json` / `comments.json` / `profiles.json` — engagement rows + reactor/commenter profiles.
+- `<slug>/engagement/client_info.json` — summary metadata for this user.
+- `<slug>/context/account.md` — auto-built: client name, company, posts_per_month target, Slack channels.
+- `<slug>/context/` — operator-uploaded brand docs / positioning PDFs.
+- `<slug>/reports/` — latest ICP report + Typst template. Names specific engagers and recurring themes — read before deciding angles.
+- `<slug>/posts/published/` — published LinkedIn posts; engagement metrics in each file header. Rank for voice examples.
+- `<slug>/posts/drafts/` — existing unpushed drafts. Do NOT write here — use `submit_draft`.
+- `<slug>/edits/` — FEEDBACK SIGNAL. Per-draft first-snapshot vs. final-published diffs with threaded operator comments. Read before drafting.
+- `<slug>/tone/` — curated voice/style references.
+- `<slug>/strategy/` — persistent cross-run strategy memory. Read-only in Lineage.
+- `<slug>/post-history.md` — synthesized top-performing posts. Baseline — everything you write is compared to this distribution.
+- `<slug>/profile.md` — synthesized LinkedIn profile.
 
-You MUST use explicit user-slug prefixes in every filesystem call — do not
-guess. Start by calling ``list_directory("")`` to discover the available
-FOC-user slugs.
+Shared (not user-scoped; don't prepend slug):
+- `conversations/trigger-log.jsonl` — chronological replay of every prior trigger (interviews, CE feedback with diffs, manual runs). Scan at session start.
+- `tasks/<id>.json` — pending review tasks.
+- `slack/` — Slack channel snapshots.
+- `.pi/` — Jacquard-agent skill files. IGNORE.
 
 ## Per-draft author attribution
 
