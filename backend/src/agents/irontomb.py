@@ -160,8 +160,38 @@ def _load_audience_context(company: str) -> str:
     narrow ICP — it's about understanding what content patterns from
     this client tend to drive broad LinkedIn engagement.
 
+    Source precedence:
+      1. Lineage mode (LINEAGE_COMPANY_ID + LINEAGE_USER_SLUG + Supabase/GCS
+         creds present) — fetch transcripts directly from Jacquard. This
+         is the default on Fly where the fly-local ``memory/`` tree is
+         empty after the memory/ cut.
+      2. Fly-local disk — the legacy single-tenant path that still serves
+         amphoreus.app standalone runs and tests.
+
     Returns a single prompt-ready string; never raises.
     """
+    # --- Lineage mode: pull transcripts from Jacquard's Supabase + GCS ---
+    lineage_chunks: list[str] = []
+    try:
+        from backend.src.agents import lineage_fs_client as _lfs
+        if _lfs.is_lineage_mode():
+            lineage_chunks = _load_audience_context_lineage()
+    except Exception as e:
+        logger.warning("[Irontomb] Lineage transcript fetch failed, falling back to local: %s", e)
+
+    if lineage_chunks:
+        return (
+            "# Client context source: transcripts (Lineage)\n\n"
+            "These are raw transcripts from the client — their own "
+            "words about their domain, their work, their conversations. "
+            "Read them to understand the client's voice, topic space, "
+            "and the kind of content they produce. Your job is to "
+            "predict how the GENERAL LinkedIn audience will react — "
+            "not just a narrow target segment, but anyone who might "
+            "see this post in their feed.\n\n"
+            + "\n\n---\n\n".join(lineage_chunks)
+        )
+
     transcripts_dir = P.memory_dir(company) / "transcripts"
     if transcripts_dir.exists() and transcripts_dir.is_dir():
         transcript_files = sorted(
@@ -214,6 +244,61 @@ def _load_audience_context(company: str) -> str:
         "about LinkedIn audiences — busy professionals scrolling between "
         "meetings, tired of AI-written content."
     )
+
+
+def _load_audience_context_lineage() -> list[str]:
+    """Fetch transcripts from Jacquard for Irontomb's audience prompt.
+
+    Mirrors the per-tf chunking shape used by the fly-local reader
+    (up to 20 files, 8 KB per file, 80 KB aggregate cap). Returns the
+    list of ``"## {name}\\n\\n{body}"`` chunks ready to be joined by
+    the caller. Empty list = no transcripts available (caller prints
+    the "base priors" fallback).
+    """
+    import os as _os
+    from backend.src.agents import jacquard_direct as _jd
+
+    company_id = _os.environ.get("LINEAGE_COMPANY_ID", "").strip()
+    slug = _os.environ.get("LINEAGE_USER_SLUG", "").strip()
+    if not company_id or not slug:
+        # Company-wide mode (no specific FOC user) — Irontomb has no
+        # single user to fetch meetings for. Stay empty and let the
+        # caller decide whether to hit the local fallback.
+        return []
+
+    try:
+        user = _jd.resolve_user_by_slug(company_id, slug)
+    except Exception as e:
+        logger.warning("[Irontomb] resolve_user_by_slug(%s, %s) failed: %s", company_id, slug, e)
+        return []
+    if not user:
+        return []
+
+    try:
+        transcripts = _jd.fetch_meeting_transcripts(
+            user.get("id", ""),
+            user.get("email"),
+            bool(user.get("is_internal")),
+        )
+    except Exception as e:
+        logger.warning("[Irontomb] fetch_meeting_transcripts failed: %s", e)
+        return []
+
+    chunks: list[str] = []
+    total = 0
+    # Take up to the last 20 to match the fly-local slice ``[-20:]``.
+    # ``fetch_meeting_transcripts`` already orders by start_time desc
+    # with a MAX cap, so slicing the tail gives the newest 20.
+    for item in transcripts[-20:]:
+        content = (item.get("content") or "").strip()
+        if not content:
+            continue
+        name = item.get("filename") or "transcript.md"
+        chunks.append(f"## {name}\n\n{content[:8000]}")
+        total += len(content)
+        if total >= 80000:
+            break
+    return chunks
 
 
 # Backwards-compat alias — external callers (cyrene.py, icp_scorer.py) import this name
