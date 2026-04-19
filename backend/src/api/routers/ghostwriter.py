@@ -233,24 +233,35 @@ async def stream_for_company(companyId: str, after_id: int = 0):
     resumption) until ``done``/``error`` or the client disconnects.
     """
     from backend.src.db.local import list_runs
-    runs = list_runs(companyId, limit=1)
-    if not runs:
-        # No run yet for this company. Hold the connection open with SSE
-        # COMMENT lines (ignored by the client) while polling for a new
-        # run every few seconds. When one appears, PIVOT the same open
-        # connection into streaming that run's events — so the user's
-        # click on Generate immediately starts filling the terminal without
-        # needing to reconnect.
+
+    # Pick the latest *active* run (pending / running). If the only
+    # run(s) for this company are terminal (completed / failed), treat
+    # as "no active run" — otherwise the SSE connection locks onto a
+    # dead job and the user's next click on Generate has nowhere to
+    # stream to. The idle-pivot branch below will hand off to the new
+    # run as soon as it appears.
+    _ACTIVE_STATUSES = {"pending", "running"}
+    recent_runs = list_runs(companyId, limit=5)
+    active_runs = [r for r in recent_runs if r.get("status") in _ACTIVE_STATUSES]
+
+    if not active_runs:
+        # No active run yet for this company. Hold the connection open
+        # with SSE COMMENT lines (ignored by the client) while polling
+        # for a new run every few seconds. When one appears, PIVOT the
+        # same open connection into streaming that run's events — so the
+        # user's click on Generate immediately starts filling the
+        # terminal without needing to reconnect.
         import asyncio as _asyncio
         async def _idle_then_pivot():
-            yield ": idle - no run for this company yet\n\n"
+            yield ": idle - no active run for this company yet\n\n"
             try:
                 while True:
                     await _asyncio.sleep(3)
                     yield ": keepalive\n\n"
-                    new_runs = list_runs(companyId, limit=1)
-                    if new_runs:
-                        new_job_id = new_runs[0].get("id")
+                    new_runs = list_runs(companyId, limit=5)
+                    new_active = [r for r in new_runs if r.get("status") in _ACTIVE_STATUSES]
+                    if new_active:
+                        new_job_id = new_active[0].get("id")
                         if new_job_id:
                             # Hand off to the per-job SSE generator —
                             # same one /stream/{job_id} uses — so the
@@ -269,7 +280,7 @@ async def stream_for_company(companyId: str, after_id: int = 0):
         return StreamingResponse(_idle_then_pivot(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    job_id = runs[0].get("id")
+    job_id = active_runs[0].get("id")
     if not job_id:
         raise HTTPException(status_code=500, detail="run row missing id")
 
