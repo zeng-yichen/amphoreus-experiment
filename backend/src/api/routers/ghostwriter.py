@@ -118,24 +118,48 @@ async def generate(req: GenerateRequest, request: Request):
         if direct_configured:
             resolved_company_id = req.companyId or None
             if not resolved_company_id and req.company:
-                # Best-effort slug → UUID lookup from the shared Supabase.
-                # Both Amphoreus's workspace and Jacquard's user_companies
-                # table live in the same project, so a single query works.
+                # Jacquard's user_companies has no slug column — match on
+                # name + domains. Amphoreus slugs are flat ("innovocommerce",
+                # "hensley-biostats") while Jacquard names are proper
+                # ("InnovoCommerce", "Hensley Biostats"). We normalize both
+                # to a collapsed lowercase string and prefix-match.
+                import re as _re
+                amph_slug = req.company.strip().lower()
+                amph_first = amph_slug.split("-", 1)[0]
+                amph_flat = _re.sub(r"[^a-z0-9]+", "", amph_slug)
                 try:
                     from backend.src.db.supabase_client import get_supabase
                     sb = get_supabase()
-                    # user_companies stores a slug column in Jacquard's schema.
-                    # Match case-insensitively against the Amphoreus slug.
-                    row = (
+                    rows = (
                         sb.table("user_companies")
-                          .select("id")
-                          .eq("slug", req.company.strip().lower())
-                          .limit(1)
+                          .select("id, name, domains")
+                          .limit(200)
                           .execute()
+                          .data
+                        or []
                     )
-                    hits = row.data or []
-                    if hits:
-                        resolved_company_id = hits[0].get("id")
+                    best = None
+                    for c in rows:
+                        name_flat = _re.sub(r"[^a-z0-9]+", "", (c.get("name") or "").lower())
+                        domains_flat = "".join(
+                            _re.sub(r"[^a-z0-9]+", "", (d or "").lower())
+                            for d in (c.get("domains") or [])
+                        )
+                        # Strongest: name exactly equals flattened slug.
+                        if name_flat == amph_flat:
+                            best = c
+                            break
+                        # Medium: first token of slug is contained in name or domains.
+                        if amph_first and (amph_first in name_flat or amph_first in domains_flat):
+                            # Prefer the shortest name match (more specific).
+                            if best is None or len(c.get("name") or "") < len(best.get("name") or ""):
+                                best = c
+                    if best:
+                        resolved_company_id = best.get("id")
+                        logger.info(
+                            "[ghostwriter] slug %r → company %r (%s)",
+                            amph_slug, best.get("name"), resolved_company_id,
+                        )
                 except Exception as exc:
                     logger.debug(
                         "[ghostwriter] Jacquard slug→id lookup failed for %s: %s",
