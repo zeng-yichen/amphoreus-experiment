@@ -393,13 +393,19 @@ def _direct_list(path: str) -> str | None:
     if not user:
         return None  # unknown slug → let HTTP try
 
-    # <slug>/  → subdir listing
+    # <slug>/  → subdir listing + the two synthesized user-root files
+    # (post-history.md + profile.md are computed on-demand from the
+    # linkedin_posts / linkedin_profiles tables — they don't live as
+    # rows anywhere, we render them at read time).
     if len(parts) == 1:
         subdirs = [
             "transcripts/", "research/", "engagement/", "context/",
             "reports/", "posts/", "edits/", "tone/", "notes/", "strategy/",
         ]
-        return "\n".join(f"  {d}" for d in subdirs)
+        lines = [f"  {d}" for d in subdirs]
+        lines.append("  post-history.md")
+        lines.append("  profile.md")
+        return "\n".join(lines)
 
     sub = parts[1]
     if sub == "transcripts" and len(parts) == 2:
@@ -468,6 +474,21 @@ def _direct_read(path: str) -> str | None:
             import json as _json
             return _json.dumps(match, default=str, indent=2)
         return None
+
+    # User-root synthesized files: <slug>/post-history.md and <slug>/profile.md.
+    # Not stored anywhere — computed on-demand by rendering the top-reacted
+    # linkedin_posts for post-history.md, and the linkedin_profiles row for
+    # profile.md. Written to disk by populate_lineage_workspace (CLI path)
+    # and served here for the direct-API path so both paths see the same
+    # workspace.
+    if len(parts) == 2 and parts[1] in ("post-history.md", "profile.md"):
+        user = _jd.resolve_user_by_slug(company_id, parts[0])
+        if not user:
+            return None
+        if parts[1] == "post-history.md":
+            return _jd.build_post_history_digest(user, top_n=10)
+        else:
+            return _jd.fetch_profile_md(user)
 
     if len(parts) < 3:
         return None  # not a file path
