@@ -1,14 +1,10 @@
 """
-Stelle — Jacquard-style agentic LinkedIn ghostwriter.
-
-Delegates the agentic loop to Pi (pi.dev CLI), which handles context
-compaction, session persistence, and tool execution natively.  Falls back
-to a direct Anthropic API loop if Pi is not installed.
+Stelle — agentic LinkedIn ghostwriter.
 
 The agent explores the client workspace (transcripts, voice examples,
 published posts, auto-captured draft→posted diffs), drafts posts grounded
-in transcripts, self-reviews against a "magic moment" quality bar, and
-outputs structured JSON.  Posts are then fact-checked by Cyrene Terrae.
+in transcripts, conducts flame-chase journeys in hopes of defeating Irontomb (hopefully not requiring 33 million cycles), and
+outputs structured JSON.  Posts are then fact-checked by Castorice.
 
 Inputs Stelle consumes directly: files under ``transcripts/`` (raw
 client-origin text), observation data via tool calls (post deltas +
@@ -892,16 +888,64 @@ def _dispatch_read_file(root, args):
     return _exec_read_file(root, args)
 
 
+def _posts_drafts_blocked_message() -> str:
+    """Stelle shouldn't write to posts/drafts/* in Lineage mode — that's
+    DraftsFs territory and every write creates a duplicate drafts row.
+    Use submit_draft instead. Returned as an error when she tries."""
+    return (
+        "Error: write_file/edit_file under `posts/drafts/` is disabled in "
+        "Lineage mode. Each such write would create a duplicate row in "
+        "Lineage's drafts table. Use the `submit_draft` tool for finished "
+        "posts instead. For scratch iteration, write to `notes/` "
+        "(e.g., `<slug>/notes/drafts/post1-v1.md`) — those stay on the "
+        "Lineage workspace and can be read back with `read_file` for "
+        "flame-chase iteration with Irontomb."
+    )
+
+
+def _path_under_posts_drafts(path: str) -> bool:
+    """True if the path targets a FOC user's posts/drafts/ subtree.
+
+    Accepts bare ``posts/drafts/...`` (user-targeted mode, auto-prefixed)
+    or ``<slug>/posts/drafts/...`` (company-wide mode).
+    """
+    if not path:
+        return False
+    norm = path.lstrip("/").replace("\\", "/")
+    parts = [p for p in norm.split("/") if p and p != "."]
+    if len(parts) >= 2 and parts[0] == "posts" and parts[1] == "drafts":
+        return True
+    if len(parts) >= 3 and parts[1] == "posts" and parts[2] == "drafts":
+        return True
+    return False
+
+
 def _dispatch_write_file(root, args):
-    """Writes ALWAYS go to fly-local SandboxFs, even in Lineage mode.
-    Scratch (v1/v2/v3 drafts, notes, working files) never leaks to Lineage.
-    The ONLY Lineage-directed write is submit_draft (final posts only)."""
+    """Writes in Lineage mode proxy to virio-api EXCEPT for `posts/drafts/`
+    which must go through submit_draft. In local mode falls back to the
+    on-disk SandboxFs writer.
+
+    Rationale: Stelle's flame-chase iteration writes v1 drafts to
+    `notes/drafts/`, reads them back to iterate with Irontomb, then writes
+    v2/v3, etc. If writes go fly-local but reads go to Lineage (or vice
+    versa), the loop breaks with file-not-found. Both have to live on the
+    same workspace — Lineage's — so read-your-own-write works."""
+    from backend.src.agents import lineage_fs_client as _lfs
+    if _lfs.is_lineage_mode():
+        if _path_under_posts_drafts(args.get("path", "")):
+            return _posts_drafts_blocked_message()
+        return _lfs.exec_write_file(root, args)
     return _exec_write_file(root, args)
 
 
 def _dispatch_edit_file(root, args):
-    """Edits ALWAYS go to fly-local SandboxFs. Same rationale as write_file:
-    Stelle's scratch iteration stays private to fly."""
+    """Edits mirror _dispatch_write_file's Lineage routing. Same rationale:
+    read-your-own-write must hit the same workspace."""
+    from backend.src.agents import lineage_fs_client as _lfs
+    if _lfs.is_lineage_mode():
+        if _path_under_posts_drafts(args.get("path", "")):
+            return _posts_drafts_blocked_message()
+        return _lfs.exec_edit_file(root, args)
     return _exec_edit_file(root, args)
 
 
@@ -2133,11 +2177,35 @@ duplicate / orphaned row. ``submit_draft`` is the only correct path.
 """
 
 
+def _today_preamble() -> str:
+    """Inject today's date so Stelle schedules posts in the future, not
+    the past. Claude's training cutoff means she has no inherent sense
+    of what day it is — without this she'll hallucinate dates from
+    whatever year felt plausible in training data. Applies in both
+    Lineage and local mode."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    today_iso = now.date().isoformat()
+    tomorrow = (now + timedelta(days=1)).date().isoformat()
+    return (
+        "# Today's date\n\n"
+        f"Today is **{today_iso}** ({now.strftime('%A')}). "
+        f"Any `scheduled_date` you assign to `submit_draft` MUST be "
+        f"**{tomorrow} or later** — never in the past, never today. "
+        "When spacing multiple posts across a cadence (Mon/Wed/Fri, "
+        "Tue/Thu, etc.), anchor to today and pick the next N slots going "
+        "forward. The posts_per_month target in `context/account.md` "
+        "tells you the cadence density.\n"
+    )
+
+
 def _build_dynamic_directives(company_keyword: str) -> str:
     """Return dynamic directives for the system prompt.
 
-    Emits one of two Lineage-mode overlays when running against the remote
-    workspace:
+    Always emits the today-preamble so Stelle knows what day it is.
+
+    Additionally emits one of two Lineage-mode overlays when running
+    against the remote workspace:
 
     - ``USER-TARGETED`` when the runner was given ``--lineage-user-slug``.
       Every draft is attributed to that user and paths are auto-prefixed.
@@ -2145,12 +2213,14 @@ def _build_dynamic_directives(company_keyword: str) -> str:
       full workspace with all FOC-user subtrees and must include the
       slug in every filesystem call.
 
-    Returns ``""`` when running against local disk (non-Lineage mode).
+    In local mode (no Lineage env vars), only the today-preamble is
+    emitted.
     """
+    preamble = _today_preamble()
     try:
         from backend.src.agents import lineage_fs_client as _lfs
         if not _lfs.is_lineage_mode():
-            return ""
+            return preamble
         layout = (
             _LINEAGE_DIRECTIVES_USER_TARGETED
             if _lfs.is_user_targeted()
@@ -2158,9 +2228,15 @@ def _build_dynamic_directives(company_keyword: str) -> str:
         )
         # Always append the tool-override block so Stelle doesn't try to read
         # memory/post-history.md or memory/voice-examples/ which don't exist.
-        return layout + "\n\n" + _LINEAGE_DIRECTIVES_TOOL_OVERRIDES
+        return (
+            preamble
+            + "\n"
+            + layout
+            + "\n\n"
+            + _LINEAGE_DIRECTIVES_TOOL_OVERRIDES
+        )
     except Exception:
-        return ""
+        return preamble
 
 
 # ---------------------------------------------------------------------------
