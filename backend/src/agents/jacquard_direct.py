@@ -571,31 +571,43 @@ def fetch_icp_data(user: dict[str, Any]) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def fetch_latest_icp_report(company_id: str, user_id: str) -> dict[str, str] | None:
-    """Return the most recent ICP report as ``{filename, content}`` or None."""
+    """Return the most recent ICP report as ``{filename, content}`` or None.
+
+    Table name drift-tolerant: tries ``reports`` first (Jacquard's current
+    schema), falls back to ``icp_reports`` (legacy). Missing table or
+    missing rows both return None silently — callers treat "no ICP report"
+    as valid state, not an error.
+    """
     if not company_id or not user_id:
         return None
     sb = _sb()
-    rows = (
-        sb.table("icp_reports")
-        .select("filename, content, created_at")
-        .eq("company_id", company_id)
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-        .data
-        or []
-    )
-    if not rows:
-        return None
-    row = rows[0]
-    content = row.get("content")
-    if isinstance(content, (dict, list)):
-        content = json.dumps(content, default=str, indent=2)
-    return {
-        "filename": row.get("filename") or "icp-report.json",
-        "content": content or "",
-    }
+    for table_name in ("reports", "icp_reports"):
+        try:
+            rows = (
+                sb.table(table_name)
+                .select("filename, content, created_at")
+                .eq("company_id", company_id)
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as exc:
+            logger.debug("[jacquard_direct] fetch_latest_icp_report %s: %s", table_name, exc)
+            continue
+        if not rows:
+            continue
+        row = rows[0]
+        content = row.get("content")
+        if isinstance(content, (dict, list)):
+            content = json.dumps(content, default=str, indent=2)
+        return {
+            "filename": row.get("filename") or "icp-report.json",
+            "content": content or "",
+        }
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -809,3 +821,170 @@ def fetch_tasks(company_id: str, limit: int = 50) -> list[dict[str, Any]]:
         or []
     )
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Workspace population — used by CLI mode, where Claude CLI's native
+# filesystem tools read local disk instead of going through
+# ``lineage_fs_client``. We pre-fetch everything into a local directory
+# laid out the way the LINEAGE_DIRECTIVES prompt describes so Stelle sees
+# the same paths whether she's running direct-API or CLI.
+# ---------------------------------------------------------------------------
+
+
+def _write_files(base: "Path", items: list[dict[str, str]]) -> int:
+    """Write each {filename, content} into base. Returns count written."""
+    from pathlib import Path as _P
+    base = _P(base)
+    if not items:
+        return 0
+    base.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for item in items:
+        name = (item.get("filename") or "").strip()
+        content = item.get("content") or ""
+        if not name:
+            continue
+        # Filesystem-safe: strip any path separators that slipped into
+        # Jacquard's filename column (shouldn't happen but be defensive).
+        safe = name.replace("/", "_").replace("\\", "_")
+        (base / safe).write_text(content, encoding="utf-8")
+        n += 1
+    return n
+
+
+def populate_lineage_workspace(
+    root: "Path",
+    company_id: str,
+    target_user_slug: str | None = None,
+) -> dict[str, int]:
+    """Pre-populate ``root`` with Jacquard's workspace data so a CLI-mode
+    Stelle can read it via Claude CLI's native filesystem tools.
+
+    Layout matches Jacquard's workspace-builder.ts mounts so Stelle's
+    Lineage-mode prompt directives work unchanged:
+
+        {user-slug}/transcripts/*.md
+        {user-slug}/research/*.md
+        {user-slug}/engagement/*.json
+        {user-slug}/context/*.md
+        {user-slug}/reports/*.json
+        {user-slug}/edits/*.md
+        {user-slug}/tone/*.md
+        {user-slug}/posts/published/*.md
+        conversations/trigger-log.jsonl
+
+    Args:
+        root: workspace directory. Created if missing.
+        company_id: Jacquard ``user_companies.id`` UUID.
+        target_user_slug: if provided, only that user's subtree is
+            populated (USER-TARGETED mode). Otherwise all FOC users of
+            the company are populated (COMPANY-WIDE mode).
+
+    Returns: dict of per-mount file counts for logging/debugging.
+    """
+    from pathlib import Path as _P
+    root = _P(root)
+    root.mkdir(parents=True, exist_ok=True)
+
+    users = list_foc_users(company_id)
+    if target_user_slug:
+        users = [u for u in users if u.get("slug") == target_user_slug]
+    if not users:
+        raise RuntimeError(
+            f"No FOC users found for company_id={company_id} "
+            f"(target_slug={target_user_slug!r})"
+        )
+
+    counts: dict[str, int] = {}
+
+    def _safe(key: str, fn, *a, **kw):
+        """Run a fetcher; on any failure, log + return empty. Keeps a
+        schema drift or permissions issue in ONE mount from poisoning
+        the whole workspace."""
+        try:
+            return fn(*a, **kw)
+        except Exception as exc:
+            logger.warning("[populate_lineage_workspace] %s failed: %s", key, exc)
+            counts[key] = 0
+            return None
+
+    for user in users:
+        slug = user.get("slug") or "unknown"
+        user_root = root / slug
+
+        # Transcripts — the big one, GCS-backed.
+        items = _safe(
+            f"{slug}/transcripts",
+            fetch_meeting_transcripts,
+            user.get("id", ""),
+            user.get("email"),
+            user.get("is_internal", False),
+        )
+        counts[f"{slug}/transcripts"] = _write_files(user_root / "transcripts", items or [])
+
+        # Research
+        items = _safe(
+            f"{slug}/research",
+            fetch_parallel_research, company_id, user.get("id", ""),
+        )
+        counts[f"{slug}/research"] = _write_files(user_root / "research", items or [])
+
+        # Context (account.md + uploaded brand docs)
+        items = _safe(
+            f"{slug}/context",
+            fetch_context_files, company_id, user,
+        )
+        counts[f"{slug}/context"] = _write_files(user_root / "context", items or [])
+
+        # Engagement — structured JSON blobs.
+        eng_files = _safe(f"{slug}/engagement", fetch_icp_data, user) or {}
+        if eng_files:
+            eng_dir = user_root / "engagement"
+            eng_dir.mkdir(parents=True, exist_ok=True)
+            for fname, content in eng_files.items():
+                (eng_dir / fname).write_text(content, encoding="utf-8")
+            counts[f"{slug}/engagement"] = len(eng_files)
+        else:
+            counts.setdefault(f"{slug}/engagement", 0)
+
+        # Latest ICP report
+        report = _safe(
+            f"{slug}/reports", fetch_latest_icp_report, company_id, user.get("id", ""),
+        )
+        if report:
+            rpt_dir = user_root / "reports"
+            rpt_dir.mkdir(parents=True, exist_ok=True)
+            (rpt_dir / report["filename"]).write_text(report["content"], encoding="utf-8")
+            counts[f"{slug}/reports"] = 1
+        else:
+            counts.setdefault(f"{slug}/reports", 0)
+
+        # Tone references
+        items = _safe(
+            f"{slug}/tone", fetch_tone_references, user.get("id", ""),
+        )
+        counts[f"{slug}/tone"] = _write_files(user_root / "tone", items or [])
+
+        # Edit history (feedback signal)
+        items = _safe(
+            f"{slug}/edits", fetch_edit_history, user.get("id", ""), limit=50,
+        )
+        counts[f"{slug}/edits"] = _write_files(user_root / "edits", items or [])
+
+        # Published posts
+        items = _safe(
+            f"{slug}/posts/published", fetch_published_posts, user.get("id", ""), limit=100,
+        )
+        counts[f"{slug}/posts/published"] = _write_files(
+            user_root / "posts" / "published", items or [],
+        )
+
+    # Shared: trigger log
+    conv_dir = root / "conversations"
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    trigger_log = fetch_trigger_log(company_id)
+    (conv_dir / "trigger-log.jsonl").write_text(trigger_log, encoding="utf-8")
+    counts["conversations/trigger-log.jsonl"] = len(trigger_log.splitlines())
+
+    return counts

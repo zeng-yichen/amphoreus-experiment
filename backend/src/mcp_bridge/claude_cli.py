@@ -588,7 +588,43 @@ def run_stelle_cli(
     except Exception as _e:
         logger.warning("[CLI-Stelle] Purge skipped: %s", _e)
 
-    workspace_root = _setup_workspace(company_keyword)
+    # Lineage mode: pre-populate a workspace with Jacquard's data (Supabase
+    # + GCS) so Claude CLI's native filesystem tools read the same files
+    # Stelle would see on the direct-API path. Skip the old Ordinal-fed
+    # local-mode setup entirely — no Ordinal API calls, no memory/<company>/
+    # building, no Amphoreus-side Supabase queries. Purely Jacquard data.
+    from backend.src.agents.lineage_fs_client import is_lineage_mode as _lm
+    if _lm():
+        from backend.src.agents.jacquard_direct import populate_lineage_workspace
+        import shutil as _shutil
+        workspace_root = _PROJECT_ROOT / "scratch" / f"lineage-{company_keyword}"
+        # Fresh workspace per run — Jacquard data is authoritative, no
+        # incremental merge semantics to preserve across runs.
+        if workspace_root.exists():
+            _shutil.rmtree(workspace_root)
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        company_id = os.environ.get("LINEAGE_COMPANY_ID", "").strip()
+        target_slug = os.environ.get("LINEAGE_USER_SLUG", "").strip() or None
+        try:
+            counts = populate_lineage_workspace(workspace_root, company_id, target_slug)
+            total = sum(counts.values())
+            logger.info(
+                "[CLI-Stelle] Populated Lineage workspace %s (%d files across %d mounts)",
+                workspace_root, total, len(counts),
+            )
+            if event_callback:
+                event_callback("status", {
+                    "message": f"Loaded {total} files from Jacquard (Supabase + GCS) for company_id={company_id[:8]}…",
+                })
+        except Exception as exc:
+            logger.exception("[CLI-Stelle] FATAL: failed to populate Lineage workspace")
+            raise RuntimeError(
+                f"Lineage workspace population failed: {exc}"
+            ) from exc
+    else:
+        # Legacy local-mode workspace (Ordinal-fed). Shouldn't normally
+        # fire given the Lineage-mode guard in generate_one_shot.
+        workspace_root = _setup_workspace(company_keyword)
 
     # --- Existing posts context (dedup) ---
     existing_posts_context = ""
