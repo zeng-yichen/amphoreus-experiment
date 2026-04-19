@@ -48,15 +48,16 @@ export async function GET(req: Request): Promise<Response> {
 				...forwardedHeaders(req),
 				accept: "text/event-stream",
 			},
-			// Disable fetch's automatic decompression/buffering behavior
-			// where possible. Node's undici implementation streams the body
-			// directly when we don't read it eagerly — the key is passing
-			// ``upstream.body`` through without touching it.
 			signal: req.signal,
-			// @ts-expect-error -- undici-specific but widely supported
-			duplex: "half",
+			// Node's undici streams GET bodies natively — no ``duplex`` flag
+			// needed (``duplex: "half"`` is only for streaming REQUEST bodies).
 		});
 	} catch (err) {
+		// Log so fly logs show the root cause instead of a generic 502.
+		console.error(
+			"[sandbox/stream] upstream fetch failed:",
+			err instanceof Error ? err.message : String(err),
+		);
 		return new Response(
 			JSON.stringify({
 				error: "upstream unreachable",

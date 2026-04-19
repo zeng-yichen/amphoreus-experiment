@@ -31,10 +31,12 @@ export async function GET(
 				accept: "text/event-stream",
 			},
 			signal: req.signal,
-			// @ts-expect-error -- undici duplex flag for streaming
-			duplex: "half",
 		});
 	} catch (err) {
+		console.error(
+			"[stream/job_id] upstream fetch failed:",
+			err instanceof Error ? err.message : String(err),
+		);
 		return new Response(
 			JSON.stringify({
 				error: "upstream unreachable",
