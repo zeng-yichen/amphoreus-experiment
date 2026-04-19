@@ -4101,9 +4101,31 @@ def _process_result(
     except Exception:
         _sqlite_available = False
 
+    # In Lineage mode, ``submit_draft`` is the one write path to posts —
+    # Castorice fact-check, local_posts insert, RuanMei observation, and
+    # Ordinal-side bookkeeping all happen inside that wrapper. Repeating
+    # the work in the write_result loop produces duplicate local_posts
+    # rows (one with scheduling metadata from submit_draft, one without
+    # from here) and burns Castorice/why-post/validation API calls a
+    # second time for no added value. Short-circuit the heavy
+    # post-processing when running under Lineage.
+    in_lineage = False
+    try:
+        from backend.src.agents import lineage_fs_client as _lfs
+        in_lineage = _lfs.is_lineage_mode()
+    except Exception:
+        in_lineage = False
+
     castorice = Castorice()
     output_lines = [f"# {client_name.upper()} — ONE-SHOT POSTS (Stelle)\n"]
     output_lines.append(f"Generated {len(posts)} posts via jacquard-style agentic workflow.\n")
+    if in_lineage:
+        output_lines.append(
+            "_Lineage mode: per-post fact-check, validation, and local_posts "
+            "persistence were already handled by `submit_draft`. This file is "
+            "a minimal dump of the result; authoritative drafts live in the "
+            "Amphoreus Posts tab._\n"
+        )
 
     verification = result.get("verification", "")
     if verification:
@@ -4155,6 +4177,15 @@ def _process_result(
 
         output_lines.append("### Draft\n")
         output_lines.append(text + "\n")
+
+        # Lineage-mode fast-exit: everything below this point (Castorice,
+        # why-post, image-suggestion, LLM validation, RuanMei analysis,
+        # SQLite persist) was already done per-post by submit_draft's
+        # wrapper. Skip to the next post to avoid duplicate writes and
+        # duplicate API spend.
+        if in_lineage:
+            output_lines.append("---\n")
+            continue
 
         # -----------------------------------------------------------
         # Fact-check (Castorice) — the only post-processing step.
