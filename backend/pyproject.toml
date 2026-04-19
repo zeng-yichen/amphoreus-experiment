@@ -24,6 +24,7 @@ dependencies = [
     # Data stores
     "supabase>=2.9.0",
     "pinecone>=8.0.0",
+    "google-cloud-storage>=3.0.0",    # direct reads from Jacquard's lino-meeting-transcripts bucket
 
     # Audio capture + transcription
     "faster-whisper>=1.0.0",          # local fallback path

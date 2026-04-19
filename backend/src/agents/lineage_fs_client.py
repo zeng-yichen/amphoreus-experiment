@@ -239,6 +239,193 @@ def _rewrite_path(rel: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Direct mode — route reads through jacquard_direct (Supabase + GCS) rather
+# than Jacquard's virio-api HTTP surface. Used when GCS_CREDENTIALS_B64 +
+# SUPABASE_URL/KEY are configured. Gives us full independence from
+# Jacquard's runtime: their API can be down and Stelle still reads fine.
+# ---------------------------------------------------------------------------
+
+
+def _direct_enabled() -> bool:
+    """True when the direct Supabase+GCS pipeline is both configured AND
+    we have a company to query against (LINEAGE_COMPANY_ID present)."""
+    try:
+        from backend.src.agents import jacquard_direct as _jd
+    except Exception:
+        return False
+    return bool(
+        _jd.is_direct_configured()
+        and os.environ.get("LINEAGE_COMPANY_ID", "").strip()
+    )
+
+
+def _direct_list(path: str) -> str | None:
+    """Direct-mode listing. Returns the formatted listing string on success,
+    None when the path isn't one this backend knows (caller falls through
+    to HTTP). Path layout mirrors Jacquard's workspace-builder mounts.
+    """
+    from backend.src.agents import jacquard_direct as _jd
+    company_id = os.environ["LINEAGE_COMPANY_ID"].strip()
+
+    norm = _normalize_path(path)
+
+    # Root or user-slug-only — list FOC users / their subdirs.
+    if norm == "":
+        users = _jd.list_foc_users(company_id)
+        if not users:
+            return "(empty directory)"
+        return "\n".join(f"  {u['slug']}/" for u in users)
+
+    parts = norm.split("/")
+    # Shared roots first.
+    if parts[0] == "conversations" and len(parts) == 1:
+        return "  trigger-log.jsonl"
+    if parts[0] == "tasks" and len(parts) == 1:
+        tasks = _jd.fetch_tasks(company_id)
+        if not tasks:
+            return "(empty directory)"
+        return "\n".join(f"  {t.get('id')}.json" for t in tasks)
+
+    # User-scoped paths.
+    slug = parts[0]
+    user = _jd.resolve_user_by_slug(company_id, slug)
+    if not user:
+        return None  # unknown slug → let HTTP try
+
+    # <slug>/  → subdir listing
+    if len(parts) == 1:
+        subdirs = [
+            "transcripts/", "research/", "engagement/", "context/",
+            "reports/", "posts/", "edits/", "tone/", "notes/", "strategy/",
+        ]
+        return "\n".join(f"  {d}" for d in subdirs)
+
+    sub = parts[1]
+    if sub == "transcripts" and len(parts) == 2:
+        items = _jd.fetch_meeting_transcripts(
+            user["id"], user.get("email"), user.get("is_internal", False)
+        )
+        return "\n".join(f"  {i['filename']}" for i in items) or "(empty directory)"
+    if sub == "research" and len(parts) == 2:
+        items = _jd.fetch_parallel_research(company_id, user["id"])
+        return "\n".join(f"  {i['filename']}" for i in items) or "(empty directory)"
+    if sub == "context" and len(parts) == 2:
+        items = _jd.fetch_context_files(company_id, user)
+        return "\n".join(f"  {i['filename']}" for i in items) or "(empty directory)"
+    if sub == "engagement" and len(parts) == 2:
+        files = _jd.fetch_icp_data(user)
+        if not files:
+            return "(empty directory)"
+        return "\n".join(f"  {fn}" for fn in files.keys())
+    if sub == "reports" and len(parts) == 2:
+        report = _jd.fetch_latest_icp_report(company_id, user["id"])
+        return f"  {report['filename']}" if report else "(empty directory)"
+    if sub == "tone" and len(parts) == 2:
+        items = _jd.fetch_tone_references(user["id"])
+        return "\n".join(f"  {i['filename']}" for i in items) or "(empty directory)"
+    if sub == "edits" and len(parts) == 2:
+        items = _jd.fetch_edit_history(user["id"], limit=50)
+        return "\n".join(f"  {i['filename']}" for i in items) or "(empty directory)"
+    if sub == "posts":
+        if len(parts) == 2:
+            return "  published/\n  drafts/"
+        if len(parts) == 3 and parts[2] == "published":
+            items = _jd.fetch_published_posts(user["id"])
+            return "\n".join(f"  {i['filename']}" for i in items) or "(empty directory)"
+        if len(parts) == 3 and parts[2] == "drafts":
+            # Amphoreus keeps in-flight drafts local; no pre-published drafts
+            # live in Jacquard's drafts/ for the agent to inspect.
+            return "(empty directory)"
+
+    # notes/ and strategy/ are writable — empty from the direct read's POV
+    if sub in ("notes", "strategy") and len(parts) == 2:
+        return "(empty directory)"
+
+    return None  # let HTTP take over for anything unknown
+
+
+def _direct_read(path: str) -> str | None:
+    """Direct-mode read. Returns content on success; None when the path
+    isn't one this backend handles (caller falls through to HTTP)."""
+    from backend.src.agents import jacquard_direct as _jd
+    company_id = os.environ["LINEAGE_COMPANY_ID"].strip()
+
+    norm = _normalize_path(path)
+    if not norm:
+        return None
+
+    parts = norm.split("/")
+
+    # Shared roots
+    if parts == ["conversations", "trigger-log.jsonl"]:
+        return _jd.fetch_trigger_log(company_id)
+    if len(parts) == 2 and parts[0] == "tasks" and parts[1].endswith(".json"):
+        task_id = parts[1].removesuffix(".json")
+        tasks = _jd.fetch_tasks(company_id)
+        match = next((t for t in tasks if str(t.get("id")) == task_id), None)
+        if match is not None:
+            import json as _json
+            return _json.dumps(match, default=str, indent=2)
+        return None
+
+    if len(parts) < 3:
+        return None  # not a file path
+
+    slug, sub = parts[0], parts[1]
+    user = _jd.resolve_user_by_slug(company_id, slug)
+    if not user:
+        return None
+
+    filename = "/".join(parts[2:])
+
+    if sub == "transcripts":
+        items = _jd.fetch_meeting_transcripts(
+            user["id"], user.get("email"), user.get("is_internal", False)
+        )
+        match = next((i for i in items if i["filename"] == filename), None)
+        return match["content"] if match else None
+
+    if sub == "research":
+        items = _jd.fetch_parallel_research(company_id, user["id"])
+        match = next((i for i in items if i["filename"] == filename), None)
+        return match["content"] if match else None
+
+    if sub == "context":
+        items = _jd.fetch_context_files(company_id, user)
+        match = next((i for i in items if i["filename"] == filename), None)
+        return match["content"] if match else None
+
+    if sub == "engagement":
+        files = _jd.fetch_icp_data(user)
+        return files.get(filename)
+
+    if sub == "reports":
+        report = _jd.fetch_latest_icp_report(company_id, user["id"])
+        if report and report["filename"] == filename:
+            return report["content"]
+        return None
+
+    if sub == "tone":
+        items = _jd.fetch_tone_references(user["id"])
+        match = next((i for i in items if i["filename"] == filename), None)
+        return match["content"] if match else None
+
+    if sub == "edits":
+        items = _jd.fetch_edit_history(user["id"])
+        match = next((i for i in items if i["filename"] == filename), None)
+        return match["content"] if match else None
+
+    if sub == "posts" and len(parts) >= 4 and parts[2] == "published":
+        items = _jd.fetch_published_posts(user["id"])
+        # filename may contain slashes for posts/published/<file>
+        target = "/".join(parts[3:])
+        match = next((i for i in items if i["filename"] == target), None)
+        return match["content"] if match else None
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Tool handlers — same signatures as the local ones in stelle.py so they
 # can be swapped in at the _TOOL_HANDLERS dispatch dict.
 # ---------------------------------------------------------------------------
@@ -249,6 +436,17 @@ def exec_list_directory(_workspace_root: Any, args: dict) -> str:
     # Listing the root ("") must not prefix — Stelle uses this to discover
     # what's available. Everything else is user-slug rewritten.
     rel = "" if _normalize_path(raw) == "" else _rewrite_path(raw)
+
+    # Direct-mode fast path — Supabase + GCS, no HTTP hop.
+    if _direct_enabled():
+        try:
+            direct = _direct_list(rel)
+        except Exception as exc:
+            logger.warning("[lineage_fs] direct list failed for %r — falling back to HTTP: %s", rel, exc)
+            direct = None
+        if direct is not None:
+            return direct
+
     try:
         resp = _get_client().get(
             f"{_base_url()}/list",
@@ -286,6 +484,20 @@ def exec_read_file(_workspace_root: Any, args: dict) -> str:
     norm = _rewrite_path(rel)
     if not norm:
         return "Error: path is required"
+
+    # Direct-mode fast path — Supabase + GCS, no HTTP hop.
+    if _direct_enabled():
+        try:
+            direct = _direct_read(norm)
+        except Exception as exc:
+            logger.warning("[lineage_fs] direct read failed for %r — falling back to HTTP: %s", norm, exc)
+            direct = None
+        if direct is not None:
+            content = direct
+            if len(content) > MAX_TOOL_OUTPUT_CHARS:
+                content = content[:MAX_TOOL_OUTPUT_CHARS] + f"\n\n... [truncated at {MAX_TOOL_OUTPUT_CHARS} chars]"
+            return content
+
     try:
         resp = _get_client().get(
             f"{_base_url()}/file",
