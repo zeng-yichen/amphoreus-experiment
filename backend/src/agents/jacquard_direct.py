@@ -1042,6 +1042,63 @@ def fetch_tasks(company_id: str, limit: int = 50) -> list[dict[str, Any]]:
 # Drafts insert — write path into Jacquard's drafts table
 # ---------------------------------------------------------------------------
 
+def _text_to_yjs_state(content: str) -> str | None:
+    """Encode plain text as a TipTap/y-prosemirror compatible Y.Doc update,
+    returned as base64 for insert into ``drafts.yjs_state``.
+
+    Lineage's editor is TipTap over Y.js; without a valid CRDT blob the
+    editor opens blank regardless of what's in the ``content`` column.
+    The structure observed in Jacquard-native drafts is:
+
+        Doc
+        └── XmlFragment "content"
+            ├── <paragraph>first paragraph text</paragraph>
+            ├── <paragraph></paragraph>    (blank spacer)
+            ├── <paragraph>second paragraph</paragraph>
+            ...
+
+    We split the input by ``\\n\\n`` for paragraph breaks, collapse
+    single newlines inside a paragraph to spaces, and insert a blank
+    paragraph between real ones to preserve editor spacing.
+
+    Returns None if pycrdt is unavailable (dev/test without the dep) so
+    the caller can still insert the draft with yjs_state=NULL — the
+    editor will open blank but the row exists.
+    """
+    try:
+        import base64
+        from pycrdt import Doc, XmlFragment, XmlElement, XmlText
+    except Exception as exc:
+        logger.warning("[jacquard_direct] pycrdt unavailable, yjs_state will be NULL: %s", exc)
+        return None
+
+    doc = Doc()
+    fragment = doc.get("content", type=XmlFragment)
+    blocks = content.split("\n\n") if content else [""]
+    while blocks and not blocks[0].strip():
+        blocks.pop(0)
+    while blocks and not blocks[-1].strip():
+        blocks.pop()
+    if not blocks:
+        blocks = [""]
+    for i, block in enumerate(blocks):
+        body = block.replace("\n", " ").strip()
+        p = XmlElement("paragraph")
+        # Parent must be integrated into the doc before children can be
+        # appended (pycrdt enforces this). Append p first, then its text.
+        fragment.children.append(p)
+        if body:
+            p.children.append(XmlText(body))
+        # Blank paragraph between real ones for spacing (matches what
+        # Jacquard's own yjs blobs look like).
+        if i < len(blocks) - 1:
+            spacer = XmlElement("paragraph")
+            fragment.children.append(spacer)
+
+    update = doc.get_update()
+    return base64.b64encode(update).decode()
+
+
 def insert_draft(
     user_id: str,
     content: str,
@@ -1106,6 +1163,11 @@ def insert_draft(
             row["scheduled_date"] = f"{scheduled_date}T12:00:00+00:00"
         else:
             row["scheduled_date"] = scheduled_date
+
+    # Generate yjs_state so Lineage's editor renders content on open.
+    yjs_b64 = _text_to_yjs_state(content)
+    if yjs_b64:
+        row["yjs_state"] = yjs_b64
 
     try:
         resp = sb.table("drafts").insert(row).execute()
