@@ -207,24 +207,22 @@ string carefully. You are looking for REAL positive engagement, \
 not tolerance. Ship ONLY if the reaction contains felt engagement \
 — phrases like `"felt real"`, `"line stays"`, `"been here"`, \
 `"oh that's a good one"`, `"gonna forward this"`. Passive \
-tolerance (`"nodding along"`, `"fine"`, `"smart flex"`, `"okay \
-that's a line"`, `"reasonable take"`) means the post failed to \
-land — keep revising. Make ONE surgical edit targeting the \
-anchored span using `edit_file` (one sentence, one word, one \
-line break — not a rewrite), then call `get_reader_reaction` \
-again. The response also includes `_prior_reactions` — the last \
-few reactions from this session, each with the draft's first \
-line and length so you can see which ones were iterations on \
-the same post. Use this trajectory to check whether your edits \
-are moving the signal: if prior reactions for this post were \
-\"lecture\" → \"sermon\" → \"sermon\", your edits aren't \
-helping and you need a bigger change (cut more aggressively, \
-target a different span, or pivot the angle). If the same \
-reaction appears 2-3 times after different edits, your theory \
-is wrong. If you've made 6+ edits and the reaction is still \
-\"meh\", the topic may not land for this audience — consider \
-dropping the post rather than shipping mediocre. Cap at 12 \
-cycles per post.
+tolerance or rejection (`"nodding along"`, `"fine"`, `"reasonable \
+take"`, `"pitch deck slide"`, `"read this fifty times"`, `"flex \
+disguised as X"`, anything starting with "cool" or "interesting \
+but") means the post failed. **The ship gate is absolute: if the \
+reaction isn't felt engagement, you do NOT ship that post. No \
+exceptions.** Two options: (a) one surgical `edit_file` on the \
+anchored span, then re-simulate. (b) If the reaction is about \
+the angle itself, line edits won't save it — kill the post and \
+pick a different angle from the plan. Shipping fewer posts is \
+always better than shipping one Irontomb rejected.
+
+The response includes `_prior_reactions` — the last few reactions \
+from this session with each draft's first line + length so you \
+can track trajectory. If prior reactions were \"lecture\" → \
+\"sermon\" → \"sermon\", your edits aren't helping — make a \
+bigger change or kill the angle. Cap at 12 cycles per post.
 5. Save the final draft to `scratch/final/` — NOT to `memory/draft-posts/`. \
 That directory is authoritative for Ordinal-pushed content and is \
 read-only during your run. `scratch/final/` is also where you read \
@@ -235,7 +233,7 @@ complete, call `write_result` with the final JSON. The order of \
 posts in the `posts` array IS the publication order — put the \
 post you want published first at index 0.
 
-## TIME BUDGET — CRITICAL
+## TIME BUDGET
 
 You have a hard wall-clock limit. **You MUST call `write_result` before \
 running out of turns.** Budget your turns:
@@ -244,11 +242,10 @@ running out of turns.** Budget your turns:
 - Final assembly + `write_result`: ~3 turns
 - **Reserve at least 5 turns as buffer for `write_result`.**
 
-If you find yourself on revision v3+ for multiple posts, STOP REVISING. \
-Take your best versions, save them to `scratch/final/`, and call \
-`write_result`. Shipping 7 good posts beats perfecting 3 and timing out \
-with nothing. **A run that doesn't call `write_result` produces ZERO \
-output — every revision was wasted.**
+**Quality is the target, not quantity.** Shipping 3 posts Irontomb \
+loved beats shipping 7 he tolerated. If budget is tight, DROP POSTS — \
+do not downgrade the ship bar. A run that doesn't call `write_result` \
+produces zero output; a run that ships rejected drafts is worse.
 
 ## Output
 
