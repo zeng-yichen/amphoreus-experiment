@@ -442,9 +442,13 @@ def _direct_list(path: str) -> str | None:
     # linkedin_posts / linkedin_profiles tables — they don't live as
     # rows anywhere, we render them at read time).
     if len(parts) == 1:
+        # NB: ``notes/`` is intentionally NOT advertised — ``is_lineage_path``
+        # routes it to fly-local scratch (Stelle's scratch notepad) rather
+        # than Lineage's Supabase. Listing it here would send Stelle
+        # probing a path that errors with "directory not found".
         subdirs = [
             "transcripts/", "research/", "engagement/", "context/",
-            "reports/", "posts/", "edits/", "tone/", "notes/", "strategy/",
+            "reports/", "posts/", "edits/", "tone/", "strategy/",
         ]
         lines = [f"  {d}" for d in subdirs]
         lines.append("  post-history.md")
@@ -930,7 +934,28 @@ def exec_query_observations(_workspace_root: Any, args: dict) -> str:
     ``summary_only``. Returns the same JSON shape so Stelle's existing
     logic (filtering by reward, reading reward_mean / reward_std, etc.)
     continues to work unchanged.
+
+    Direct-only deployments (the default on Fly — no workspace URL, no
+    run token, reads come from Supabase+GCS) have no virio-api endpoint
+    to POST to, so this tool would fail with a DNS error. Short-circuit
+    with a friendly redirect pointing at the files that carry the same
+    data: ``<slug>/post-history.md`` (top performers) and
+    ``<slug>/engagement/posts.json`` (all scored posts).
     """
+    if not os.environ.get("LINEAGE_WORKSPACE_URL", "").strip():
+        return (
+            "Error: query_observations is unavailable in direct-only Lineage "
+            "mode (no workspace URL configured).\n\n"
+            "Use these file paths instead — same data, different packaging:\n"
+            "  • `<slug>/post-history.md` — top 10 performers with full text "
+            "and engagement metrics. Your baseline.\n"
+            "  • `<slug>/engagement/posts.json` — every scored post with raw "
+            "engagement numbers + per-reaction breakdown. Filter / summarize "
+            "in-context however you need.\n"
+            "  • `<slug>/engagement/reactions.json`, `comments.json`, "
+            "`profiles.json` — engager-level detail if you need it."
+        )
+
     body: dict[str, Any] = {}
     for k in ("min_reward", "max_reward", "limit", "summary_only"):
         if k in args:

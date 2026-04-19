@@ -2143,20 +2143,18 @@ Several instructions in the default system prompt referenced paths or files
 that **do not exist in the Lineage workspace**, or suggested workflows that
 create duplicate drafts. Here's how to do the same things correctly:
 
-- `memory/post-history.md` → does not exist. Call the
-  `query_observations` tool instead. Args: ``{min_reward, max_reward,
-  limit, summary_only}``. Output shape is identical to what the default
-  prompt expects — each observation carries ``reward.immediate`` (an
-  engagement score), per-reaction breakdown, topic/format tags,
-  ICP match rate, and the post text itself. Use ``summary_only: true``
-  to get distributions (reward_mean, reward_std, topic_distribution,
-  format_distribution).
+- `memory/post-history.md` → use `<slug>/post-history.md` (top 10
+  performers, rendered on read) and `<slug>/engagement/posts.json` (every
+  scored post, raw engagement numbers + per-reaction breakdown). Filter
+  and summarize in-context.
 
-- `memory/voice-examples/` → use `posts/published/` instead. Every post
-  file already carries engagement metadata in its header (Reactions /
-  Comments / Reposts / per-reaction breakdown / ICP rate), so you can
-  rank them yourself. For a curated slice, also check `tone/` which
-  exposes ``tone_references`` picks.
+- `memory/voice-examples/` → use `<slug>/posts/published/` or
+  `<slug>/tone/`. Every post file carries engagement metadata in its
+  header so you can rank yourself; `tone/` exposes curated
+  ``tone_references`` picks.
+
+- `query_observations` tool → not available in direct-only Lineage mode.
+  Read the engagement files above instead; they carry the same data.
 
 - `bash` is DISABLED in Lineage mode (scratch filesystem isn't wired).
 
@@ -2208,11 +2206,12 @@ create duplicate drafts. Here's how to do the same things correctly:
 
 - **Multi-post runs: vary angles, don't riff one topic twice.**
   When the user asks for N posts, cover N DIFFERENT angles/topics —
-  not the same topic with wording variations. Use
-  ``query_observations({summary_only: true})`` to see the client's
-  topic/format distribution and pick underrepresented angles. Space the
-  publication dates across the cadence (3 posts/week = Mon/Wed/Fri or
-  Mon/Tue/Thu). Pass each post's slot as ``scheduled_date``.
+  not the same topic with wording variations. Read
+  ``<slug>/post-history.md`` to see what's landed before and
+  ``<slug>/engagement/posts.json`` for the full scored distribution;
+  pick underrepresented angles. Space the publication dates across the
+  cadence (3 posts/week = Mon/Wed/Fri or Mon/Tue/Thu). Pass each post's
+  slot as ``scheduled_date``.
 
 """
 

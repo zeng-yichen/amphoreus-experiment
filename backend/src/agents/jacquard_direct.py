@@ -804,15 +804,14 @@ def build_post_history_digest(user: dict[str, Any], top_n: int = 10) -> str:
         return "# Post history\n\n(could not parse username from linkedin_url)\n"
 
     try:
+        # select("*") — Jacquard's schema evolves independently and the
+        # old narrow select (hook/engagement_score/topic_tags/hook_type/
+        # format_archetype etc. — Amphoreus-side enrichment columns) 400s
+        # when any one is missing. Code below defensively `.get()`s every
+        # field so extra columns are harmless.
         posts = (
             sb.table("linkedin_posts")
-            .select(
-                "posted_at, post_text, hook, post_url, "
-                "total_reactions, total_comments, total_reposts, "
-                "like_reactions, love_reactions, support_reactions, "
-                "insight_reactions, celebrate_reactions, funny_reactions, "
-                "engagement_score, is_outlier, topic_tags, hook_type, format_archetype"
-            )
+            .select("*")
             .eq("creator_username", username)
             .order("total_reactions", desc=True)
             .limit(top_n)
@@ -892,15 +891,13 @@ def fetch_profile_md(user: dict[str, Any]) -> str | None:
         return None
     sb = _sb()
     try:
+        # select("*") — schema drift protection. See
+        # build_post_history_digest for the same reasoning. The renderer
+        # below reads every field with ``.get()`` so absent columns are
+        # a non-event.
         rows = (
             sb.table("linkedin_profiles")
-            .select(
-                "username, first_name, last_name, headline, about, "
-                "location_full, location_country, location_city, metro_area, "
-                "follower_count, connection_count, positions_text, "
-                "skills, languages, certifications, projects, "
-                "total_posts, last_updated_at"
-            )
+            .select("*")
             .eq("username", username)
             .limit(1)
             .execute()
