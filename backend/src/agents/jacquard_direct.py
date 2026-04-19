@@ -1004,13 +1004,20 @@ def fetch_trigger_log(company_id: str, limit: int = 500) -> str:
 # ---------------------------------------------------------------------------
 
 def fetch_tasks(company_id: str, limit: int = 50) -> list[dict[str, Any]]:
-    """Open review tasks for a company — what the CE queue is currently chewing."""
+    """Open review tasks for a company — what the CE queue is currently chewing.
+
+    Uses ``select("*")`` rather than a column allowlist because Jacquard's
+    tasks schema has evolved (no ``resolved_at`` column; added ``title``,
+    ``detail``, ``priority``, ``entity_type``, ``entity_id``). Matching
+    Jacquard's own ``services/tasks.ts::getPendingTasks`` which does the
+    same thing keeps us schema-forward-compatible.
+    """
     if not company_id:
         return []
     sb = _sb()
     rows = (
         sb.table("tasks")
-        .select("id, type, status, payload, created_at, resolved_at")
+        .select("*")
         .eq("company_id", company_id)
         .order("created_at", desc=True)
         .limit(limit)
