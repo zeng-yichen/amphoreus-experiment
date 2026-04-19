@@ -688,12 +688,32 @@ def run_stelle_cli(
         "SUPABASE_URL": os.environ.get("SUPABASE_URL", ""),
         "SUPABASE_KEY": os.environ.get("SUPABASE_KEY", ""),
         "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
+        "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
+        "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY", ""),
         "PINECONE_API_KEY": os.environ.get("PINECONE_API_KEY", ""),
         "SERPER_API_KEY": os.environ.get("SERPER_API_KEY", ""),
         "ORDINAL_API_KEY": os.environ.get("ORDINAL_API_KEY", ""),
+        # GCS + Lineage — irontomb/castorice/jacquard_direct all need these
+        # so the MCP server's in-process Irontomb calls can read transcripts
+        # from GCS and observations from Jacquard's Supabase.
+        "GCS_CREDENTIALS_B64": os.environ.get("GCS_CREDENTIALS_B64", ""),
+        "GCS_BUCKET": os.environ.get("GCS_BUCKET", ""),
+        "LINEAGE_COMPANY_ID": os.environ.get("LINEAGE_COMPANY_ID", ""),
+        "LINEAGE_USER_SLUG": os.environ.get("LINEAGE_USER_SLUG", ""),
     }
     # Filter out empty values
     env_vars = {k: v for k, v in env_vars.items() if v}
+
+    # CRITICAL: also export into this process's environment so the vars
+    # chain-propagate through Claude CLI → stdio MCP server by normal
+    # subprocess inheritance. Claude CLI's mcp_config.env block is
+    # inconsistently honored across versions — relying on it alone caused
+    # stelle_server to crash on startup with "STELLE_COMPANY env var not
+    # set", which left Claude with zero registered tools (Stelle then
+    # spent every turn running ToolSearch against her missing tools and
+    # falling back to native Glob).
+    for k, v in env_vars.items():
+        os.environ[k] = v
 
     mcp_config = {
         "mcpServers": {

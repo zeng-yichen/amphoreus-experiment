@@ -155,7 +155,30 @@ class Castorice:
         """
         Load client context from transcripts, references, and content strategy.
         All three are needed for complete source annotation.
+
+        In Lineage mode (GCS + Supabase creds present and LINEAGE_COMPANY_ID
+        set) we fetch transcripts and parallel research from Jacquard
+        directly instead of reading the fly-local memory/ tree. The
+        fly-local tree is empty in Lineage deployments — relying on it
+        leaves Castorice fact-checking against nothing.
+
+        Falls back to local-disk reads when not in Lineage mode (single-
+        tenant amphoreus.app runs or tests).
         """
+        # --- Lineage-mode path: pull from Jacquard's Supabase + GCS ---
+        try:
+            from backend.src.agents import lineage_fs_client as _lfs
+            if _lfs.is_lineage_mode():
+                lineage_ctx = self._get_lineage_context()
+                if lineage_ctx:
+                    return lineage_ctx
+                # Empty in Lineage mode is still a valid answer — the user
+                # may have no transcripts / research on file. Fall through
+                # to return "" rather than silently loading stale fly-local.
+                return ""
+        except Exception as e:
+            logger.warning("[Castorice] Lineage context fetch failed, falling back to local: %s", e)
+
         dirs_to_load = [
             ("transcripts", P.transcripts_dir(company_keyword)),
             ("references", P.references_dir(company_keyword)),
@@ -176,6 +199,88 @@ class Castorice:
                             )
                     except Exception as e:
                         print(f"[Castorice] Failed to read {filepath.name}: {e}")
+
+        return "".join(context_parts)
+
+    def _get_lineage_context(self) -> str:
+        """
+        Assemble Castorice's local-context block from Jacquard data.
+
+        Emits the same ``--- SOURCE [label]: filename ---`` framing as the
+        fly-local reader so the downstream system prompt doesn't need to
+        know which backend produced it.
+
+        Sources:
+          - transcripts/ — ``fetch_meeting_transcripts`` (Supabase meetings
+            + GCS-hosted transcript bodies)
+          - research/    — ``fetch_parallel_research`` (company + person
+            research outputs)
+          - context/     — ``fetch_context_files`` (uploaded brand docs +
+            synthesized account.md)
+
+        Requires LINEAGE_COMPANY_ID. If LINEAGE_USER_SLUG is present we
+        resolve to a specific FOC user and pull their meetings/research;
+        otherwise we return just the company-level context files.
+        """
+        import os as _os
+        from backend.src.agents import jacquard_direct as _jd
+
+        company_id = _os.environ.get("LINEAGE_COMPANY_ID", "").strip()
+        if not company_id:
+            return ""
+
+        user_slug = _os.environ.get("LINEAGE_USER_SLUG", "").strip() or None
+        user: dict | None = None
+        if user_slug:
+            try:
+                user = _jd.resolve_user_by_slug(company_id, user_slug)
+            except Exception as e:
+                logger.warning(
+                    "[Castorice] resolve_user_by_slug(%s, %s) failed: %s",
+                    company_id, user_slug, e,
+                )
+
+        context_parts: list[str] = []
+
+        # Transcripts (user-scoped). Skip cleanly if we have no user.
+        if user:
+            try:
+                transcripts = _jd.fetch_meeting_transcripts(
+                    user.get("id", ""),
+                    user.get("email"),
+                    bool(user.get("is_internal")),
+                )
+                for item in transcripts:
+                    text = (item.get("content") or "").strip()
+                    if text:
+                        context_parts.append(
+                            f"\n--- SOURCE [transcripts]: {item.get('filename', 'transcript.md')} ---\n{text}\n"
+                        )
+            except Exception as e:
+                logger.warning("[Castorice] fetch_meeting_transcripts failed: %s", e)
+
+            try:
+                research = _jd.fetch_parallel_research(company_id, user.get("id", ""))
+                for item in research:
+                    text = (item.get("content") or "").strip()
+                    if text:
+                        context_parts.append(
+                            f"\n--- SOURCE [research]: {item.get('filename', 'research.md')} ---\n{text}\n"
+                        )
+            except Exception as e:
+                logger.warning("[Castorice] fetch_parallel_research failed: %s", e)
+
+        # Context files (company-scoped; account.md needs user for richness).
+        try:
+            ctx_files = _jd.fetch_context_files(company_id, user)
+            for item in ctx_files:
+                text = (item.get("content") or "").strip()
+                if text:
+                    context_parts.append(
+                        f"\n--- SOURCE [context]: {item.get('filename', 'context.md')} ---\n{text}\n"
+                    )
+        except Exception as e:
+            logger.warning("[Castorice] fetch_context_files failed: %s", e)
 
         return "".join(context_parts)
 
