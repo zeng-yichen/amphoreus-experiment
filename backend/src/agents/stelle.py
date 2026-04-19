@@ -1832,10 +1832,49 @@ def _setup_workspace(company_keyword: str) -> Path:
     Under the stripped architecture (2026-04-10), no RuanMei-derived artifact
     (memory/strategy.md) is written into the workspace. Stelle operates on
     raw workspace inputs only.
+
+    In **Lineage mode**, this is reduced to a minimal scaffold. Jacquard's
+    workspace IS the data source (read via ``lineage_fs_client``), so we
+    deliberately do NOT build ``memory/``, ``context/``, ``voice-examples/``,
+    ``published-posts/``, etc. with Supabase-sourced local copies — that
+    creates a split-brain where Stelle sees two conflicting file trees.
+    Lineage mode gets only ``scratch/`` (needed for write_file).
     """
     from backend.src.db import vortex as _P
     workspace = _P.workspace_dir(company_keyword)
     workspace.mkdir(parents=True, exist_ok=True)
+
+    # Always wipe scratch/ — stale drafts from prior runs must not leak.
+    scratch = workspace / "scratch"
+    if scratch.exists():
+        shutil.rmtree(scratch)
+    scratch.mkdir()
+    (scratch / "final").mkdir()
+
+    # In Lineage mode, that's ALL. Stelle reads Jacquard's workspace
+    # through the lineage_fs_client dispatchers; building a local
+    # ``memory/ context/ voice-examples/`` tree would just compete
+    # with the real data and confuse her.
+    try:
+        from backend.src.agents import lineage_fs_client as _lfs
+        if _lfs.is_lineage_mode():
+            # Also clear any stale memory/ context/ from prior local-mode
+            # runs so Stelle doesn't see leftover files.
+            for leftover in ("memory", "context", "abm_profiles", "revisions"):
+                p = workspace / leftover
+                if p.is_symlink():
+                    p.unlink()
+                elif p.is_dir():
+                    shutil.rmtree(p)
+            logger.info(
+                "[Stelle] Lineage mode — minimal workspace (scratch/ only). "
+                "Jacquard's workspace is the data source."
+            )
+            return workspace
+    except Exception as exc:
+        # If the lineage_fs_client import fails, fall through to local-mode
+        # setup — matches old behavior.
+        logger.debug("[Stelle] lineage_fs_client check failed: %s", exc)
 
     mem = workspace / "memory"
     if mem.exists():
