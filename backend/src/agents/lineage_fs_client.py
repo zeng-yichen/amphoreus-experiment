@@ -204,6 +204,69 @@ def _normalize_path(rel: str) -> str:
 # users in the Lineage workspace root.
 _SHARED_ROOTS = frozenset({".pi", "conversations", "slack", "tasks"})
 
+# User-scoped mount directories that Lineage's workspace-builder
+# constructs. Any path whose FIRST segment is a shared-root, OR whose
+# second segment (under a user-slug) is one of these, is a Lineage path
+# and should be routed through the HTTP proxy. Everything else — ``scratch/``,
+# ``notes/``, ``plan.md``, ad-hoc files Stelle invents — is private
+# scratch space and stays on the fly-local SandboxFs.
+#
+# Source of truth: ``jacquard/virio-api/src/services/ghostwriter/workspace-builder.ts``
+# (fields of the ``readOnly`` mount dict + the DraftsFs/StrategyFs/NotesFs
+# wiring). If Jacquard adds a new mount, add it here.
+_USER_MOUNTS = frozenset({
+    "transcripts",
+    "research",
+    "engagement",
+    "reports",
+    "context",
+    "posts",      # includes posts/published and posts/drafts
+    "edits",
+    "tone",
+    "strategy",
+    # NB: ``notes`` is NOT mounted as a user subdir today, but Stelle's
+    # older prompts reference ``notes/plan.md``. Keep it OUT of this
+    # set so those writes land fly-local (which is what we want for
+    # scratch).
+})
+
+
+def is_lineage_path(rel: str) -> bool:
+    """True if the path targets a Lineage mount, False if it's scratch.
+
+    The routing decision is based on the workspace layout declared in
+    ``workspace-builder.ts``. A path is "Lineage" when:
+      * First segment is a shared root (``conversations/``, ``slack/``,
+        ``tasks/``, ``.pi/``), OR
+      * First segment is a user slug AND second segment is a known
+        user-scope mount (``transcripts/``, ``research/``, etc.).
+
+    Everything else is scratch — writes go to the fly-local SandboxFs,
+    reads try fly-local too. This preserves Stelle's classic pattern of
+    iterating drafts as files while keeping Lineage's workspace
+    read-only from her perspective.
+    """
+    norm = _normalize_path(rel)
+    if not norm:
+        return False
+    parts = [p for p in norm.split("/") if p]
+    if not parts:
+        return False
+    first = parts[0]
+    if first in _SHARED_ROOTS:
+        return True
+    slug = _targeted_slug()
+    # In user-targeted mode the slug is implicit; user-scope paths may
+    # arrive without the slug prefix.
+    if slug and first in _USER_MOUNTS:
+        return True
+    # User-slug-prefixed path (either target slug in user-targeted mode
+    # or any slug in company-wide mode). Second segment must be a known
+    # user mount.
+    if len(parts) >= 2 and parts[1] in _USER_MOUNTS:
+        return True
+    return False
+
 
 def is_user_targeted() -> bool:
     """True when the run is targeted at a specific FOC user.

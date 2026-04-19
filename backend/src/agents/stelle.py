@@ -874,62 +874,95 @@ def _exec_subagent(args: dict) -> str:
 
 
 def _dispatch_list_directory(root, args):
-    """Dispatch to remote FS when running in Lineage mode, else local disk."""
+    """Path-aware routing:
+    - Lineage mount paths → HTTP proxy to virio-api workspace
+    - Everything else (scratch/, loose dirs) → fly-local SandboxFs
+
+    Same routing rule as _dispatch_write_file so scratch files Stelle
+    wrote with ``write_file`` are listable via the same path."""
     from backend.src.agents import lineage_fs_client as _lfs
     if _lfs.is_lineage_mode():
-        return _lfs.exec_list_directory(root, args)
+        path = args.get("path", "") or ""
+        if _lfs.is_lineage_path(path):
+            return _lfs.exec_list_directory(root, args)
     return _exec_list_directory(root, args)
 
 
 def _dispatch_read_file(root, args):
+    """Path-aware routing:
+    - Lineage mount paths → HTTP proxy (transcripts, engagement JSON, etc.)
+    - Scratch paths → fly-local SandboxFs (reads the v1/v2/v3 drafts
+      Stelle wrote via write_file in the same run)"""
     from backend.src.agents import lineage_fs_client as _lfs
     if _lfs.is_lineage_mode():
-        return _lfs.exec_read_file(root, args)
+        path = args.get("path", "") or ""
+        if _lfs.is_lineage_path(path):
+            return _lfs.exec_read_file(root, args)
     return _exec_read_file(root, args)
 
 
-def _lineage_write_blocked_message() -> str:
-    """In Lineage mode, nothing Stelle writes should land on Lineage's
-    workspace — it's the client's space. Final posts go through
-    ``submit_draft``; everything else is in-context iteration.
-
-    Returned when Stelle tries to write while running in Lineage mode.
-    """
+def _lineage_write_blocked_message(path: str) -> str:
+    """Explain why a write into a Lineage mount is refused and where
+    Stelle should write instead (scratch paths work fine)."""
     return (
-        "Error: write_file and edit_file are disabled in Lineage mode. "
-        "Lineage's workspace is the client's space — Stelle never writes "
-        "there except through `submit_draft` (final posts only).\n\n"
-        "For flame-chase iteration: call `get_reader_reaction(draft_text=...)` "
-        "with your draft text directly — you do NOT need to persist drafts "
-        "to files. Keep v1 → v2 → v3 in your own reasoning; the tool takes "
-        "the full current draft on each call. When a draft is ready, call "
-        "`submit_draft` with the final text."
+        f"Error: cannot write to `{path}` — that path is inside Lineage's "
+        "workspace, which is READ-ONLY to Stelle (it's the client's space).\n\n"
+        "Your options:\n"
+        "  • FINAL drafts: call `submit_draft(user_slug, content, "
+        "scheduled_date, why_post)` — the only write tool that reaches Lineage.\n"
+        "  • Scratch / working notes / draft iterations: write to any path "
+        "OUTSIDE the Lineage mount tree. Good choices: `scratch/post1-v1.md`, "
+        "`scratch/plan.md`, `notes/brainstorm.md`. Those land on your "
+        "fly-local SandboxFs, persist for the duration of the run, and "
+        "you can `read_file` them back normally.\n\n"
+        "Paths that route to Lineage (read-only for write): anything under "
+        "`transcripts/`, `research/`, `engagement/`, `reports/`, `context/`, "
+        "`posts/`, `edits/`, `tone/`, `strategy/`, or the shared "
+        "`conversations/`, `slack/`, `tasks/`, `.pi/`."
     )
 
 
 def _dispatch_write_file(root, args):
-    """Writes go to fly-local SandboxFs in local mode. In Lineage mode
-    writes are refused — Stelle iterates in-context via get_reader_reaction
-    and ships final posts via submit_draft."""
+    """Writes route by path:
+
+    - Paths inside a Lineage mount (transcripts/, posts/, strategy/, …) →
+      refused with an error redirecting to ``submit_draft`` or a scratch
+      path.
+    - Scratch paths (anything NOT a Lineage mount — e.g. ``scratch/*``,
+      ``notes/*``, loose files) → fly-local SandboxFs.
+    - In local (non-Lineage) mode, always fly-local.
+
+    Preserves Stelle's classic scratch-file iteration pattern
+    (``scratch/post1-v1.md`` → ``scratch/post1-v2.md`` → …) while
+    keeping the client's Lineage workspace read-only from her
+    perspective. Only ``submit_draft`` reaches Lineage's drafts table."""
     from backend.src.agents import lineage_fs_client as _lfs
     if _lfs.is_lineage_mode():
-        return _lineage_write_blocked_message()
+        path = args.get("path", "") or ""
+        if _lfs.is_lineage_path(path):
+            return _lineage_write_blocked_message(path)
     return _exec_write_file(root, args)
 
 
 def _dispatch_edit_file(root, args):
-    """Same policy as _dispatch_write_file — refused in Lineage mode,
-    fly-local in local mode."""
+    """Same path-aware routing as _dispatch_write_file."""
     from backend.src.agents import lineage_fs_client as _lfs
     if _lfs.is_lineage_mode():
-        return _lineage_write_blocked_message()
+        path = args.get("path", "") or ""
+        if _lfs.is_lineage_path(path):
+            return _lineage_write_blocked_message(path)
     return _exec_edit_file(root, args)
 
 
 def _dispatch_search_files(root, args):
+    """Path-aware routing based on the ``directory`` arg. Searches over
+    Lineage mounts use the HTTP endpoint; searches over scratch paths
+    use the local ripgrep."""
     from backend.src.agents import lineage_fs_client as _lfs
     if _lfs.is_lineage_mode():
-        return _lfs.exec_search_files(root, args)
+        directory = args.get("directory", "") or ""
+        if _lfs.is_lineage_path(directory):
+            return _lfs.exec_search_files(root, args)
     return _exec_search_files(root, args)
 
 
@@ -2048,21 +2081,33 @@ create duplicate drafts. Here's how to do the same things correctly:
   rank them yourself. For a curated slice, also check `tone/` which
   exposes ``tone_references`` picks.
 
-- `bash`, `write_file`, `edit_file` are ALL DISABLED in Lineage mode.
-  Lineage's workspace is the CLIENT's space — you never write to it
-  except through `submit_draft` (final posts only). Any call to
-  write_file or edit_file will be refused with an error.
+- `bash` is DISABLED in Lineage mode (scratch filesystem isn't wired).
 
-- **Iteration is entirely in-context. No scratch files.**
-  Don't try to write a v1 draft to `notes/drafts/post1-v1.md` and read
-  it back. Keep drafts in your reasoning. When you want a reader
-  reaction, call:
+- `write_file` / `edit_file` route BY PATH:
+  * **Lineage mount paths are READ-ONLY.** Any write under
+    ``transcripts/``, ``research/``, ``engagement/``, ``reports/``,
+    ``context/``, ``posts/``, ``edits/``, ``tone/``, ``strategy/``, or
+    the shared ``conversations/``, ``slack/``, ``tasks/``, ``.pi/``
+    is refused — those are the client's files. The error message tells
+    you exactly where to write instead.
+  * **Scratch paths work normally.** Write freely to anything OUTSIDE
+    the Lineage mounts: ``scratch/post1-v1.md``, ``scratch/plan.md``,
+    ``notes/brainstorm.md``, ``drafts/wip.md`` — whatever you want.
+    Those land on your fly-local SandboxFs, persist for the run, and
+    you can ``read_file``/``list_directory`` them back normally.
 
-      get_reader_reaction(draft_text="<the full current draft>")
+- **Use scratch for draft iteration.** Classic pattern still works:
 
-  Irontomb returns `{reaction, anchor}` — you interpret and decide
-  whether to revise. Iterate v1 → v2 → v3 by just keeping the text
-  in your context. No file round-trip.
+      write_file("scratch/post1-v1.md", <draft>)
+      → get_reader_reaction(draft_text=<draft>)
+      → interpret reaction
+      → write_file("scratch/post1-v2.md", <revised>)
+      → get_reader_reaction(draft_text=<revised>)
+      → … iterate until the reader stops complaining.
+
+  You can also keep drafts purely in-context if you prefer —
+  ``get_reader_reaction`` takes the full draft text directly, so a
+  file round-trip is never required. Use whichever feels natural.
 
 - **FINAL DRAFTS: use `submit_draft`.** One call per finished post:
 
@@ -2102,18 +2147,33 @@ You are running against a REMOTE workspace served by Lineage (virio-api),
 scoped to a single FOC user for this run. Every draft you produce will
 be attributed to that user.
 
-**Lineage's workspace is READ-ONLY to you.** You may call `list_directory`,
-`read_file`, and `search_files` freely. You may NOT call `write_file`,
-`edit_file`, or `bash` — all three are disabled in Lineage mode and will
-return an error. The only tool that writes to Lineage is `submit_draft`,
-which submits a finished post atomically.
+**Lineage's workspace is READ-ONLY to you.** Calls to `list_directory`,
+`read_file`, `search_files` on Lineage paths proxy through to the
+client's workspace over HTTPS. ``write_file`` / ``edit_file`` on those
+same paths are refused.
 
-Iteration happens entirely in your own context — no scratch files.
-When you want a reader reaction on a draft, pass it directly:
+**But scratch paths work normally.** Any path OUTSIDE the Lineage mount
+tree (``scratch/``, ``notes/``, ``drafts/``, loose top-level files) is
+your own fly-local SandboxFs — read, write, edit, list freely.
 
-    get_reader_reaction(draft_text="<full current draft>")
+- Lineage paths (routed to client's workspace, READ-ONLY for writes):
+  ``transcripts/``, ``research/``, ``engagement/``, ``reports/``,
+  ``context/``, ``posts/``, ``edits/``, ``tone/``, ``strategy/``, and
+  the shared ``conversations/``, ``slack/``, ``tasks/``, ``.pi/``.
+- Scratch paths (fly-local, read/write): anything else.
 
-Keep v1 → v2 → v3 in your own reasoning. No file round-trip needed.
+Classic iteration pattern still works:
+
+    write_file("scratch/post1-v1.md", <draft>)
+    → get_reader_reaction(draft_text=<draft>)
+    → write_file("scratch/post1-v2.md", <revised>)
+    → get_reader_reaction(draft_text=<revised>)
+    → … until Irontomb stops complaining, then submit_draft.
+
+You can also keep drafts purely in-context — ``get_reader_reaction``
+takes the full draft directly. Use whichever feels natural.
+
+Only ``submit_draft`` writes to Lineage (finished posts only).
 
 ## Workspace layout (read-only; paths auto-prefixed to the target user)
 
@@ -2188,15 +2248,18 @@ _LINEAGE_DIRECTIVES_COMPANY_WIDE = """\
 # Lineage Mode — COMPANY-WIDE RUN
 
 You are running against a REMOTE workspace served by Lineage (virio-api).
-All filesystem tool calls hit that remote over HTTPS. ``memory/`` and
-``scratch/`` DO NOT exist — use the layout below.
+Filesystem tool calls route BY PATH:
 
-**Lineage's workspace is READ-ONLY to you.** `list_directory`, `read_file`,
-and `search_files` work. `write_file`, `edit_file`, and `bash` are
-disabled and will error. The only tool that writes to Lineage is
-`submit_draft`. Iteration (v1 → v2 → v3) happens entirely in your own
-context — call `get_reader_reaction(draft_text=...)` directly with the
-current draft text; no scratch files.
+- **Lineage mount paths** (``transcripts/``, ``research/``, ``engagement/``,
+  ``reports/``, ``context/``, ``posts/``, ``edits/``, ``tone/``,
+  ``strategy/``, and the shared ``conversations/``, ``slack/``, ``tasks/``,
+  ``.pi/``) hit the client's remote workspace over HTTPS. These are
+  READ-ONLY for writes — ``write_file``/``edit_file`` on them is refused.
+- **Scratch paths** (``scratch/``, ``notes/``, ``drafts/``, any loose
+  top-level file) land on your fly-local SandboxFs. Read/write freely.
+  Classic scratch-file draft iteration works exactly as in local mode.
+
+Only ``submit_draft`` writes to Lineage (finished posts only).
 
 ## Workspace layout (all read-only)
 
