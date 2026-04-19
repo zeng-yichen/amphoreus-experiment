@@ -22,6 +22,11 @@ primary_region = "sjc"   # match backend region to keep the proxy hop cheap
   NODE_ENV             = "production"
   PORT                 = "3000"
   NEXT_TELEMETRY_DISABLED = "1"
+  # Runtime BACKEND_URL for Next.js Route Handlers that proxy SSE
+  # (src/app/api/ghostwriter/sandbox/stream/route.ts and friends).
+  # Same value as the build-time ARG above — rewrites() uses the
+  # baked-in one, route handlers use this runtime one. Keep in sync.
+  BACKEND_URL          = "http://amphoreus.internal:8000"
 
 [http_service]
   internal_port       = 3000
