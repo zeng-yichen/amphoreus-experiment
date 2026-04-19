@@ -115,7 +115,24 @@ def _mark_run_failed(job_id: str, error: str) -> None:
 
 
 def _snapshot_workspace(company: str, job_id: str) -> None:
-    """Create a workspace snapshot tied to this run id, matching the old threaded path."""
+    """Create a workspace snapshot tied to this run id, matching the old threaded path.
+
+    Skipped in Lineage mode: the only non-wiped content in the workspace
+    is ``scratch/`` (the real data lives on Jacquard and is never
+    committed to the workspace dir), so snapshots there capture nothing
+    worth snapshotting. Left on, they accumulate one empty tree per run
+    under ``snapshots/<job_id>/`` and Stelle wastes cycles exploring
+    them on her next run.
+    """
+    try:
+        from backend.src.agents import lineage_fs_client as _lfs
+        if _lfs.is_lineage_mode():
+            logger.info("[stelle_runner] Lineage mode — skipping workspace snapshot")
+            return
+    except Exception:
+        # Fall through — if the import fails we still want the legacy
+        # snapshot behavior for local-mode runs.
+        pass
     try:
         from backend.src.services.workspace_manager import create_snapshot
         create_snapshot(company, job_id)

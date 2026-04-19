@@ -875,8 +875,15 @@ def _exec_subagent(args: dict) -> str:
         return f"Sub-agent error: {e}"
 
 
+_WORKSPACE_ROOT_PATHS = frozenset({"", ".", "/", "./"})
+
+
 def _dispatch_list_directory(root, args):
     """Path-aware routing:
+    - Root path (``""`` / ``"."``) in Lineage mode → HTTP proxy root
+      listing (shows Jacquard's FOC user slugs + shared roots). Without
+      this Stelle gets the fly-local scratch workspace on her very first
+      call and has no hint the Lineage mounts exist.
     - Lineage mount paths → HTTP proxy to virio-api workspace
     - Everything else (scratch/, loose dirs) → fly-local SandboxFs
 
@@ -885,6 +892,8 @@ def _dispatch_list_directory(root, args):
     from backend.src.agents import lineage_fs_client as _lfs
     if _lfs.is_lineage_mode():
         path = args.get("path", "") or ""
+        if path in _WORKSPACE_ROOT_PATHS:
+            return _lfs.exec_list_directory(root, {"path": ""})
         if _lfs.is_lineage_path(path):
             return _lfs.exec_list_directory(root, args)
     return _exec_list_directory(root, args)
@@ -1858,14 +1867,41 @@ def _setup_workspace(company_keyword: str) -> Path:
     try:
         from backend.src.agents import lineage_fs_client as _lfs
         if _lfs.is_lineage_mode():
-            # Also clear any stale memory/ context/ from prior local-mode
-            # runs so Stelle doesn't see leftover files.
-            for leftover in ("memory", "context", "abm_profiles", "revisions"):
+            # Also clear stale leftovers from prior local-mode runs so
+            # Stelle doesn't waste cycles exploring empty junk:
+            #   - memory/, context/, abm_profiles/, revisions/
+            #       Legacy Jacquard-style dirs that are now empty after the
+            #       memory/ cut; the real data lives on Jacquard.
+            #   - snapshots/
+            #       workspace_manager.create_snapshot dumps each past run
+            #       under this dir. In Lineage mode the only thing to
+            #       snapshot is scratch/, which gets wiped every run
+            #       anyway — so snapshots just pile up stale empty trees
+            #       that look like "interesting data" to Stelle.
+            #   - output/
+            #       Legacy drafts landing site; drafts now go through
+            #       submit_draft → Amphoreus Posts, never here.
+            #   - tools/, draft.sh, edit.sh, memory.sh
+            #       Local-mode-only scaffolding (bash is disabled in
+            #       Lineage per _dispatch_bash), so these scripts aren't
+            #       runnable and just clutter the root listing.
+            stale_dirs = (
+                "memory", "context", "abm_profiles", "revisions",
+                "snapshots", "output", "tools",
+            )
+            for leftover in stale_dirs:
                 p = workspace / leftover
                 if p.is_symlink():
                     p.unlink()
                 elif p.is_dir():
                     shutil.rmtree(p)
+            for script in ("draft.sh", "edit.sh", "memory.sh"):
+                p = workspace / script
+                if p.is_symlink() or p.is_file():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
             logger.info(
                 "[Stelle] Lineage mode — minimal workspace (scratch/ only). "
                 "Jacquard's workspace is the data source."
