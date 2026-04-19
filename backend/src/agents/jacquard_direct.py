@@ -461,30 +461,51 @@ def fetch_context_files(
 # ICP engagement data
 # ---------------------------------------------------------------------------
 
+def _linkedin_username_from_url(url: str | None) -> str | None:
+    """Extract 'lukasheuer' from 'https://www.linkedin.com/in/lukasheuer/' etc."""
+    if not url:
+        return None
+    match = re.search(r"/in/([^/?#]+)", url)
+    if not match:
+        return None
+    return match.group(1).strip().lower()
+
+
 def fetch_icp_data(user: dict[str, Any]) -> dict[str, str]:
     """Return the engagement/ directory as ``{filename: json_content_str}``.
 
     Files: ``posts.json``, ``reactions.json``, ``comments.json``,
-    ``profiles.json``, ``work_experiences.json``, ``client_info.json``.
+    ``profiles.json``, ``client_info.json``.
 
-    Every blob is JSON-serialized. Callers expect strings and parse
-    themselves. Missing tables yield ``[]`` or ``{}`` rather than erroring.
+    Every blob is JSON-serialized. Callers expect strings and parse themselves.
+    Missing data yields empty arrays rather than erroring.
+
+    Column schema matches Jacquard's actual linkedin_posts / linkedin_reactions /
+    linkedin_comments / linkedin_profiles tables (real column names, not the
+    ones I guessed from Lineage's workspace-builder reads).
     """
     files: dict[str, str] = {}
     if not user or not user.get("linkedin_url"):
-        # Match Jacquard's behavior: empty engagement dir for users with
-        # no LinkedIn URL configured.
         return files
 
     sb = _sb()
     user_id = user.get("id")
     linkedin_url = user.get("linkedin_url")
+    username = _linkedin_username_from_url(linkedin_url)
 
-    # Posts authored by this user
+    # Posts authored by this user — joined on creator_username.
     posts = (
         sb.table("linkedin_posts")
-        .select("id, post_url, posted_at, reactions_count, comments_count, text")
-        .eq("author_linkedin_url", linkedin_url)
+        .select(
+            "id, provider_urn, post_url, posted_at, post_text, hook, "
+            "total_reactions, total_comments, total_reposts, "
+            "like_reactions, love_reactions, support_reactions, "
+            "insight_reactions, celebrate_reactions, funny_reactions, "
+            "engagement_score, is_outlier, quality_score, "
+            "topic_tags, hook_type, format_archetype, tone, "
+            "is_tofu, is_mofu, is_bofu, abm_category, target_persona"
+        )
+        .eq("creator_username", username or "")
         .order("posted_at", desc=True)
         .limit(200)
         .execute()
@@ -493,15 +514,18 @@ def fetch_icp_data(user: dict[str, Any]) -> dict[str, str]:
     )
     files["posts.json"] = json.dumps(posts, default=str, indent=2)
 
-    post_ids = [p.get("id") for p in posts if p.get("id")]
+    # Reactions + comments are keyed by provider_post_urn, not numeric id.
+    post_urns = [p.get("provider_urn") for p in posts if p.get("provider_urn")]
 
-    # Reactions on those posts
     reactions: list[dict[str, Any]] = []
-    if post_ids:
+    if post_urns:
         reactions = (
             sb.table("linkedin_reactions")
-            .select("id, post_id, reactor_linkedin_url, reaction_type, reacted_at")
-            .in_("post_id", post_ids)
+            .select(
+                "id, provider_post_urn, provider_profile_urn, type, "
+                "reacted_at, reactor_name, reactor_headline"
+            )
+            .in_("provider_post_urn", post_urns)
             .limit(5000)
             .execute()
             .data
@@ -509,13 +533,15 @@ def fetch_icp_data(user: dict[str, Any]) -> dict[str, str]:
         )
     files["reactions.json"] = json.dumps(reactions, default=str, indent=2)
 
-    # Comments on those posts
     comments: list[dict[str, Any]] = []
-    if post_ids:
+    if post_urns:
         comments = (
             sb.table("linkedin_comments")
-            .select("id, post_id, commenter_linkedin_url, text, commented_at")
-            .in_("post_id", post_ids)
+            .select(
+                "id, provider_post_urn, provider_profile_urn, text, "
+                "commented_at, commenter_name, commenter_headline"
+            )
+            .in_("provider_post_urn", post_urns)
             .limit(2000)
             .execute()
             .data
@@ -523,44 +549,41 @@ def fetch_icp_data(user: dict[str, Any]) -> dict[str, str]:
         )
     files["comments.json"] = json.dumps(comments, default=str, indent=2)
 
-    # Reactor / commenter profiles
-    reactor_urls = {
-        r.get("reactor_linkedin_url") for r in reactions if r.get("reactor_linkedin_url")
-    }
-    commenter_urls = {
-        c.get("commenter_linkedin_url") for c in comments if c.get("commenter_linkedin_url")
-    }
-    engager_urls = list(reactor_urls | commenter_urls)
+    # Reactor + commenter profiles — join on provider_urn.
+    engager_urns = sorted({
+        *(r.get("provider_profile_urn") for r in reactions if r.get("provider_profile_urn")),
+        *(c.get("provider_profile_urn") for c in comments if c.get("provider_profile_urn")),
+    })
 
     profiles: list[dict[str, Any]] = []
-    work_exp: list[dict[str, Any]] = []
-    if engager_urls:
+    if engager_urns:
         profiles = (
             sb.table("linkedin_profiles")
-            .select("linkedin_url, first_name, last_name, headline, company_name, location")
-            .in_("linkedin_url", engager_urls)
-            .execute()
-            .data
-            or []
-        )
-        work_exp = (
-            sb.table("linkedin_work_experiences")
-            .select("linkedin_url, company_name, title, start_date, end_date, is_current")
-            .in_("linkedin_url", engager_urls)
+            .select(
+                "provider_urn, username, first_name, last_name, headline, "
+                "about, location_full, location_country, location_city, "
+                "follower_count, connection_count, positions_text, "
+                "engagement_scores, skills, has_education, has_work_experience"
+            )
+            .in_("provider_urn", engager_urns)
             .execute()
             .data
             or []
         )
     files["profiles.json"] = json.dumps(profiles, default=str, indent=2)
-    files["work_experiences.json"] = json.dumps(work_exp, default=str, indent=2)
 
     files["client_info.json"] = json.dumps({
         "user_id": user_id,
         "name": " ".join(filter(None, [user.get("first_name"), user.get("last_name")])),
         "email": user.get("email"),
         "linkedin_url": linkedin_url,
+        "linkedin_username": username,
         "company_name": user.get("company_name"),
         "is_internal": user.get("is_internal"),
+        "n_posts_tracked": len(posts),
+        "n_reactions_tracked": len(reactions),
+        "n_comments_tracked": len(comments),
+        "n_unique_engagers": len(engager_urns),
     }, default=str, indent=2)
 
     return files
@@ -573,41 +596,41 @@ def fetch_icp_data(user: dict[str, Any]) -> dict[str, str]:
 def fetch_latest_icp_report(company_id: str, user_id: str) -> dict[str, str] | None:
     """Return the most recent ICP report as ``{filename, content}`` or None.
 
-    Table name drift-tolerant: tries ``reports`` first (Jacquard's current
-    schema), falls back to ``icp_reports`` (legacy). Missing table or
-    missing rows both return None silently — callers treat "no ICP report"
-    as valid state, not an error.
+    Real schema: ``reports`` table has {id, company_id, user_id, run_id,
+    report_type, result_json, pdf_gcs_url, csv_gcs_url, title, summary,
+    status, created_at, completed_at}. We filter to report_type='icp' and
+    status='completed', grab the most recent, serialize result_json.
     """
     if not company_id or not user_id:
         return None
     sb = _sb()
-    for table_name in ("reports", "icp_reports"):
-        try:
-            rows = (
-                sb.table(table_name)
-                .select("filename, content, created_at")
-                .eq("company_id", company_id)
-                .eq("user_id", user_id)
-                .order("created_at", desc=True)
-                .limit(1)
-                .execute()
-                .data
-                or []
-            )
-        except Exception as exc:
-            logger.debug("[jacquard_direct] fetch_latest_icp_report %s: %s", table_name, exc)
-            continue
-        if not rows:
-            continue
-        row = rows[0]
-        content = row.get("content")
-        if isinstance(content, (dict, list)):
-            content = json.dumps(content, default=str, indent=2)
-        return {
-            "filename": row.get("filename") or "icp-report.json",
-            "content": content or "",
-        }
-    return None
+    try:
+        rows = (
+            sb.table("reports")
+            .select("id, report_type, result_json, title, summary, status, completed_at")
+            .eq("company_id", company_id)
+            .eq("user_id", user_id)
+            .eq("report_type", "icp")
+            .eq("status", "completed")
+            .order("completed_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        logger.debug("[jacquard_direct] fetch_latest_icp_report: %s", exc)
+        return None
+    if not rows:
+        return None
+    row = rows[0]
+    body = row.get("result_json")
+    if isinstance(body, (dict, list)):
+        body = json.dumps(body, default=str, indent=2)
+    return {
+        "filename": f"icp-report-{(row.get('id') or '')[:8]}.json",
+        "content": body or "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -615,24 +638,38 @@ def fetch_latest_icp_report(company_id: str, user_id: str) -> dict[str, str] | N
 # ---------------------------------------------------------------------------
 
 def fetch_tone_references(user_id: str) -> list[dict[str, str]]:
-    """Per-user style/voice exemplars."""
+    """Per-user style/voice exemplars.
+
+    Real schema: tone_references has {id, user_id, source_type, url, raw_text,
+    note, preferred, calibration_pair}. No filename column — we synthesize one.
+    """
     if not user_id:
         return []
     sb = _sb()
     rows = (
         sb.table("tone_references")
-        .select("id, filename, content, created_at")
+        .select("id, source_type, url, raw_text, note, preferred, created_at")
         .eq("user_id", user_id)
         .order("created_at", desc=True)
-        .limit(20)
+        .limit(50)
         .execute()
         .data
         or []
     )
-    return [
-        {"filename": r.get("filename") or f"tone-{r.get('id')}.md", "content": r.get("content") or ""}
-        for r in rows
-    ]
+    out: list[dict[str, str]] = []
+    for i, r in enumerate(rows, 1):
+        source = r.get("source_type") or "tone"
+        marker = "preferred" if r.get("preferred") else source
+        filename = f"{i:02d}-{marker}-{(r.get('id') or '')[:8]}.md"
+        lines = [f"# Tone reference {i}: {marker}"]
+        if r.get("url"):
+            lines.append(f"_source_url: {r['url']}_")
+        if r.get("note"):
+            lines.append(f"\n**Note:** {r['note']}")
+        lines.append("")
+        lines.append(r.get("raw_text") or "")
+        out.append({"filename": filename, "content": "\n".join(lines)})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -732,6 +769,167 @@ def fetch_edit_history(user_id: str, limit: int = 50) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Published posts
 # ---------------------------------------------------------------------------
+
+def build_post_history_digest(user: dict[str, Any], top_n: int = 10) -> str:
+    """Render the client's top-N posts by reactions as a single markdown
+    file — Stelle's primary "what works for this audience" signal.
+
+    Replaces the old memory/<company>/post-history.md that used to come
+    from ruan_mei's scored observations. Same semantic: the best-performing
+    past posts, with full text + raw engagement numbers + per-reaction
+    breakdown, so Stelle can learn patterns from evidence without us
+    pre-digesting into categorical tags.
+    """
+    if not user or not user.get("linkedin_url"):
+        return (
+            "# Post history\n\n"
+            "(no LinkedIn URL configured for this user — engagement data unavailable)\n"
+        )
+    sb = _sb()
+    username = _linkedin_username_from_url(user.get("linkedin_url"))
+    if not username:
+        return "# Post history\n\n(could not parse username from linkedin_url)\n"
+
+    try:
+        posts = (
+            sb.table("linkedin_posts")
+            .select(
+                "posted_at, post_text, hook, post_url, "
+                "total_reactions, total_comments, total_reposts, "
+                "like_reactions, love_reactions, support_reactions, "
+                "insight_reactions, celebrate_reactions, funny_reactions, "
+                "engagement_score, is_outlier, topic_tags, hook_type, format_archetype"
+            )
+            .eq("creator_username", username)
+            .order("total_reactions", desc=True)
+            .limit(top_n)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        logger.warning("[jacquard_direct] build_post_history_digest failed: %s", exc)
+        return f"# Post history\n\n(fetch failed: {exc})\n"
+
+    if not posts:
+        return "# Post history\n\n(no scored posts for this user yet)\n"
+
+    name = " ".join(filter(None, [user.get("first_name"), user.get("last_name")])) or username
+
+    lines: list[str] = []
+    lines.append(f"# Post history — {name} — top {len(posts)} performers")
+    lines.append("")
+    lines.append(
+        f"These are the {len(posts)} highest-reacted posts from this user's "
+        f"LinkedIn history, sorted by total_reactions. Use them to learn what "
+        f"structures, topics, and tones land with this audience. Full text is "
+        f"included — NOT a summary — so you can see what actually worked."
+    )
+    lines.append("")
+    lines.append("Per-reaction breakdown: `like / love / support / insight / celebrate / funny`.")
+    lines.append("")
+
+    for i, p in enumerate(posts, 1):
+        posted = (p.get("posted_at") or "")[:10]
+        reacts = p.get("total_reactions") or 0
+        comms = p.get("total_comments") or 0
+        reps = p.get("total_reposts") or 0
+        breakdown = (
+            f"{p.get('like_reactions') or 0}/"
+            f"{p.get('love_reactions') or 0}/"
+            f"{p.get('support_reactions') or 0}/"
+            f"{p.get('insight_reactions') or 0}/"
+            f"{p.get('celebrate_reactions') or 0}/"
+            f"{p.get('funny_reactions') or 0}"
+        )
+        outlier_mark = " 🔥 OUTLIER" if p.get("is_outlier") else ""
+        eng_score = p.get("engagement_score")
+
+        lines.append(f"## {i}. {reacts} reactions · {comms} comments · {reps} reposts · {posted}{outlier_mark}")
+        lines.append("")
+        lines.append(f"- reaction breakdown: `{breakdown}`")
+        if eng_score is not None:
+            lines.append(f"- engagement_score (Jacquard): `{eng_score}`")
+        tags = p.get("topic_tags") or []
+        if tags:
+            lines.append(f"- topic_tags: `{tags}`")
+        ht = p.get("hook_type")
+        fa = p.get("format_archetype")
+        if ht or fa:
+            lines.append(f"- hook_type: `{ht}` · format: `{fa}`")
+        if p.get("post_url"):
+            lines.append(f"- link: {p['post_url']}")
+        lines.append("")
+        lines.append("```")
+        lines.append(p.get("post_text") or "")
+        lines.append("```")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def fetch_profile_md(user: dict[str, Any]) -> str | None:
+    """Render the user's LinkedIn profile as markdown.
+
+    Replaces the old memory/<company>/profile.md (which came from APImaestro).
+    Source: linkedin_profiles row matched by username.
+    """
+    username = _linkedin_username_from_url(user.get("linkedin_url"))
+    if not username:
+        return None
+    sb = _sb()
+    try:
+        rows = (
+            sb.table("linkedin_profiles")
+            .select(
+                "username, first_name, last_name, headline, about, "
+                "location_full, location_country, location_city, metro_area, "
+                "follower_count, connection_count, positions_text, "
+                "skills, languages, certifications, projects, "
+                "total_posts, last_updated_at"
+            )
+            .eq("username", username)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        logger.debug("[jacquard_direct] fetch_profile_md: %s", exc)
+        return None
+    if not rows:
+        return None
+    p = rows[0]
+    name = " ".join(filter(None, [p.get("first_name"), p.get("last_name")])) or username
+
+    lines: list[str] = [
+        f"# {name}",
+        "",
+        f"_username: {p.get('username')}_",
+        f"_last_updated: {p.get('last_updated_at')}_",
+        "",
+    ]
+    if p.get("headline"):
+        lines.extend(["## Headline", "", p["headline"], ""])
+    if p.get("location_full"):
+        lines.extend(["## Location", "", p["location_full"], ""])
+    counts = []
+    if p.get("follower_count") is not None:
+        counts.append(f"followers: {p['follower_count']}")
+    if p.get("connection_count") is not None:
+        counts.append(f"connections: {p['connection_count']}")
+    if p.get("total_posts") is not None:
+        counts.append(f"total posts: {p['total_posts']}")
+    if counts:
+        lines.extend(["## Counts", "", " · ".join(counts), ""])
+    if p.get("about"):
+        lines.extend(["## About", "", p["about"], ""])
+    if p.get("positions_text"):
+        lines.extend(["## Positions", "", p["positions_text"], ""])
+    if p.get("skills"):
+        lines.extend(["## Skills", "", json.dumps(p["skills"], indent=2), ""])
+    return "\n".join(lines)
+
 
 def fetch_published_posts(user_id: str, limit: int = 100) -> list[dict[str, str]]:
     """Posts the user has published on LinkedIn. Status-filtered drafts table."""
@@ -979,6 +1177,19 @@ def populate_lineage_workspace(
         counts[f"{slug}/posts/published"] = _write_files(
             user_root / "posts" / "published", items or [],
         )
+
+        # post-history.md — top-N performers with full text + engagement.
+        # This is Stelle's critical "what works for this audience" signal.
+        digest = _safe(f"{slug}/post-history.md", build_post_history_digest, user, top_n=10)
+        if digest:
+            (user_root / "post-history.md").write_text(digest, encoding="utf-8")
+            counts[f"{slug}/post-history.md"] = 1
+
+        # profile.md — LinkedIn profile rendered as markdown.
+        prof = _safe(f"{slug}/profile.md", fetch_profile_md, user)
+        if prof:
+            (user_root / "profile.md").write_text(prof, encoding="utf-8")
+            counts[f"{slug}/profile.md"] = 1
 
     # Shared: trigger log
     conv_dir = root / "conversations"
