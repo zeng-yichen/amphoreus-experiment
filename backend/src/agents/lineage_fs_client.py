@@ -253,6 +253,43 @@ _USER_MOUNTS = frozenset({
 })
 
 
+# Cache the list of FOC user slugs per company, populated once per
+# process. Filled lazily on the first ``is_lineage_path`` call that
+# needs to check a bare-slug path. Avoids a Supabase round-trip on
+# every path-routing decision.
+_FOC_SLUGS_CACHE: dict[str, frozenset[str]] = {}
+
+
+def _known_foc_slugs() -> frozenset[str]:
+    """Return the set of FOC user slugs for the current company.
+
+    Used by ``is_lineage_path`` to recognize bare-slug paths like
+    ``weber-wong`` as Lineage reads (they map to ``_direct_list(slug)``
+    which returns the user's subdir listing). Without this, Stelle
+    spends cycles bouncing off "directory not found" when she tries to
+    drill into a slug she just saw at the workspace root.
+
+    Cached per-process so the lookup is free after the first hit. If
+    Supabase is unreachable, returns an empty set (callers fall through
+    to the safe denial path).
+    """
+    company_id = os.environ.get("LINEAGE_COMPANY_ID", "").strip()
+    if not company_id:
+        return frozenset()
+    cached = _FOC_SLUGS_CACHE.get(company_id)
+    if cached is not None:
+        return cached
+    try:
+        from backend.src.agents import jacquard_direct as _jd
+        users = _jd.list_foc_users(company_id) or []
+        slugs = frozenset(u.get("slug") for u in users if u.get("slug"))
+    except Exception as exc:
+        logger.warning("[lineage_fs] FOC slug cache miss: %s", exc)
+        slugs = frozenset()
+    _FOC_SLUGS_CACHE[company_id] = slugs
+    return slugs
+
+
 def is_lineage_path(rel: str) -> bool:
     """True if the path targets a Lineage mount, False if it's scratch.
 
@@ -260,6 +297,8 @@ def is_lineage_path(rel: str) -> bool:
     ``workspace-builder.ts``. A path is "Lineage" when:
       * First segment is a shared root (``conversations/``, ``slack/``,
         ``tasks/``, ``.pi/``), OR
+      * First segment is a known FOC user slug (bare slug path —
+        ``weber-wong``, ``weber-wong/``), OR
       * First segment is a user slug AND second segment is a known
         user-scope mount (``transcripts/``, ``research/``, etc.).
 
@@ -286,6 +325,11 @@ def is_lineage_path(rel: str) -> bool:
     # or any slug in company-wide mode). Second segment must be a known
     # user mount.
     if len(parts) >= 2 and parts[1] in _USER_MOUNTS:
+        return True
+    # Bare-slug path (``weber-wong``, ``weber-wong/``) — route to
+    # Lineage so ``_direct_list(slug)`` can surface the user's subdirs.
+    # Cached set makes this free after first query.
+    if len(parts) == 1 and first in _known_foc_slugs():
         return True
     return False
 

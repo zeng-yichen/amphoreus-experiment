@@ -494,17 +494,16 @@ def fetch_icp_data(user: dict[str, Any]) -> dict[str, str]:
     username = _linkedin_username_from_url(linkedin_url)
 
     # Posts authored by this user — joined on creator_username.
+    # Using select("*") to tolerate Jacquard's evolving schema. The
+    # previously-enumerated Amphoreus-side enrichment columns
+    # (engagement_score, is_outlier, quality_score, topic_tags,
+    # hook_type, format_archetype, is_tofu/mofu/bofu, abm_category,
+    # target_persona, hook, tone) don't all exist in current
+    # Jacquard and trigger "JSON could not be generated" 400s. Same
+    # schema-drift fix we applied to fetch_tasks.
     posts = (
         sb.table("linkedin_posts")
-        .select(
-            "id, provider_urn, post_url, posted_at, post_text, hook, "
-            "total_reactions, total_comments, total_reposts, "
-            "like_reactions, love_reactions, support_reactions, "
-            "insight_reactions, celebrate_reactions, funny_reactions, "
-            "engagement_score, is_outlier, quality_score, "
-            "topic_tags, hook_type, format_archetype, tone, "
-            "is_tofu, is_mofu, is_bofu, abm_category, target_persona"
-        )
+        .select("*")
         .eq("creator_username", username or "")
         .order("posted_at", desc=True)
         .limit(200)
@@ -521,10 +520,7 @@ def fetch_icp_data(user: dict[str, Any]) -> dict[str, str]:
     if post_urns:
         reactions = (
             sb.table("linkedin_reactions")
-            .select(
-                "id, provider_post_urn, provider_profile_urn, type, "
-                "reacted_at, reactor_name, reactor_headline"
-            )
+            .select("*")
             .in_("provider_post_urn", post_urns)
             .limit(5000)
             .execute()
@@ -537,10 +533,7 @@ def fetch_icp_data(user: dict[str, Any]) -> dict[str, str]:
     if post_urns:
         comments = (
             sb.table("linkedin_comments")
-            .select(
-                "id, provider_post_urn, provider_profile_urn, text, "
-                "commented_at, commenter_name, commenter_headline"
-            )
+            .select("*")
             .in_("provider_post_urn", post_urns)
             .limit(2000)
             .execute()
@@ -559,12 +552,7 @@ def fetch_icp_data(user: dict[str, Any]) -> dict[str, str]:
     if engager_urns:
         profiles = (
             sb.table("linkedin_profiles")
-            .select(
-                "provider_urn, username, first_name, last_name, headline, "
-                "about, location_full, location_country, location_city, "
-                "follower_count, connection_count, positions_text, "
-                "engagement_scores, skills, has_education, has_work_experience"
-            )
+            .select("*")
             .in_("provider_urn", engager_urns)
             .execute()
             .data
