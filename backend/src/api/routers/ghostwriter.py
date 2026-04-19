@@ -1,6 +1,7 @@
 """Ghostwriter API — generate, stream, manage workspaces."""
 
 import logging
+import os
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -100,21 +101,21 @@ async def generate(req: GenerateRequest, request: Request):
         lineage_run_token = auth_header.split(" ", 1)[1].strip()
     lineage_mode = bool(lineage_workspace_url and lineage_run_token and req.companyId)
 
-    # Self-initiated lineage-read mode. When the request comes from
-    # Amphoreus's own UI (no Jacquard proxy headers) but we have the
-    # shared secret + JACQUARD_WORKSPACE_URL configured, mint our own
-    # run-JWT so Stelle can read Jacquard's workspace data. Writes still
-    # stay local to Amphoreus — this is a read-only bridge.
+    # Self-initiated lineage-read mode (direct Supabase + GCS, no virio-api).
+    # When the request comes from Amphoreus's own UI (no Jacquard proxy
+    # headers) but we have GCS_CREDENTIALS_B64 + SUPABASE_* configured, we
+    # can read Jacquard's workspace data directly — no JWT minting, no
+    # HTTP hop to virio-api. Writes still stay local to Amphoreus.
     #
     # If only a slug was provided, try to resolve it to a Jacquard
     # ``user_companies.id`` by querying the shared Supabase project.
     if not lineage_mode:
-        from backend.src.utils.jacquard_jwt import (
-            is_jacquard_read_configured,
-            mint_run_token,
-            workspace_url as _jq_workspace_url,
+        direct_configured = bool(
+            os.environ.get("GCS_CREDENTIALS_B64", "").strip()
+            and os.environ.get("SUPABASE_URL", "").strip()
+            and os.environ.get("SUPABASE_KEY", "").strip()
         )
-        if is_jacquard_read_configured():
+        if direct_configured:
             resolved_company_id = req.companyId or None
             if not resolved_company_id and req.company:
                 # Best-effort slug → UUID lookup from the shared Supabase.
@@ -142,19 +143,17 @@ async def generate(req: GenerateRequest, request: Request):
                     )
 
             if resolved_company_id:
-                minted = mint_run_token(company_id=resolved_company_id, job_id=None)
-                if minted:
-                    lineage_workspace_url = _jq_workspace_url()
-                    lineage_run_token = minted
-                    lineage_mode = True
-                    # Overwrite req.companyId so downstream logic (user
-                    # resolution, subprocess args) sees the resolved UUID.
-                    req.companyId = resolved_company_id
-                    logger.info(
-                        "[ghostwriter] self-initiated lineage-read mode for company=%s "
-                        "(slug=%s uuid=%s)",
-                        identifier, req.company, resolved_company_id,
-                    )
+                # Direct mode — just set the company id. No JWT, no URL.
+                # lineage_fs_client routes reads through jacquard_direct
+                # (Supabase + GCS) because LINEAGE_COMPANY_ID is set and
+                # GCS/Supabase creds exist; HTTP fallback is disabled.
+                lineage_mode = True
+                req.companyId = resolved_company_id
+                logger.info(
+                    "[ghostwriter] self-initiated lineage-read mode (direct) "
+                    "for company=%s (slug=%s uuid=%s)",
+                    identifier, req.company, resolved_company_id,
+                )
 
     # User-targeted mode (optional): Jacquard forwards a FOC-user UUID
     # via ``X-Lineage-User-Id``. We resolve it to a slug here (Amphoreus
@@ -232,11 +231,17 @@ async def generate(req: GenerateRequest, request: Request):
     if user_email:
         cmd.extend(["--user-email", user_email])
     if lineage_mode:
-        cmd.extend([
-            "--lineage-workspace-url", lineage_workspace_url,  # type: ignore[arg-type]
-            "--lineage-run-token", lineage_run_token,           # type: ignore[arg-type]
-            "--company-id", req.companyId or "",
-        ])
+        # Always pass company id — it's the single required input for
+        # Stelle to know which Jacquard company she's reading against.
+        cmd.extend(["--company-id", req.companyId or ""])
+        # Only pass workspace URL + run token when HTTP mode is being
+        # used (Jacquard-initiated proxy runs). Direct-mode runs rely
+        # purely on GCS + Supabase creds already in the subprocess env.
+        if lineage_workspace_url and lineage_run_token:
+            cmd.extend([
+                "--lineage-workspace-url", lineage_workspace_url,
+                "--lineage-run-token", lineage_run_token,
+            ])
         if lineage_user_slug:
             cmd.extend(["--lineage-user-slug", lineage_user_slug])
 

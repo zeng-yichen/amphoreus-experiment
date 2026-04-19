@@ -163,13 +163,18 @@ def main() -> int:
     # Surface Lineage-mode inputs as env vars BEFORE we import Stelle so
     # the module-level ``is_lineage_mode()`` check in lineage_fs_client
     # sees them. ContextVars don't cross process boundaries; env vars do.
+    #
+    # LINEAGE_COMPANY_ID is the single required var — with it + GCS/Supabase
+    # creds in the parent env, Stelle runs direct-mode. Workspace URL and
+    # run token are legacy/HTTP-mode and only set when the parent
+    # explicitly passes them (Jacquard-initiated proxy runs).
+    if args.company_id:
+        os.environ["LINEAGE_COMPANY_ID"] = args.company_id
     if args.lineage_workspace_url and args.lineage_run_token:
         os.environ["LINEAGE_WORKSPACE_URL"] = args.lineage_workspace_url
         os.environ["LINEAGE_RUN_TOKEN"] = args.lineage_run_token
-        if args.company_id:
-            os.environ["LINEAGE_COMPANY_ID"] = args.company_id
-        if args.lineage_user_slug:
-            os.environ["LINEAGE_USER_SLUG"] = args.lineage_user_slug
+    if args.lineage_user_slug:
+        os.environ["LINEAGE_USER_SLUG"] = args.lineage_user_slug
 
     # Always surface the Amphoreus company keyword so the local
     # submit_draft handler can stamp drafts with the right ``company``

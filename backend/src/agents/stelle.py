@@ -4304,14 +4304,19 @@ def generate_one_shot(
 
     if not _lineage_active:
         raise RuntimeError(
-            "Stelle refuses to run without Lineage mode. "
-            "Every run must set LINEAGE_WORKSPACE_URL + LINEAGE_RUN_TOKEN so "
-            "the workspace (transcripts, engagement, research, context, edits) "
-            "comes from Jacquard — pure-local memory/<company>/ runs are no "
-            "longer supported. If you're hitting this via the ghostwriter API, "
-            "check that GHOSTWRITER_SHARED_SECRET + JACQUARD_WORKSPACE_URL are "
-            "configured and the requested companyId resolves to a Jacquard "
-            "user_companies.id."
+            "Stelle refuses to run without Lineage mode. The workspace "
+            "(transcripts, engagement, research, context, edits) must come "
+            "from Jacquard — pure-local memory/<company>/ runs are no "
+            "longer supported.\n\n"
+            "For direct-mode (no virio-api), the subprocess needs:\n"
+            "  - LINEAGE_COMPANY_ID (Jacquard user_companies.id UUID)\n"
+            "  - GCS_CREDENTIALS_B64 (service account JSON for the "
+            "lino-meeting-transcripts bucket)\n"
+            "  - SUPABASE_URL + SUPABASE_KEY (shared Jacquard project)\n\n"
+            "If you're hitting this via the ghostwriter API, verify the "
+            "request's company slug or companyId resolves to a Jacquard "
+            "user_companies row and that the GCS/Supabase creds are in "
+            "the parent process env."
         )
 
     # --- CLI mode: run through Claude CLI with Max plan (no API cost) ---

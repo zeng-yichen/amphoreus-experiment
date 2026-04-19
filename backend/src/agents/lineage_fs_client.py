@@ -81,8 +81,30 @@ def _get_client() -> httpx.Client:
 
 
 def is_lineage_mode() -> bool:
-    """True when both env vars are set — Stelle should route FS ops via HTTP."""
-    return bool(os.environ.get("LINEAGE_WORKSPACE_URL") and os.environ.get("LINEAGE_RUN_TOKEN"))
+    """True when Stelle has enough config to read Jacquard data.
+
+    Required:
+      - LINEAGE_COMPANY_ID (which company to query)
+      - Either direct-mode (GCS + Supabase) OR HTTP-mode (workspace URL + run token)
+
+    Direct-only deployments (our current default) skip the workspace URL
+    and run token — no virio-api dependency, no JWT minting. Amphoreus
+    reads from Jacquard's Supabase + GCS using its own service credentials.
+    """
+    if not os.environ.get("LINEAGE_COMPANY_ID", "").strip():
+        return False
+    # Direct mode: Supabase + GCS credentials in env.
+    direct_ok = bool(
+        os.environ.get("GCS_CREDENTIALS_B64", "").strip()
+        and os.environ.get("SUPABASE_URL", "").strip()
+        and os.environ.get("SUPABASE_KEY", "").strip()
+    )
+    # HTTP mode (legacy/fallback): workspace URL + run token.
+    http_ok = bool(
+        os.environ.get("LINEAGE_WORKSPACE_URL", "").strip()
+        and os.environ.get("LINEAGE_RUN_TOKEN", "").strip()
+    )
+    return direct_ok or http_ok
 
 
 def _base_url() -> str:
@@ -516,18 +538,25 @@ def exec_list_directory(_workspace_root: Any, args: dict) -> str:
     # what's available. Everything else is user-slug rewritten.
     rel = "" if _normalize_path(raw) == "" else _rewrite_path(raw)
 
-    # Direct-mode fast path — Supabase + GCS, no HTTP hop.
-    direct_errored = False
+    # Direct-mode path — Supabase + GCS, no HTTP hop. When direct is
+    # configured (the default), this is the ONLY path; HTTP to virio-api
+    # is used only when direct isn't configured (legacy/Jacquard-initiated
+    # proxy runs).
     if _direct_enabled():
         try:
             direct = _direct_list(rel)
         except Exception as exc:
-            logger.warning("[lineage_fs] direct list failed for %r: %s", rel, exc)
-            direct = None
-            direct_errored = True
-        if direct is not None:
-            return direct
+            raise LineageIngestionError(
+                f"list_directory({rel!r}): direct read failed: {exc}"
+            ) from exc
+        if direct is None:
+            raise LineageIngestionError(
+                f"list_directory({rel!r}): path not recognized by direct backend"
+            )
+        return direct
 
+    # HTTP mode — only reachable in legacy deployments where direct isn't
+    # configured (no GCS creds). Kept for Jacquard-initiated runs.
     try:
         resp = _get_client().get(
             f"{_base_url()}/list",
@@ -535,9 +564,9 @@ def exec_list_directory(_workspace_root: Any, args: dict) -> str:
             headers=_headers(),
         )
     except httpx.HTTPError as exc:
-        logger.error("[lineage_fs] FATAL list error (direct_errored=%s): %s", direct_errored, exc)
+        logger.error("[lineage_fs] FATAL list error: %s", exc)
         raise LineageIngestionError(
-            f"list_directory({rel!r}): both direct and HTTP failed. HTTP error: {exc}"
+            f"list_directory({rel!r}): HTTP failed: {exc}"
         ) from exc
 
     if resp.status_code == 401:
@@ -574,21 +603,25 @@ def exec_read_file(_workspace_root: Any, args: dict) -> str:
     if not norm:
         return "Error: path is required"
 
-    # Direct-mode fast path — Supabase + GCS, no HTTP hop.
-    direct_errored = False
+    # Direct-mode path — Supabase + GCS, no HTTP hop.
     if _direct_enabled():
         try:
             direct = _direct_read(norm)
         except Exception as exc:
-            logger.warning("[lineage_fs] direct read failed for %r: %s", norm, exc)
-            direct = None
-            direct_errored = True
-        if direct is not None:
-            content = direct
-            if len(content) > MAX_TOOL_OUTPUT_CHARS:
-                content = content[:MAX_TOOL_OUTPUT_CHARS] + f"\n\n... [truncated at {MAX_TOOL_OUTPUT_CHARS} chars]"
-            return content
+            raise LineageIngestionError(
+                f"read_file({rel!r}): direct read failed: {exc}"
+            ) from exc
+        if direct is None:
+            # 404-ish — file not found is soft-failure (Stelle can retry
+            # with a different path), but a direct-backend miss means we
+            # genuinely don't know where to look.
+            return f"Error: file not found: {rel}"
+        content = direct
+        if len(content) > MAX_TOOL_OUTPUT_CHARS:
+            content = content[:MAX_TOOL_OUTPUT_CHARS] + f"\n\n... [truncated at {MAX_TOOL_OUTPUT_CHARS} chars]"
+        return content
 
+    # HTTP mode fallback (legacy).
     try:
         resp = _get_client().get(
             f"{_base_url()}/file",
@@ -596,9 +629,9 @@ def exec_read_file(_workspace_root: Any, args: dict) -> str:
             headers=_headers(),
         )
     except httpx.HTTPError as exc:
-        logger.error("[lineage_fs] FATAL read error %s (direct_errored=%s): %s", norm, direct_errored, exc)
+        logger.error("[lineage_fs] FATAL read error %s: %s", norm, exc)
         raise LineageIngestionError(
-            f"read_file({rel!r}): both direct and HTTP failed. HTTP error: {exc}"
+            f"read_file({rel!r}): HTTP failed: {exc}"
         ) from exc
 
     # 404 is the one non-fatal case: "file genuinely doesn't exist in
