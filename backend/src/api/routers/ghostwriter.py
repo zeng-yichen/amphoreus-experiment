@@ -307,32 +307,37 @@ async def stream_for_company(companyId: str, after_id: int = 0):
         # same open connection into streaming that run's events — so the
         # user's click on Generate immediately starts filling the
         # terminal without needing to reconnect.
-        import asyncio as _asyncio
-        async def _idle_then_pivot():
+        #
+        # Implemented as a sync generator so FastAPI can iterate it on a
+        # worker thread — mixing ``async def`` with the sync, blocking
+        # ``job_manager.sse_stream`` (which uses ``time.sleep``) starved
+        # the event loop and prevented the handoff from ever emitting
+        # any events.
+        import time as _time
+        def _idle_then_pivot():
             yield ": idle - no active run for this company yet\n\n"
-            try:
-                while True:
-                    await _asyncio.sleep(3)
+            while True:
+                # Poll every 3 seconds until an active run appears.
+                for _ in range(6):  # 6 × 0.5s so keepalives stay warm
+                    _time.sleep(0.5)
                     yield ": keepalive\n\n"
-                    new_runs = list_runs(companyId, limit=5)
-                    new_active = [r for r in new_runs if r.get("status") in _ACTIVE_STATUSES]
-                    if new_active:
-                        new_job_id = new_active[0].get("id")
-                        if new_job_id:
-                            # Hand off to the per-job SSE generator —
-                            # same one /stream/{job_id} uses — so the
-                            # client sees a continuous stream of events
-                            # for the newly-started run.
-                            for chunk in job_manager.sse_stream(
-                                new_job_id,
-                                timeout=3600,
-                                heartbeat_interval=15,
-                                after_id=after_id,
-                            ):
-                                yield chunk
-                            return
-            except _asyncio.CancelledError:
-                return
+                new_runs = list_runs(companyId, limit=5)
+                new_active = [r for r in new_runs if r.get("status") in _ACTIVE_STATUSES]
+                if new_active:
+                    new_job_id = new_active[0].get("id")
+                    if new_job_id:
+                        # Hand off to the per-job SSE generator — same
+                        # one /stream/{job_id} uses — so the client
+                        # sees a continuous stream of events for the
+                        # newly-started run.
+                        for chunk in job_manager.sse_stream(
+                            new_job_id,
+                            timeout=3600,
+                            heartbeat_interval=15,
+                            after_id=after_id,
+                        ):
+                            yield chunk
+                        return
         return StreamingResponse(_idle_then_pivot(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
