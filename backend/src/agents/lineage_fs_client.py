@@ -571,8 +571,21 @@ def exec_list_directory(_workspace_root: Any, args: dict) -> str:
                 f"list_directory({rel!r}): direct read failed: {exc}"
             ) from exc
         if direct is None:
-            raise LineageIngestionError(
-                f"list_directory({rel!r}): path not recognized by direct backend"
+            # Path isn't one our direct backend knows — this isn't fatal.
+            # Stelle may be probing for a path from her local-mode prompt
+            # (``context/research``, ``memory/foo``, etc.) that doesn't
+            # exist in Jacquard's workspace. Return an empty listing so
+            # she learns "nothing there" and moves on, instead of us
+            # killing the run with LineageIngestionError.
+            logger.info(
+                "[lineage_fs] direct list: %r not recognized — returning empty",
+                rel,
+            )
+            return (
+                "(empty directory — this path isn't part of Lineage's workspace. "
+                "Valid paths: <user-slug>/{transcripts,research,engagement,"
+                "context,reports,posts,edits,tone,notes,strategy}, or shared "
+                "{conversations,slack,tasks,.pi}.)"
             )
         return direct
 
