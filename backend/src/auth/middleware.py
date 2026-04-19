@@ -48,6 +48,10 @@ from starlette.types import ASGIApp
 
 from backend.src.auth.acl import Acl
 from backend.src.auth.cf_access import ANONYMOUS_DEV_USER, AuthedUser, CfAccessVerifier
+from backend.src.auth.ghostwriter_token import (
+    is_enabled as _gw_token_enabled,
+    verify_ghostwriter_token,
+)
 from backend.src.usage.context import set_request_attribution
 
 logger = logging.getLogger("amphoreus.auth")
@@ -134,8 +138,50 @@ class CfAccessAuthMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS" or _is_exempt(request.url.path):
             return await call_next(request)
 
-        # Local-dev bypass — verifier disabled means no CF in front.
+        # Backend-to-backend auth first: if a Bearer token verifies as a
+        # ghostwriter run-JWT (HS256 with GHOSTWRITER_SHARED_SECRET, minted
+        # by Jacquard's virio-api), admit the request without touching
+        # CF Access. This is the primary path for Jacquard ↔ Amphoreus
+        # traffic on the public edge.
+        #
+        # The user-ACL layer below is a browser-traffic concern: CF Access
+        # gates browser auth, the ACL restricts which FOC-scoped calls a
+        # given human email can make. Neither applies to service-to-service
+        # calls — Jacquard IS the trusted backend, and the shared secret
+        # proves that. We stamp the request as the anonymous-admin dev
+        # user so downstream code sees a uniform AuthedUser shape.
+        if _gw_token_enabled():
+            bearer = request.headers.get("authorization", "")
+            if bearer.lower().startswith("bearer "):
+                gw_token = bearer[7:].strip()
+                gw_claims = verify_ghostwriter_token(gw_token)
+                if gw_claims is not None:
+                    request.state.user = ANONYMOUS_DEV_USER
+                    request.state.user_is_admin = True
+                    request.state.ghostwriter_claims = gw_claims
+                    with set_request_attribution(
+                        ANONYMOUS_DEV_USER.email,
+                        _company_from_path(request),
+                    ):
+                        return await call_next(request)
+                    # unreachable; return path inside context manager
+
+        # Local-dev bypass — CF Access verifier disabled AND no
+        # shared-secret token present. Treat as anonymous admin. This
+        # path ONLY fires when BOTH auth mechanisms are off (pure local
+        # dev); on Fly, at least one of them will always be configured.
         if not self._verifier.enabled:
+            if _gw_token_enabled():
+                # Shared secret IS configured but the request didn't
+                # carry a valid one. Reject rather than fall through —
+                # on Fly this is the only thing preventing public abuse.
+                return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={
+                        "error": "unauthorized",
+                        "detail": "missing or invalid ghostwriter run-JWT",
+                    },
+                )
             request.state.user = ANONYMOUS_DEV_USER
             request.state.user_is_admin = True
             with set_request_attribution(
