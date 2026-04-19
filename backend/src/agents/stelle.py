@@ -3706,6 +3706,24 @@ def _run_agent_loop(
                         output = run_handlers[name](workspace_root, args)
                         is_error = False
                     except Exception as e:
+                        # Lineage ingestion failures are FATAL. Don't convert
+                        # to a tool error and let Stelle muddle on with
+                        # missing data — re-raise so the subprocess crashes
+                        # cleanly and job_manager records a failed run.
+                        from backend.src.agents.lineage_fs_client import (
+                            LineageIngestionError as _LineageErr,
+                        )
+                        if isinstance(e, _LineageErr):
+                            logger.error(
+                                "[Stelle] FATAL: Lineage ingestion failed during "
+                                "%s — aborting run. %s", name, e,
+                            )
+                            if event_callback:
+                                event_callback("error", {
+                                    "message": f"Lineage ingestion failed: {e}",
+                                    "fatal": True,
+                                })
+                            raise
                         output = f"Error: {e}"
                         is_error = True
                     tool_results.append({

@@ -44,6 +44,22 @@ logger = logging.getLogger("stelle.lineage_fs")
 # Max characters to return in a single read_file call (matches stelle.py)
 MAX_TOOL_OUTPUT_CHARS = 80_000
 
+
+class LineageIngestionError(RuntimeError):
+    """Raised when a read against Jacquard's Lineage data fails and we
+    cannot recover. Deliberately NOT caught by Stelle's tool-dispatch
+    try/except — the run aborts instead of proceeding with missing data.
+
+    Produced when either:
+    - direct mode was enabled but both direct AND HTTP fallback failed
+    - lineage mode was enabled but the HTTP call errored / 5xx'd / 401'd
+    - a read returned a content payload shaped like an error
+
+    Pure-local runs (``is_lineage_mode() == False``) never raise this —
+    they use local disk paths where a missing file is just "empty dir"
+    or "file not found", not a fatal ingestion failure.
+    """
+
 # Shared HTTP client — connection pooling across many tool calls during a run.
 # 60s per-request timeout matches Stelle's bash timeout.
 _client: httpx.Client | None = None
@@ -438,12 +454,14 @@ def exec_list_directory(_workspace_root: Any, args: dict) -> str:
     rel = "" if _normalize_path(raw) == "" else _rewrite_path(raw)
 
     # Direct-mode fast path — Supabase + GCS, no HTTP hop.
+    direct_errored = False
     if _direct_enabled():
         try:
             direct = _direct_list(rel)
         except Exception as exc:
-            logger.warning("[lineage_fs] direct list failed for %r — falling back to HTTP: %s", rel, exc)
+            logger.warning("[lineage_fs] direct list failed for %r: %s", rel, exc)
             direct = None
+            direct_errored = True
         if direct is not None:
             return direct
 
@@ -454,15 +472,23 @@ def exec_list_directory(_workspace_root: Any, args: dict) -> str:
             headers=_headers(),
         )
     except httpx.HTTPError as exc:
-        logger.warning("[lineage_fs] list error: %s", exc)
-        return f"Error: remote list failed: {exc}"
+        logger.error("[lineage_fs] FATAL list error (direct_errored=%s): %s", direct_errored, exc)
+        raise LineageIngestionError(
+            f"list_directory({rel!r}): both direct and HTTP failed. HTTP error: {exc}"
+        ) from exc
 
     if resp.status_code == 401:
-        return "Error: run token invalid or expired"
+        raise LineageIngestionError(
+            f"list_directory({rel!r}): run token invalid or expired — ingestion auth broken"
+        )
     if resp.status_code >= 500:
-        return f"Error: remote list {resp.status_code}: {resp.text[:200]}"
+        raise LineageIngestionError(
+            f"list_directory({rel!r}): workspace returned {resp.status_code}: {resp.text[:200]}"
+        )
     if resp.status_code != 200:
-        return f"Error: remote list {resp.status_code}"
+        raise LineageIngestionError(
+            f"list_directory({rel!r}): workspace returned {resp.status_code}"
+        )
 
     data = resp.json()
     entries = data.get("entries", [])
@@ -486,12 +512,14 @@ def exec_read_file(_workspace_root: Any, args: dict) -> str:
         return "Error: path is required"
 
     # Direct-mode fast path — Supabase + GCS, no HTTP hop.
+    direct_errored = False
     if _direct_enabled():
         try:
             direct = _direct_read(norm)
         except Exception as exc:
-            logger.warning("[lineage_fs] direct read failed for %r — falling back to HTTP: %s", norm, exc)
+            logger.warning("[lineage_fs] direct read failed for %r: %s", norm, exc)
             direct = None
+            direct_errored = True
         if direct is not None:
             content = direct
             if len(content) > MAX_TOOL_OUTPUT_CHARS:
@@ -505,15 +533,25 @@ def exec_read_file(_workspace_root: Any, args: dict) -> str:
             headers=_headers(),
         )
     except httpx.HTTPError as exc:
-        logger.warning("[lineage_fs] read error %s: %s", norm, exc)
-        return f"Error: remote read failed: {exc}"
+        logger.error("[lineage_fs] FATAL read error %s (direct_errored=%s): %s", norm, direct_errored, exc)
+        raise LineageIngestionError(
+            f"read_file({rel!r}): both direct and HTTP failed. HTTP error: {exc}"
+        ) from exc
 
+    # 404 is the one non-fatal case: "file genuinely doesn't exist in
+    # Lineage" is different from "we couldn't talk to Lineage." Stelle
+    # handling a missing file (retrying with a different name) shouldn't
+    # kill the run.
     if resp.status_code == 404:
         return f"Error: file not found: {rel}"
     if resp.status_code == 401:
-        return "Error: run token invalid or expired"
+        raise LineageIngestionError(
+            f"read_file({rel!r}): run token invalid or expired — ingestion auth broken"
+        )
     if resp.status_code != 200:
-        return f"Error: remote read {resp.status_code}: {resp.text[:200]}"
+        raise LineageIngestionError(
+            f"read_file({rel!r}): workspace returned {resp.status_code}: {resp.text[:200]}"
+        )
 
     content = resp.json().get("content", "")
     if len(content) > MAX_TOOL_OUTPUT_CHARS:
