@@ -49,7 +49,9 @@ APIMAESTRO_HOST = os.getenv("APIMAESTRO_HOST", "")
 PARALLEL_API_KEY = os.getenv("PARALLEL_API_KEY", "")
 _PI_AVAILABLE = shutil.which("pi") is not None
 
-MAX_AGENT_TURNS = 100
+MAX_AGENT_TURNS = 128  # raised 2026-04-19 after Flora run hit cap mid-shipping
+# — 100 left her with 35 flame-chase cycles + 7 drafts written but no submit_draft.
+# 128 gives ~25 additional cycles of slack for finalization + fact-check.
 MAX_TOOL_OUTPUT_CHARS = 50_000
 MAX_FETCH_CHARS = 12_000
 MAX_BASH_OUTPUT_CHARS = 50_000
