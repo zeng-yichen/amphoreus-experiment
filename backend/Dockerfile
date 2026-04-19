@@ -57,11 +57,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-# Bind to 0.0.0.0 so Fly-Proxy (which connects to the machine on its
-# private IPv4) can reach the app. Public https://amphoreus.fly.dev
-# traffic lands here, as does internal traffic that goes through
-# fly-proxy (via amphoreus.flycast:8000). Direct IPv6 amphoreus.internal
-# access is NOT supported with this bind — clients using .internal
-# should switch to .flycast instead (Fly routes it to the same machine,
-# just through the proxy layer that handles v4/v6 translation).
-CMD ["uvicorn", "backend.src.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
+# Bind to :: (dual-stack v4+v6) so Fly's 6PN private network (IPv6-only)
+# can reach the backend via amphoreus.internal:8000. Binding to 0.0.0.0
+# only listens on IPv4 and makes .internal DNS unusable.
+CMD ["uvicorn", "backend.src.main:app", "--host", "::", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
