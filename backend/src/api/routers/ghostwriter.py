@@ -100,6 +100,62 @@ async def generate(req: GenerateRequest, request: Request):
         lineage_run_token = auth_header.split(" ", 1)[1].strip()
     lineage_mode = bool(lineage_workspace_url and lineage_run_token and req.companyId)
 
+    # Self-initiated lineage-read mode. When the request comes from
+    # Amphoreus's own UI (no Jacquard proxy headers) but we have the
+    # shared secret + JACQUARD_WORKSPACE_URL configured, mint our own
+    # run-JWT so Stelle can read Jacquard's workspace data. Writes still
+    # stay local to Amphoreus — this is a read-only bridge.
+    #
+    # If only a slug was provided, try to resolve it to a Jacquard
+    # ``user_companies.id`` by querying the shared Supabase project.
+    if not lineage_mode:
+        from backend.src.utils.jacquard_jwt import (
+            is_jacquard_read_configured,
+            mint_run_token,
+            workspace_url as _jq_workspace_url,
+        )
+        if is_jacquard_read_configured():
+            resolved_company_id = req.companyId or None
+            if not resolved_company_id and req.company:
+                # Best-effort slug → UUID lookup from the shared Supabase.
+                # Both Amphoreus's workspace and Jacquard's user_companies
+                # table live in the same project, so a single query works.
+                try:
+                    from backend.src.db.supabase_client import get_supabase
+                    sb = get_supabase()
+                    # user_companies stores a slug column in Jacquard's schema.
+                    # Match case-insensitively against the Amphoreus slug.
+                    row = (
+                        sb.table("user_companies")
+                          .select("id")
+                          .eq("slug", req.company.strip().lower())
+                          .limit(1)
+                          .execute()
+                    )
+                    hits = row.data or []
+                    if hits:
+                        resolved_company_id = hits[0].get("id")
+                except Exception as exc:
+                    logger.debug(
+                        "[ghostwriter] Jacquard slug→id lookup failed for %s: %s",
+                        req.company, exc,
+                    )
+
+            if resolved_company_id:
+                minted = mint_run_token(company_id=resolved_company_id, job_id=None)
+                if minted:
+                    lineage_workspace_url = _jq_workspace_url()
+                    lineage_run_token = minted
+                    lineage_mode = True
+                    # Overwrite req.companyId so downstream logic (user
+                    # resolution, subprocess args) sees the resolved UUID.
+                    req.companyId = resolved_company_id
+                    logger.info(
+                        "[ghostwriter] self-initiated lineage-read mode for company=%s "
+                        "(slug=%s uuid=%s)",
+                        identifier, req.company, resolved_company_id,
+                    )
+
     # User-targeted mode (optional): Jacquard forwards a FOC-user UUID
     # via ``X-Lineage-User-Id``. We resolve it to a slug here (Amphoreus
     # owns the FOC-slug convention — Jacquard stays decoupled). The slug

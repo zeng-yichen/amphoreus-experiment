@@ -954,15 +954,122 @@ def _dispatch_mention_resolve(root, args):
 
 
 def _dispatch_submit_draft(root, args):
-    """Final-draft submission. Only valid in Lineage mode — outside Lineage
-    there is no ``drafts`` table for it to write to. In local mode this is
-    treated as a no-op with a clear error."""
-    from backend.src.agents import lineage_fs_client as _lfs
-    if _lfs.is_lineage_mode():
-        return _lfs.exec_submit_draft(root, args)
+    """Final-draft submission — writes to Amphoreus's local posts store.
+
+    Amphoreus drafts NEVER go back to Jacquard. Whether Stelle is running
+    pure-local or in lineage-read mode (reading Jacquard's workspace data),
+    submit_draft lands a row in the local ``local_posts`` table and a
+    markdown file in ``output/{company}/drafts/``. The operator reviews
+    from Amphoreus's Posts tab and pushes to Ordinal from there.
+
+    The session-level wrapper in stelle.py (_stelle_submit_draft_with_castorice)
+    runs Castorice fact-check on ``content`` before forwarding here, so by
+    the time we land, the content is already corrected and why_post carries
+    the fact-check report.
+
+    Args (from the submit_draft tool schema):
+        user_slug (str, required)   FOC user this draft is attributed to.
+                                    In pure-local mode the slug == company
+                                    keyword; in lineage-read mode it's
+                                    the Jacquard FOC-user slug.
+        content (str, required)     Final post markdown.
+        scheduled_date (str, opt)   ISO YYYY-MM-DD calendar slot.
+        publication_order (int, opt)
+        why_post (str, opt)         Rationale + fact-check report.
+        approver_user_ids (list, opt)  Ignored locally — approvals happen
+                                       in the Amphoreus Posts tab, not
+                                       through a separate approver UUID.
+    """
+    import json as _json
+    import os as _os
+    import uuid as _uuid
+    from pathlib import Path as _Path
+
+    user_slug = (args.get("user_slug") or "").strip()
+    content = args.get("content") or ""
+    if not content:
+        return "Error: content is required"
+
+    # Determine company for bookkeeping. Pull from env set by stelle_runner
+    # (LINEAGE_COMPANY_ID present in lineage-read mode, otherwise fall back
+    # to the lineage_user_slug env which in local mode equals company).
+    # LAST resort: if neither is set, use user_slug itself.
+    company = (
+        _os.environ.get("STELLE_COMPANY_KEYWORD", "").strip()
+        or user_slug
+        or "unknown"
+    )
+
+    draft_id = str(_uuid.uuid4())
+    scheduled_date = args.get("scheduled_date") or None
+    publication_order = args.get("publication_order")
+    why_post = args.get("why_post") or None
+
+    # Title = first non-empty line stripped of markdown headers, max 200 chars.
+    # Matches the heuristic Jacquard's /submit-draft uses so titles look
+    # identical across modes.
+    title = None
+    for _line in content.splitlines():
+        stripped = _line.strip()
+        if stripped:
+            title = stripped.lstrip("#").strip()[:200]
+            break
+
+    # 1) local_posts row — this is what Amphoreus's Posts tab reads.
+    try:
+        from backend.src.db.local import create_local_post
+        create_local_post(
+            post_id=draft_id,
+            company=company,
+            content=content,
+            title=title,
+            status="draft",
+            why_post=why_post,
+            scheduled_date=scheduled_date,
+            publication_order=(
+                publication_order if isinstance(publication_order, int) else None
+            ),
+        )
+    except Exception as exc:
+        logger.exception("[submit_draft] create_local_post failed: %s", exc)
+        return f"Error: failed to persist draft to local_posts: {exc}"
+
+    # 2) Markdown file mirror — one file per draft, grouped by company,
+    # for out-of-band inspection + push tooling that expects files on disk.
+    md_dir = _Path("output") / company / "drafts"
+    md_dir.mkdir(parents=True, exist_ok=True)
+    md_path = md_dir / f"{draft_id}.md"
+    header_lines = [
+        f"# {title or 'Untitled draft'}",
+        "",
+        f"_draft_id: {draft_id}_",
+        f"_company: {company}_",
+    ]
+    if user_slug:
+        header_lines.append(f"_user_slug: {user_slug}_")
+    if scheduled_date:
+        header_lines.append(f"_scheduled_date: {scheduled_date}_")
+    if publication_order is not None:
+        header_lines.append(f"_publication_order: {publication_order}_")
+    header_lines.append("")
+    if why_post:
+        header_lines.extend(["## Why this post", "", why_post, ""])
+    header_lines.extend(["## Content", "", content])
+    try:
+        md_path.write_text("\n".join(header_lines), encoding="utf-8")
+    except Exception as exc:
+        logger.debug("[submit_draft] failed to write markdown mirror: %s", exc)
+
     return (
-        "Error: submit_draft is only available in Lineage mode. "
-        "Use write_file to posts/drafts/<id>/content.md outside Lineage."
+        "Draft submitted to Amphoreus's Posts tab.\n"
+        f"  draft_id: {draft_id}\n"
+        f"  company: {company}\n"
+        f"  user_slug: {user_slug or '(none)'}\n"
+        f"  scheduled_date: {scheduled_date or '(unset)'}\n"
+        f"  title: {(title or '')[:80]}\n"
+        "\n"
+        "The operator will review in the Posts tab and push to Ordinal "
+        "from there. Nothing has been sent to Jacquard / LinkedIn yet."
     )
 
 
@@ -1957,22 +2064,25 @@ create duplicate drafts. Here's how to do the same things correctly:
   whether to revise. Iterate v1 → v2 → v3 by just keeping the text
   in your context. No file round-trip.
 
-- **FINAL DRAFTS: use `submit_draft`.** It is the ONLY Lineage-bound
-  write tool. One call per finished post:
+- **FINAL DRAFTS: use `submit_draft`.** One call per finished post:
 
       submit_draft(
         user_slug="<slug>",          # which FOC user this post is for
         content="<final markdown>",   # the final post, plain markdown
         scheduled_date="YYYY-MM-DD",  # calendar slot (tomorrow or later)
         publication_order=1,          # 1, 2, 3… for multi-post runs
-        approver_user_ids=[...],      # optional; defaults to company AM
-        why_post="<rationale>",       # stored as a draft_comment
+        why_post="<rationale>",       # stored alongside the draft
       )
 
-  `submit_draft` atomically creates the draft row + a ``review_draft``
-  task for the approver. It also runs Castorice fact-check on your
-  content before writing — the fact-check report + citations land in
-  the draft_comment thread for the reviewer.
+  **Where the draft lands.** Reads above came from Jacquard's workspace
+  (transcripts, engagement, context, etc.) — but ``submit_draft`` writes
+  to **Amphoreus's own Posts tab**, not to Jacquard. Nothing you submit
+  goes back to Jacquard or Lineage. The operator reviews the draft in
+  Amphoreus's UI and pushes to Ordinal from there.
+
+  ``submit_draft`` also runs Castorice fact-check on your content before
+  persisting — the fact-check report + citations are appended to
+  ``why_post`` and visible to the operator during review.
 
 - **Multi-post runs: vary angles, don't riff one topic twice.**
   When the user asks for N posts, cover N DIFFERENT angles/topics —
@@ -2046,12 +2156,15 @@ Shared (not user-scoped; don't prepend slug):
 
 ## Draft write contract
 
-**Use ``submit_draft`` for finished posts.** It is the ONLY Lineage-bound
-write tool. One call = one draft row in Lineage's ``drafts`` table, one
-``review_draft`` task for the approver, one calendar slot at
-``scheduled_date``. `submit_draft` also runs Castorice fact-check on your
-content before writing — the fact-check report + citations land in the
-draft_comment thread for the reviewer.
+**Use ``submit_draft`` for finished posts.** One call per finished post.
+Reads above came from Jacquard's workspace, but ``submit_draft`` lands in
+**Amphoreus's own Posts tab** — NOT in Jacquard. Nothing you submit goes
+back to Jacquard or Lineage. The operator reviews in Amphoreus's UI and
+pushes to Ordinal from there.
+
+``submit_draft`` runs Castorice fact-check on your content before
+persisting. The fact-check report + citations are appended to
+``why_post`` so the operator sees them during review.
 
 ## Ingestion order at session start (Lineage mode)
 
@@ -2130,13 +2243,15 @@ The slug determines attribution — there is no separate ``author`` field.
 
 ## Draft write contract
 
-**Use ``submit_draft`` for finished posts.** One call = one draft row in
-Lineage's ``drafts`` table, a ``review_draft`` task for the approver, and
-a scheduled calendar slot. Each ``submit_draft`` call also runs Castorice
-fact-check on your content before the post is written to Lineage — the
-fact-check report is attached as a draft comment.
+**Use ``submit_draft`` for finished posts.** One call per finished post.
+Reads above came from Jacquard's workspace, but ``submit_draft`` lands in
+**Amphoreus's own Posts tab** — NOT in Jacquard. Nothing you submit goes
+back to Jacquard or Lineage. The operator reviews in Amphoreus's UI and
+pushes to Ordinal from there.
 
-`submit_draft` is the ONLY write operation available in Lineage mode.
+``submit_draft`` runs Castorice fact-check on your content before
+persisting. The fact-check report + citations are appended to
+``why_post`` so the operator sees them during review.
 
 ## Ingestion order at session start (Lineage mode)
 

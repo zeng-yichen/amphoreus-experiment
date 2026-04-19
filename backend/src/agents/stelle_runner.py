@@ -171,6 +171,11 @@ def main() -> int:
         if args.lineage_user_slug:
             os.environ["LINEAGE_USER_SLUG"] = args.lineage_user_slug
 
+    # Always surface the Amphoreus company keyword so the local
+    # submit_draft handler can stamp drafts with the right ``company``
+    # column in local_posts (independent of lineage mode).
+    os.environ["STELLE_COMPANY_KEYWORD"] = args.company
+
     _configure_logging(args.job_id, project_root / args.log_dir)
 
     # Set usage attribution ContextVars so every Anthropic call made by
