@@ -1039,6 +1039,85 @@ def fetch_tasks(company_id: str, limit: int = 50) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Drafts insert — write path into Jacquard's drafts table
+# ---------------------------------------------------------------------------
+
+def insert_draft(
+    user_id: str,
+    content: str,
+    title: str | None = None,
+    scheduled_date: str | None = None,
+    status: str = "review",
+    visibility: str = "PUBLIC",
+) -> dict[str, Any] | None:
+    """Insert a finished draft into Jacquard's ``drafts`` Supabase table.
+
+    Returns the inserted row on success, ``None`` on failure (caller
+    surfaces a user-facing error). The row shows up immediately in
+    Lineage's review UI for the specified ``user_id``.
+
+    Column mapping (matches a real Jacquard drafts row — see schema
+    discovery in Oct 2026 investigation):
+
+      - ``user_id``         : FOC user UUID (from resolve_user_by_slug).
+      - ``content``         : plain markdown body.
+      - ``title``           : first ~120 chars of content if not provided.
+      - ``status``          : 'review' by default — same status Jacquard's
+                              native agent uses for human review.
+      - ``visibility``      : 'PUBLIC' (matches default LinkedIn visibility).
+      - ``scheduled_date``  : YYYY-MM-DD is up-converted to a timestamptz
+                              anchored at 12:00 UTC to match the shape of
+                              Jacquard-native drafts.
+      - ``yjs_state``       : left NULL. Lineage's editor regenerates
+                              from ``content`` when the draft is first
+                              opened; generating the CRDT blob ourselves
+                              would require the yjs Python lib and tight
+                              coupling to Jacquard's schema version.
+
+    Does NOT set ``approver_ids``, ``linkedin_connection_id``,
+    ``post_id``, ``proposal_id``, ``meeting_id``, or ``publish_content``
+    — those are populated by Jacquard-side flows (scheduler, approver
+    assignment, LinkedIn push). Defaults or NULLs are fine.
+    """
+    if not user_id or not content:
+        return None
+    sb = _sb()
+
+    row: dict[str, Any] = {
+        "user_id": user_id,
+        "content": content,
+        "status": status,
+        "visibility": visibility,
+    }
+    if title:
+        row["title"] = title[:200]
+    else:
+        # Use the first sentence/line (bounded) as a reasonable title so
+        # operator list views don't render "(no title)" for every row.
+        first_line = (content.strip().split("\n", 1)[0] or "")[:120]
+        if first_line:
+            row["title"] = first_line
+
+    if scheduled_date:
+        # Schema shows scheduled_date is actually a timestamptz despite
+        # the name. Anchor YYYY-MM-DD at 12:00 UTC to match what
+        # Jacquard-native drafts look like.
+        if len(scheduled_date) == 10:
+            row["scheduled_date"] = f"{scheduled_date}T12:00:00+00:00"
+        else:
+            row["scheduled_date"] = scheduled_date
+
+    try:
+        resp = sb.table("drafts").insert(row).execute()
+    except Exception as exc:
+        logger.warning("[jacquard_direct] insert_draft failed: %s", exc)
+        return None
+
+    data = resp.data or []
+    return data[0] if data else None
+
+
+# ---------------------------------------------------------------------------
 # Workspace population — used by CLI mode, where Claude CLI's native
 # filesystem tools read local disk instead of going through
 # ``lineage_fs_client``. We pre-fetch everything into a local directory
