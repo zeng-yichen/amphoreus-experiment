@@ -1,17 +1,8 @@
 # Fly.io config for the Amphoreus backend.
 #
-# This app is reachable two ways:
-#   1. Fly internal 6PN: http://amphoreus.internal:8000 — used by the
-#      amphoreus-frontend (same Fly org) for server-side fetches.
-#   2. Public edge: https://amphoreus.fly.dev — used by external services
-#      (Jacquard's virio-api) to hit the ghostwriter endpoints.
-#
-# Public traffic is authenticated via a shared-secret HS256 JWT — see
-# ``backend/src/auth/ghostwriter_token.py``. Every public request must
-# carry ``Authorization: Bearer <jwt>`` signed with GHOSTWRITER_SHARED_SECRET.
-# Without that token, requests are 401'd before they reach any handler.
-# Internal 6PN traffic coming from the frontend goes through the CF Access
-# middleware chain unchanged (that's the browser-auth layer).
+# This app is NOT publicly reachable. Only the frontend (amphoreus-frontend)
+# can talk to it, via Fly's internal 6PN network at:
+#   http://amphoreus-backend.internal:8000
 #
 # State lives on a persistent volume mounted at /data. See docker-entrypoint.sh
 # for how the in-image paths get wired to it.
@@ -52,30 +43,11 @@ primary_region = "sjc"   # San Jose, US West
   destination = "/data"
   # initial_size set by `fly volumes create amphoreus_data --size 10`
 
-# Public HTTP edge. Paired with shared-secret JWT auth in the middleware
-# chain (see backend/src/auth/ghostwriter_token.py). Every non-internal
-# request must carry Authorization: Bearer <HS256-JWT-signed-with-
-# GHOSTWRITER_SHARED_SECRET> or it's 401'd before reaching any handler.
-#
-# Internal 6PN calls (amphoreus.internal:8000) still work in parallel —
-# Fly binds both the public IP and the internal IPv6 to the same listen
-# socket.
-#
-# auto_stop/auto_start disabled because the single-machine + persistent
-# volume pattern doesn't tolerate cold starts well (SQLite open time,
-# RuanMei state load, etc.). min_machines_running = 1 keeps it warm.
-[http_service]
-  internal_port       = 8000
-  force_https         = true
-  auto_stop_machines  = false
-  auto_start_machines = true
-  min_machines_running = 1
-  processes           = ["app"]
-
-  [http_service.concurrency]
-    type      = "requests"
-    hard_limit = 250
-    soft_limit = 200
+# This app is internal-only. No [[services]] or [http_service] block means
+# Fly doesn't give it a public edge address, but the `amphoreus.internal`
+# DNS name is still reachable from other Fly apps in the same org over 6PN.
+# The Dockerfile HEALTHCHECK handles container health; [[restart]] + the
+# fact that the volume pins the machine to one region keep it up.
 
 [[vm]]
   size       = "shared-cpu-2x"
