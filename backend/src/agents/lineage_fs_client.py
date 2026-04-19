@@ -634,7 +634,7 @@ def exec_list_directory(_workspace_root: Any, args: dict) -> str:
             return (
                 "(empty directory — this path isn't part of Lineage's workspace. "
                 "Valid paths: <user-slug>/{transcripts,research,engagement,"
-                "context,reports,posts,edits,tone,notes,strategy}, or shared "
+                "context,reports,posts,edits,tone,strategy}, or shared "
                 "{conversations,slack,tasks,.pi}.)"
             )
         return direct
