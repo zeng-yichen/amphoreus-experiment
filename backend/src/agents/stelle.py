@@ -4279,31 +4279,40 @@ def generate_one_shot(
     NOT injected — everything beyond transcripts + observations is a tool
     call.
     """
-    # In Lineage mode the workspace lives remotely; there's no local
-    # ``memory/<company>/linkedin_username.txt`` to read. The display name
-    # flows in through Lineage's ``context/account.md`` which Stelle reads
-    # via a tool call during the agent loop. Skip the local preamble.
+    # Lineage-only contract: Stelle REQUIRES the Lineage workspace as her
+    # data source. Pure-local runs (reading from memory/<company>/ on disk)
+    # are no longer supported — every run must have LINEAGE_WORKSPACE_URL +
+    # LINEAGE_RUN_TOKEN set so Stelle can read transcripts, engagement,
+    # research, context, and edit history from Jacquard via the workspace
+    # HTTP API (or direct Supabase+GCS when GCS_CREDENTIALS_B64 is also set).
+    #
+    # If you're seeing this error, the /api/ghostwriter/generate handler
+    # didn't wire up Lineage env vars for this run. Likely causes:
+    #   - caller didn't pass ``companyId`` and the slug-to-Jacquard-UUID
+    #     lookup came back empty
+    #   - GHOSTWRITER_SHARED_SECRET or JACQUARD_WORKSPACE_URL not set
+    #   - caller is Jacquard's virio-api but it didn't forward the
+    #     X-Lineage-Workspace-URL / Authorization Bearer headers
     try:
         from backend.src.agents.lineage_fs_client import is_lineage_mode
         _lineage_active = is_lineage_mode()
-    except Exception:
-        _lineage_active = False
+    except Exception as _lm_err:
+        raise RuntimeError(
+            f"Stelle requires Lineage mode, but lineage_fs_client could not be "
+            f"imported: {_lm_err}"
+        ) from _lm_err
 
     if not _lineage_active:
-        username_path = P.linkedin_username_path(company_keyword)
-        if not username_path.exists():
-            raise FileNotFoundError(
-                f"Missing memory/{company_keyword}/linkedin_username.txt — "
-                f"create this file with the client's LinkedIn username "
-                f"(the part after linkedin.com/in/) before running the pipeline."
-            )
-
-        # Resolve proper display name from Supabase (falls back to slug)
-        username = username_path.read_text().strip()
-        if username:
-            _, _, display_name = _resolve_supabase_ids(username)
-            if display_name:
-                client_name = display_name
+        raise RuntimeError(
+            "Stelle refuses to run without Lineage mode. "
+            "Every run must set LINEAGE_WORKSPACE_URL + LINEAGE_RUN_TOKEN so "
+            "the workspace (transcripts, engagement, research, context, edits) "
+            "comes from Jacquard — pure-local memory/<company>/ runs are no "
+            "longer supported. If you're hitting this via the ghostwriter API, "
+            "check that GHOSTWRITER_SHARED_SECRET + JACQUARD_WORKSPACE_URL are "
+            "configured and the requested companyId resolves to a Jacquard "
+            "user_companies.id."
+        )
 
     # --- CLI mode: run through Claude CLI with Max plan (no API cost) ---
     from backend.src.mcp_bridge.claude_cli import use_cli
