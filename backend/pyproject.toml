@@ -45,11 +45,6 @@ dependencies = [
     "tiktoken>=0.7.0",
     "openpyxl>=3.1.0",
     "pyjwt[crypto]>=2.9.0",
-
-    # Y-CRDT — encode yjs_state for drafts inserted into Jacquard's
-    # drafts table in Lineage mode. Lineage's editor is TipTap over
-    # Y.js; without a valid yjs_state blob the editor opens blank.
-    "pycrdt>=0.10.0",
 ]
 
 [project.optional-dependencies]
@@ -58,6 +53,12 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "httpx>=0.27.0",
     "ruff>=0.6.0",
+]
+# Y-CRDT encoder required to write yjs_state into Jacquard's drafts
+# table (Lineage-UI workflow). Only needed if reconnecting the
+# Lineage-UI integration (see backend/src/_lineage_deprecated/).
+lineage-deprecated = [
+    "pycrdt>=0.10.0",
 ]
 
 [tool.hatch.build.targets.wheel]

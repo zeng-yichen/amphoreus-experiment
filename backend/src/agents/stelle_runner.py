@@ -153,18 +153,16 @@ def main() -> int:
         help="Directory for the runner's own log file (separate from Stelle's session log)",
     )
     # ------------------------------------------------------------------
-    # Lineage-mode plumbing. When the spawning /api/ghostwriter/generate
-    # handler sees an ``X-Lineage-Workspace-URL`` header + Authorization
-    # bearer, it forwards both here as env-var sources. Stelle's FS tools
-    # then route through ``lineage_fs_client`` instead of local disk.
+    # Data-source plumbing. The env-var names carry a LINEAGE_* prefix
+    # for historical reasons (Jacquard's user_companies table, Jacquard
+    # FOC-user slugs); they identify the company/user in the shared
+    # Supabase schema. See backend/src/_lineage_deprecated/ for the
+    # quarantined HTTP-proxy integration.
     # ------------------------------------------------------------------
-    parser.add_argument("--lineage-workspace-url", default=None,
-                        help="Remote workspace base URL, e.g. http://localhost:3001/api/workspace")
-    parser.add_argument("--lineage-run-token", default=None,
-                        help="HS256 JWT scoping FS ops to the originating companyId")
     parser.add_argument("--company-id", default=None,
-                        help="Lineage UUID for the company (distinct from --company slug)")
-    parser.add_argument("--lineage-user-slug", default=None,
+                        help="Jacquard user_companies.id UUID for the client being written for.")
+    parser.add_argument("--user-slug", "--lineage-user-slug", default=None,
+                        dest="user_slug",
                         help="FOC-user slug. When set, the run is user-targeted: "
                              "every draft is attributed to this user and filesystem "
                              "reads are scoped to their subtree. Absent = company-wide.")
@@ -177,21 +175,13 @@ def main() -> int:
     os.chdir(project_root)
     sys.path.insert(0, str(project_root))
 
-    # Surface Lineage-mode inputs as env vars BEFORE we import Stelle so
+    # Surface data-source inputs as env vars BEFORE we import Stelle so
     # the module-level ``is_lineage_mode()`` check in lineage_fs_client
     # sees them. ContextVars don't cross process boundaries; env vars do.
-    #
-    # LINEAGE_COMPANY_ID is the single required var — with it + GCS/Supabase
-    # creds in the parent env, Stelle runs direct-mode. Workspace URL and
-    # run token are legacy/HTTP-mode and only set when the parent
-    # explicitly passes them (Jacquard-initiated proxy runs).
     if args.company_id:
         os.environ["LINEAGE_COMPANY_ID"] = args.company_id
-    if args.lineage_workspace_url and args.lineage_run_token:
-        os.environ["LINEAGE_WORKSPACE_URL"] = args.lineage_workspace_url
-        os.environ["LINEAGE_RUN_TOKEN"] = args.lineage_run_token
-    if args.lineage_user_slug:
-        os.environ["LINEAGE_USER_SLUG"] = args.lineage_user_slug
+    if args.user_slug:
+        os.environ["LINEAGE_USER_SLUG"] = args.user_slug
 
     # Always surface the Amphoreus company keyword so the local
     # submit_draft handler can stamp drafts with the right ``company``

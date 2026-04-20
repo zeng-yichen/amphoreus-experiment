@@ -59,23 +59,18 @@ class LinkedInUsernameRequest(BaseModel):
 async def generate(req: GenerateRequest, request: Request):
     """Start a ghostwriter generation job as a DETACHED subprocess.
 
-    Accepts either ``company`` (local slug) or ``companyId`` (Lineage UUID).
-    When ``companyId`` is present AND the request carries an
-    ``X-Lineage-Workspace-URL`` header, the runner operates in Lineage
-    mode: all filesystem tool calls go through HTTP to that workspace
-    URL (backed by ``Authorization`` bearer), and drafts land in Lineage's
-    Supabase ``drafts`` table rather than Amphoreus SQLite.
+    Accepts either ``company`` (slug) or ``companyId`` (Jacquard
+    user_companies UUID). If only a slug is given and Supabase creds are
+    configured, the slug is resolved against Jacquard's ``user_companies``
+    table by name/domain match.
 
     Behind CF Access (service-token bypass). Email auth is disabled on
     this deployment — see ``cf_access.py`` for the bypass path.
 
     The detached subprocess pattern survives uvicorn hot-reloads via
-    ``start_new_session=True`` (new process group not signaled on parent
-    death). Frontend reconnects to ``/stream/{job_id}`` for resumable SSE.
+    ``start_new_session=True``. Frontend reconnects to
+    ``/stream/{job_id}`` for resumable SSE.
     """
-    # Pick the identifier: slug preferred (it's human-readable and matches
-    # every downstream path Stelle constructs). If only the Lineage UUID
-    # was supplied we use it as-is and let Lineage mode take over.
     identifier = req.company or req.companyId
     if not identifier:
         raise HTTPException(
@@ -84,153 +79,84 @@ async def generate(req: GenerateRequest, request: Request):
         )
 
     # Only run the body-based ACL check when we have a real slug and the
-    # request came through a user identity. Lineage-mode requests via the
-    # CF service token have no user.email and skip this anyway (admin bypass
-    # in middleware.py:138-145).
+    # request came through a user identity (admin bypass in
+    # middleware.py:138-145 covers CF service tokens).
     from backend.src.auth.middleware import require_client_body
     if req.company:
         require_client_body(request, req.company)
 
-    # Lineage mode: the proxy forwards the workspace URL (for reverse tool
-    # calls) and a per-run JWT (as Authorization). We forward both to the
-    # runner via env vars since ContextVars don't cross process boundaries.
-    lineage_workspace_url = request.headers.get("x-lineage-workspace-url")
-    lineage_run_token: str | None = None
-    auth_header = request.headers.get("authorization") or ""
-    if auth_header.lower().startswith("bearer "):
-        lineage_run_token = auth_header.split(" ", 1)[1].strip()
-    lineage_mode = bool(lineage_workspace_url and lineage_run_token and req.companyId)
-
-    # Self-initiated lineage-read mode (direct Supabase + GCS, no virio-api).
-    # When the request comes from Amphoreus's own UI (no Jacquard proxy
-    # headers) but we have GCS_CREDENTIALS_B64 + SUPABASE_* configured, we
-    # can read Jacquard's workspace data directly — no JWT minting, no
-    # HTTP hop to virio-api. Writes still stay local to Amphoreus.
-    #
-    # If only a slug was provided, try to resolve it to a Jacquard
-    # ``user_companies.id`` by querying the shared Supabase project.
-    if not lineage_mode:
-        direct_configured = bool(
-            os.environ.get("GCS_CREDENTIALS_B64", "").strip()
-            and os.environ.get("SUPABASE_URL", "").strip()
-            and os.environ.get("SUPABASE_KEY", "").strip()
-        )
-        if direct_configured:
-            resolved_company_id = req.companyId or None
-            if not resolved_company_id and req.company:
-                # Jacquard's user_companies has no slug column — match on
-                # name + domains. Amphoreus slugs are flat ("innovocommerce",
-                # "hensley-biostats") while Jacquard names are proper
-                # ("InnovoCommerce", "Hensley Biostats"). We normalize both
-                # to a collapsed lowercase string and prefix-match.
-                import re as _re
-                amph_slug = req.company.strip().lower()
-                amph_first = amph_slug.split("-", 1)[0]
-                amph_flat = _re.sub(r"[^a-z0-9]+", "", amph_slug)
-                try:
-                    from backend.src.db.supabase_client import get_supabase
-                    sb = get_supabase()
-                    rows = (
-                        sb.table("user_companies")
-                          .select("id, name, domains")
-                          .limit(200)
-                          .execute()
-                          .data
-                        or []
+    # Resolve the slug to a Jacquard user_companies.id so Stelle can
+    # read the client's data. If a companyId is already supplied we use
+    # it as-is. This is the only external coupling to Jacquard — the
+    # data source (Supabase + GCS) lives there, Amphoreus just queries
+    # against it. A company not registered in Jacquard will run with
+    # empty reads; Stelle produces generic output in that case.
+    data_source_configured = bool(
+        os.environ.get("GCS_CREDENTIALS_B64", "").strip()
+        and os.environ.get("SUPABASE_URL", "").strip()
+        and os.environ.get("SUPABASE_KEY", "").strip()
+    )
+    data_source_active = False
+    if data_source_configured:
+        resolved_company_id = req.companyId or None
+        if not resolved_company_id and req.company:
+            # Jacquard's user_companies has no slug column — match on
+            # name + domains. Normalize both to collapsed lowercase and
+            # prefix-match.
+            import re as _re
+            amph_slug = req.company.strip().lower()
+            amph_first = amph_slug.split("-", 1)[0]
+            amph_flat = _re.sub(r"[^a-z0-9]+", "", amph_slug)
+            try:
+                from backend.src.db.supabase_client import get_supabase
+                sb = get_supabase()
+                rows = (
+                    sb.table("user_companies")
+                      .select("id, name, domains")
+                      .limit(200)
+                      .execute()
+                      .data
+                    or []
+                )
+                best = None
+                for c in rows:
+                    name_flat = _re.sub(r"[^a-z0-9]+", "", (c.get("name") or "").lower())
+                    domains_flat = "".join(
+                        _re.sub(r"[^a-z0-9]+", "", (d or "").lower())
+                        for d in (c.get("domains") or [])
                     )
-                    best = None
-                    for c in rows:
-                        name_flat = _re.sub(r"[^a-z0-9]+", "", (c.get("name") or "").lower())
-                        domains_flat = "".join(
-                            _re.sub(r"[^a-z0-9]+", "", (d or "").lower())
-                            for d in (c.get("domains") or [])
-                        )
-                        # Strongest: name exactly equals flattened slug.
-                        if name_flat == amph_flat:
+                    if name_flat == amph_flat:
+                        best = c
+                        break
+                    if amph_first and (amph_first in name_flat or amph_first in domains_flat):
+                        if best is None or len(c.get("name") or "") < len(best.get("name") or ""):
                             best = c
-                            break
-                        # Medium: first token of slug is contained in name or domains.
-                        if amph_first and (amph_first in name_flat or amph_first in domains_flat):
-                            # Prefer the shortest name match (more specific).
-                            if best is None or len(c.get("name") or "") < len(best.get("name") or ""):
-                                best = c
-                    if best:
-                        resolved_company_id = best.get("id")
-                        logger.info(
-                            "[ghostwriter] slug %r → company %r (%s)",
-                            amph_slug, best.get("name"), resolved_company_id,
-                        )
-                except Exception as exc:
-                    logger.debug(
-                        "[ghostwriter] Jacquard slug→id lookup failed for %s: %s",
-                        req.company, exc,
+                if best:
+                    resolved_company_id = best.get("id")
+                    logger.info(
+                        "[ghostwriter] slug %r → company %r (%s)",
+                        amph_slug, best.get("name"), resolved_company_id,
                     )
-
-            if resolved_company_id:
-                # Direct mode — just set the company id. No JWT, no URL.
-                # lineage_fs_client routes reads through jacquard_direct
-                # (Supabase + GCS) because LINEAGE_COMPANY_ID is set and
-                # GCS/Supabase creds exist; HTTP fallback is disabled.
-                lineage_mode = True
-                req.companyId = resolved_company_id
-                logger.info(
-                    "[ghostwriter] self-initiated lineage-read mode (direct) "
-                    "for company=%s (slug=%s uuid=%s)",
-                    identifier, req.company, resolved_company_id,
+            except Exception as exc:
+                logger.debug(
+                    "[ghostwriter] Jacquard slug→id lookup failed for %s: %s",
+                    req.company, exc,
                 )
 
-    # User-targeted mode (optional): Jacquard forwards a FOC-user UUID
-    # via ``X-Lineage-User-Id``. We resolve it to a slug here (Amphoreus
-    # owns the FOC-slug convention — Jacquard stays decoupled). The slug
-    # is what the runner and filesystem client need downstream.
-    lineage_user_slug: str | None = None
-    lineage_user_id = request.headers.get("x-lineage-user-id") or None
-    if lineage_mode and lineage_user_id:
-        from backend.src.db.supabase_client import get_supabase
-        sb = get_supabase()
-        row = (
-            sb.table("users")
-              .select("id, first_name, last_name, company_id")
-              .eq("id", lineage_user_id)
-              .limit(1)
-              .execute()
-        )
-        users = row.data or []
-        if not users:
-            raise HTTPException(
-                status_code=404,
-                detail=f"userId {lineage_user_id} not found",
+        if resolved_company_id:
+            data_source_active = True
+            req.companyId = resolved_company_id
+            logger.info(
+                "[ghostwriter] data-source active for company=%s (slug=%s uuid=%s)",
+                identifier, req.company, resolved_company_id,
             )
-        user = users[0]
-        if req.companyId and user.get("company_id") != req.companyId:
-            raise HTTPException(
-                status_code=403,
-                detail=f"user {lineage_user_id} does not belong to company {req.companyId}",
-            )
-        # Match the slug convention used by Jacquard's supabase-fs
-        # (``{first} {last}`` → lowercase, non-alnum → dash, trimmed).
-        import re
-        name = " ".join(
-            filter(None, [user.get("first_name"), user.get("last_name")])
-        )
-        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-        if not slug:
-            raise HTTPException(
-                status_code=422,
-                detail=f"user {lineage_user_id} has no first_name/last_name to slugify",
-            )
-        lineage_user_slug = slug
 
     import subprocess
     import sys
     from pathlib import Path
     from backend.src.usage.context import current_user_email
 
-    # Capture the authenticated user's email from the ContextVar before
-    # spawning the subprocess (ContextVars don't cross process boundaries).
-    # In Lineage mode the user email may come from the X-Lineage-User-Email
-    # header rather than the CF identity (which is a service token).
-    user_email = current_user_email.get() or request.headers.get("x-lineage-user-email")
+    user_email = current_user_email.get()
 
     job_id = job_manager.create_job(
         client_slug=identifier,
@@ -254,20 +180,10 @@ async def generate(req: GenerateRequest, request: Request):
         cmd.extend(["--prompt", req.prompt])
     if user_email:
         cmd.extend(["--user-email", user_email])
-    if lineage_mode:
-        # Always pass company id — it's the single required input for
-        # Stelle to know which Jacquard company she's reading against.
+    if data_source_active:
+        # Pass the Jacquard company UUID — Stelle needs this to query
+        # the right transcripts/engagement/research rows.
         cmd.extend(["--company-id", req.companyId or ""])
-        # Only pass workspace URL + run token when HTTP mode is being
-        # used (Jacquard-initiated proxy runs). Direct-mode runs rely
-        # purely on GCS + Supabase creds already in the subprocess env.
-        if lineage_workspace_url and lineage_run_token:
-            cmd.extend([
-                "--lineage-workspace-url", lineage_workspace_url,
-                "--lineage-run-token", lineage_run_token,
-            ])
-        if lineage_user_slug:
-            cmd.extend(["--lineage-user-slug", lineage_user_slug])
 
     # Subprocess log file (separate from Stelle's session log so we can
     # debug runner-level issues independently)
@@ -494,42 +410,11 @@ async def provision_workspace(req: GenerateRequest):
 async def inline_edit(req: InlineEditRequest, request: Request):
     """Inline text editing via Stelle — returns a job_id for SSE streaming.
 
-    **Lineage mode: unsupported.** If the request carries Lineage headers
-    (``X-Lineage-Workspace-URL`` + ``Authorization`` bearer), we refuse
-    up-front rather than silently operating on the wrong workspace. The
-    caller gets a job_id whose SSE stream immediately emits a ``done``
-    event with an explanatory message, so the UI doesn't hang. This is
-    deliberate: inline-edit in Lineage would need its own workspace-aware
-    implementation (Castorice, span-scoped edit, etc.) and is not
-    currently implemented.
-
-    Accepts both Amphoreus-native ({company, post_text}) and Jacquard-proxy
-    ({companyId, selectedText}) body shapes. The selection is treated as
-    ``post_text`` — Stelle returns a revised version of just the passed
-    span, which is what the Lineage inline-edit UX splices back in.
+    Accepts {company, post_text} (the selection is treated as
+    ``post_text`` — Stelle returns a revised version of the passed span).
     """
     identifier = req.company or req.companyId
     text = req.post_text or req.selectedText or ""
-
-    # Detect Lineage mode by presence of the workspace-URL header the
-    # Jacquard proxy always sets when it invokes Amphoreus.
-    lineage_workspace = request.headers.get("x-lineage-workspace-url")
-    if lineage_workspace:
-        job_id = job_manager.create_job(
-            client_slug=identifier or "unknown",
-            agent="stelle-inline-edit",
-            prompt=req.instruction,
-            creator_id=None,
-        )
-        job_manager.emit_event(
-            job_id,
-            done_event(
-                "Inline-edit is not supported when running via Lineage. "
-                "Edit the draft directly in the Lineage UI or regenerate "
-                "with a fresh Stelle run."
-            ),
-        )
-        return {"job_id": job_id, "status": "unsupported"}
 
     if not identifier:
         raise HTTPException(

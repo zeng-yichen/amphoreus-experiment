@@ -522,6 +522,51 @@ _TOOLS = [
         },
     },
     {
+        "name": "retrieve_similar_posts",
+        "description": (
+            "Semantic search across ~390k LinkedIn posts (cross-creator, "
+            "cross-industry corpus mirrored from Jacquard's linkedin_posts). "
+            "Each result is a real LinkedIn post with full text, creator "
+            "handle, engagement metrics, and similarity score. Use this to "
+            "escape the user's local posting basin — pull precedents from "
+            "adjacent creators whose posts actually landed, then study their "
+            "form. Call this MANY times per run (topic seeding before "
+            "drafting, angle probes during exploration, structural "
+            "comparisons against candidates).\n\n"
+            "Args:\n"
+            "  query (string, required): free-text query (topic, angle, or a "
+            "    candidate draft). Will be embedded with text-embedding-3-small.\n"
+            "  k (int, optional): number of results, default 10, max 50.\n"
+            "  min_reactions (int, optional): filter out posts below this "
+            "    reaction count. Default 0. Try 50-200 for outlier-only views.\n"
+            "  exclude_creator (string, optional): LinkedIn username to drop "
+            "    (e.g. pass the user's own username to avoid retrieving their "
+            "    own posts).\n"
+            "  exclude_archetypes (string[], optional): Jacquard format_archetype "
+            "    labels to skip. Common content-lane filter: "
+            "    ['announcement','celebration','promotional_post']. Omit to "
+            "    see everything.\n\n"
+            "Returns JSON: {count, posts: [{post_id, post_text, "
+            "creator_username, reactions, comments, format_archetype, "
+            "topic_tags, posted_at, similarity (0..1)}]}. Sorted by "
+            "descending similarity."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer", "minimum": 1, "maximum": 50},
+                "min_reactions": {"type": "integer", "minimum": 0},
+                "exclude_creator": {"type": "string"},
+                "exclude_archetypes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "mention_resolve",
         "description": (
             "Resolve a LinkedIn username to a mention URN. Returns a JSON "
@@ -942,8 +987,8 @@ def _dispatch_write_file(root, args):
 
     Preserves Stelle's classic scratch-file iteration pattern
     (``scratch/post1-v1.md`` → ``scratch/post1-v2.md`` → …) while
-    keeping the client's Lineage workspace read-only from her
-    perspective. Only ``submit_draft`` reaches Lineage's drafts table."""
+    keeping the client data source read-only from her perspective.
+    Only ``submit_draft`` persists finished posts."""
     from backend.src.agents import lineage_fs_client as _lfs
     if _lfs.is_lineage_mode():
         path = args.get("path", "") or ""
@@ -975,11 +1020,20 @@ def _dispatch_search_files(root, args):
 
 
 def _dispatch_bash(root, args):
-    """Bash in Lineage mode is intentionally disabled — the remote workspace
-    is unreachable via a local shell. Direct agents to structured tools."""
+    """Bash in data-source mode is disabled — the workspace is a virtual
+    view over Supabase/GCS, not a real filesystem, so shell pipelines
+    can't see it. Direct agents to structured tools."""
     from backend.src.agents import lineage_fs_client as _lfs
     if _lfs.is_lineage_mode():
-        return _lfs.exec_bash_lineage_stub(root, args)
+        cmd = (args.get("command") or "")[:120]
+        return (
+            "Error: bash is disabled — the workspace is a virtual view "
+            "over Supabase/GCS, not a real filesystem. Use structured tools:\n"
+            "  • read/list/edit/write_file for filesystem ops\n"
+            "  • search_files for grep-style search\n"
+            "  • web_search / fetch_url for web calls\n"
+            f"(rejected command: {cmd!r})"
+        )
     return _exec_bash(root, args)
 
 
@@ -1027,7 +1081,6 @@ def _dispatch_submit_draft(root, args):
                                        in the Amphoreus Posts tab, not
                                        through a separate approver UUID.
     """
-    import json as _json
     import os as _os
     import uuid as _uuid
     from pathlib import Path as _Path
@@ -1062,71 +1115,27 @@ def _dispatch_submit_draft(root, args):
             title = stripped.lstrip("#").strip()[:200]
             break
 
-    # 1) Persist the draft. Write destination depends ONLY on whether
-    # this run was initiated from Lineage's UI (signal: LINEAGE_WORKSPACE_URL
-    # set by Jacquard's virio-api proxy) — NOT on whether we have read
-    # access to Jacquard's Supabase (which is often true for amphoreus.app
-    # runs too, since both use the same data source).
-    #
-    #   Lineage-UI-initiated  → Jacquard drafts table  (reviewed in Lineage)
-    #   amphoreus.app / other → local_posts            (reviewed in Amphoreus)
-    destination = "Amphoreus Posts tab"  # overwritten below in Lineage branch
+    # 1) Persist the draft to Amphoreus's local_posts. The operator
+    # reviews drafts at amphoreus.app/posts and pushes to Ordinal from
+    # there. Drafts never leave Amphoreus's side.
+    destination = "Amphoreus Posts tab"
     try:
-        from backend.src.agents import lineage_fs_client as _lfs
-        _in_lineage = _lfs.is_lineage_ui_initiated()
-    except Exception:
-        _in_lineage = False
-
-    if _in_lineage:
-        if not user_slug:
-            return (
-                "Error: user_slug is required in Lineage mode (pick the FOC "
-                "user this post is for; see the workspace root listing)."
-            )
-        try:
-            from backend.src.agents import jacquard_direct as _jd
-            _company_id = _os.environ.get("LINEAGE_COMPANY_ID", "").strip()
-            _user = _jd.resolve_user_by_slug(_company_id, user_slug) if _company_id else None
-            if not _user:
-                return (
-                    f"Error: could not resolve user_slug={user_slug!r} under "
-                    f"company_id={_company_id!r}. Is the slug correct?"
-                )
-            _row = _jd.insert_draft(
-                user_id=_user.get("id", ""),
-                content=content,
-                title=title,
-                scheduled_date=scheduled_date,
-                status="review",
-            )
-            if not _row:
-                return "Error: Jacquard drafts insert returned no row — check logs"
-            # Use Jacquard's generated id as the canonical draft_id so
-            # downstream systems (markdown mirror filenames, return
-            # message) reference the same row.
-            draft_id = str(_row.get("id") or draft_id)
-            destination = "Jacquard drafts (Lineage review UI)"
-        except Exception as exc:
-            logger.exception("[submit_draft] Jacquard insert_draft failed: %s", exc)
-            return f"Error: failed to persist draft to Jacquard drafts: {exc}"
-    else:
-        try:
-            from backend.src.db.local import create_local_post
-            create_local_post(
-                post_id=draft_id,
-                company=company,
-                content=content,
-                title=title,
-                status="draft",
-                why_post=why_post,
-                scheduled_date=scheduled_date,
-                publication_order=(
-                    publication_order if isinstance(publication_order, int) else None
-                ),
-            )
-        except Exception as exc:
-            logger.exception("[submit_draft] create_local_post failed: %s", exc)
-            return f"Error: failed to persist draft to local_posts: {exc}"
+        from backend.src.db.local import create_local_post
+        create_local_post(
+            post_id=draft_id,
+            company=company,
+            content=content,
+            title=title,
+            status="draft",
+            why_post=why_post,
+            scheduled_date=scheduled_date,
+            publication_order=(
+                publication_order if isinstance(publication_order, int) else None
+            ),
+        )
+    except Exception as exc:
+        logger.exception("[submit_draft] create_local_post failed: %s", exc)
+        return f"Error: failed to persist draft to local_posts: {exc}"
 
     # 2) Markdown file mirror — one file per draft, grouped by company,
     # for out-of-band inspection + push tooling that expects files on disk.
@@ -1162,13 +1171,8 @@ def _dispatch_submit_draft(root, args):
         f"  scheduled_date: {scheduled_date or '(unset)'}\n"
         f"  title: {(title or '')[:80]}\n"
         "\n"
-        + (
-            "The draft is now in Lineage's drafts table (status=review). "
-            "The operator reviews and publishes from the Lineage UI."
-            if _in_lineage else
-            "The operator will review in the Posts tab and push to Ordinal "
-            "from there. Nothing has been sent to Jacquard / LinkedIn yet."
-        )
+        "The operator will review in the Posts tab and push to Ordinal "
+        "from there. Nothing has been sent to LinkedIn yet."
     )
 
 
@@ -1193,6 +1197,53 @@ def _dispatch_query_observations(root, args):
         return _json.dumps({"count": 0, "observations": [], "error": str(e)})
 
 
+def _dispatch_retrieve_similar_posts(root, args):
+    """Semantic search over the Amphoreus post_embeddings corpus (~390k LinkedIn
+    posts mirrored from Jacquard's linkedin_posts + text-embedding-3-small).
+
+    This is the cross-creator precedence tool. Stelle uses it to escape the
+    user's local posting basin; Irontomb uses the same path to ground its
+    reactions in real engagement numbers instead of hallucinated patterns.
+
+    Failures are degraded to a structured JSON error rather than a raise, so
+    a transient OpenAI / Supabase hiccup can't kill the whole run.
+    """
+    import json as _json
+    try:
+        from backend.src.services.post_retrieval import retrieve_similar_posts
+    except Exception as exc:
+        return _json.dumps({"count": 0, "posts": [], "error": f"import failed: {exc}"})
+
+    query = (args or {}).get("query") or ""
+    if not query.strip():
+        return _json.dumps({"count": 0, "posts": [], "error": "query is required"})
+
+    k = int((args or {}).get("k") or 10)
+    k = max(1, min(k, 50))
+    min_reactions = int((args or {}).get("min_reactions") or 0)
+    exclude_creator = (args or {}).get("exclude_creator") or None
+    exclude_archetypes = (args or {}).get("exclude_archetypes") or None
+    if isinstance(exclude_archetypes, str):
+        # Be forgiving if the LLM passes a comma-separated string.
+        exclude_archetypes = [s.strip() for s in exclude_archetypes.split(",") if s.strip()]
+
+    try:
+        rows = retrieve_similar_posts(
+            query=query,
+            k=k,
+            min_reactions=min_reactions,
+            exclude_creator=exclude_creator,
+            exclude_archetypes=exclude_archetypes,
+        )
+    except Exception as exc:
+        return _json.dumps({"count": 0, "posts": [], "error": str(exc)[:400]})
+
+    return _json.dumps(
+        {"count": len(rows), "posts": rows},
+        default=str,
+    )
+
+
 _TOOL_HANDLERS = {
     "list_directory": _dispatch_list_directory,
     "read_file": _dispatch_read_file,
@@ -1204,6 +1255,7 @@ _TOOL_HANDLERS = {
     "bash": _dispatch_bash,
     "mention_resolve": _dispatch_mention_resolve,
     "query_observations": _dispatch_query_observations,
+    "retrieve_similar_posts": _dispatch_retrieve_similar_posts,
     "submit_draft": _dispatch_submit_draft,
 }
 
@@ -1887,296 +1939,54 @@ def _build_observation_digest(company_keyword: str, n: int = 10) -> str:
 # ---------------------------------------------------------------------------
 
 def _setup_workspace(company_keyword: str) -> Path:
-    """Stage workspace matching Jacquard's memory/ layout.
+    """Stage Stelle's scratch workspace.
 
-    Uses a persistent workspace under data/workspaces/ instead of a temp dir
-    so that snapshots, rollback, and feedback all share the same root.
-    Symlinks and Supabase-sourced files are rebuilt on each run.
+    Client data (transcripts, engagement, research, context, edits) is
+    read on-demand from Jacquard's Supabase + GCS via the dispatchers
+    in ``lineage_fs_client.py``. Nothing is staged to local disk for
+    reading purposes — local disk is ONLY Stelle's scratch space
+    (iteration drafts, notes, ``scratch/final/``).
 
-    Under the stripped architecture (2026-04-10), no RuanMei-derived artifact
-    (memory/strategy.md) is written into the workspace. Stelle operates on
-    raw workspace inputs only.
-
-    In **Lineage mode**, this is reduced to a minimal scaffold. Jacquard's
-    workspace IS the data source (read via ``lineage_fs_client``), so we
-    deliberately do NOT build ``memory/``, ``context/``, ``voice-examples/``,
-    ``published-posts/``, etc. with Supabase-sourced local copies — that
-    creates a split-brain where Stelle sees two conflicting file trees.
-    Lineage mode gets only ``scratch/`` (needed for write_file).
+    Every run wipes scratch/ fresh so stale in-flight drafts from prior
+    runs never collide with new ones. Leftover non-scratch dirs from
+    older workspace layouts are also cleared on startup.
     """
     from backend.src.db import vortex as _P
     workspace = _P.workspace_dir(company_keyword)
     workspace.mkdir(parents=True, exist_ok=True)
 
-    # Always wipe scratch/ — stale drafts from prior runs must not leak.
+    # Wipe scratch/ — stale drafts from prior runs must not leak.
     scratch = workspace / "scratch"
     if scratch.exists():
         shutil.rmtree(scratch)
     scratch.mkdir()
     (scratch / "final").mkdir()
 
-    # In Lineage mode, that's ALL. Stelle reads Jacquard's workspace
-    # through the lineage_fs_client dispatchers; building a local
-    # ``memory/ context/ voice-examples/`` tree would just compete
-    # with the real data and confuse her.
-    try:
-        from backend.src.agents import lineage_fs_client as _lfs
-        if _lfs.is_lineage_mode():
-            # Also clear stale leftovers from prior local-mode runs so
-            # Stelle doesn't waste cycles exploring empty junk:
-            #   - memory/, context/, abm_profiles/, revisions/
-            #       Legacy Jacquard-style dirs that are now empty after the
-            #       memory/ cut; the real data lives on Jacquard.
-            #   - snapshots/
-            #       workspace_manager.create_snapshot dumps each past run
-            #       under this dir. In Lineage mode the only thing to
-            #       snapshot is scratch/, which gets wiped every run
-            #       anyway — so snapshots just pile up stale empty trees
-            #       that look like "interesting data" to Stelle.
-            #   - output/
-            #       Legacy drafts landing site; drafts now go through
-            #       submit_draft → Amphoreus Posts, never here.
-            #   - tools/, draft.sh, edit.sh, memory.sh
-            #       Local-mode-only scaffolding (bash is disabled in
-            #       Lineage per _dispatch_bash), so these scripts aren't
-            #       runnable and just clutter the root listing.
-            stale_dirs = (
-                "memory", "context", "abm_profiles", "revisions",
-                "snapshots", "output", "tools",
-            )
-            for leftover in stale_dirs:
-                p = workspace / leftover
-                if p.is_symlink():
-                    p.unlink()
-                elif p.is_dir():
-                    shutil.rmtree(p)
-            for script in ("draft.sh", "edit.sh", "memory.sh"):
-                p = workspace / script
-                if p.is_symlink() or p.is_file():
-                    try:
-                        p.unlink()
-                    except OSError:
-                        pass
-            logger.info(
-                "[Stelle] Lineage mode — minimal workspace (scratch/ only). "
-                "Jacquard's workspace is the data source."
-            )
-            return workspace
-    except Exception as exc:
-        # If the lineage_fs_client import fails, fall through to local-mode
-        # setup — matches old behavior.
-        logger.debug("[Stelle] lineage_fs_client check failed: %s", exc)
-
-    mem = workspace / "memory"
-    if mem.exists():
-        shutil.rmtree(mem)
-    ctx = workspace / "context"
-    if ctx.exists():
-        shutil.rmtree(ctx)
-    # Also wipe scratch/ at run start. Without this, stale draft files from
-    # prior runs (posts that were never pushed to Ordinal) linger and can:
-    #   1. Collide with new drafts that get the same slug-based filename
-    #   2. Pollute scratch/final/ so Stelle reads ghost drafts as her own
-    #      in-progress output when avoiding self-collision across posts
-    #   3. Feed _extract_result_from_scratch stale files if write_result
-    #      fails and the fallback fires
-    # Anything unpushed "does not exist" per the new dedup model, so wiping
-    # scratch at setup start enforces that invariant at the filesystem level.
-    scratch = workspace / "scratch"
-    if scratch.exists():
-        shutil.rmtree(scratch)
-    for d in ("abm_profiles", "revisions"):
-        p = workspace / d
+    # Clear leftover trees/files from older workspace layouts so Stelle
+    # doesn't waste cycles exploring empty junk at the workspace root.
+    stale_dirs = (
+        "memory", "context", "abm_profiles", "revisions",
+        "snapshots", "output", "tools",
+    )
+    for leftover in stale_dirs:
+        p = workspace / leftover
         if p.is_symlink():
             p.unlink()
         elif p.is_dir():
             shutil.rmtree(p)
-
-    client_mem = P.memory_dir(company_keyword)
-
-    # ----- memory/ hierarchy (Jacquard-style) -----
-    mem = workspace / "memory"
-    mem.mkdir()
-
-    # memory/source-material/ — raw interview transcripts
-    transcripts_src = client_mem / "transcripts"
-    source_mat = mem / "source-material"
-    if transcripts_src.exists():
-        os.symlink(transcripts_src.resolve(), source_mat)
-        for pdf in transcripts_src.glob("*.pdf"):
-            txt_companion = source_mat / (pdf.name + ".txt")
-            if not txt_companion.exists():
-                txt_companion.write_text(
-                    _extract_pdf_text(pdf), encoding="utf-8",
-                )
-    else:
-        source_mat.mkdir()
-
-    # memory/references/ — client-provided URLs, articles, reference material
-    refs_src = client_mem / "references"
-    refs_dst = mem / "references"
-    if refs_src.exists() and any(refs_src.iterdir()):
-        os.symlink(refs_src.resolve(), refs_dst)
-    else:
-        refs_dst.mkdir()
-
-    # memory/published-posts/ — from Supabase
-    pub_posts, _published_dates = _fetch_published_posts(company_keyword)
-    pub_dir = mem / "published-posts"
-    pub_dir.mkdir()
-    for post in pub_posts:
-        (pub_dir / post["filename"]).write_text(post["content"], encoding="utf-8")
-
-    # memory/voice-examples/ — top posts by engagement as style exemplars
-    voice_dir = mem / "voice-examples"
-    voice_dir.mkdir()
-    voice_examples = _fetch_voice_examples(company_keyword)
-    for ve in voice_examples:
-        (voice_dir / ve["filename"]).write_text(ve["content"], encoding="utf-8")
-
-    # memory/draft-posts/ — READ-ONLY pre-populated from Ordinal's /posts endpoint
-    # (authoritative "pushed-but-not-yet-live" drafts). Stelle's in-run outputs
-    # go to scratch/final/, NOT here. This directory is the dedup source; her
-    # own writes don't "exist" until the publisher pushes them after the run.
-    draft_posts_dir = mem / "draft-posts"
-    draft_posts_dir.mkdir()
-    try:
-        ordinal_drafts = _fetch_ordinal_drafts(company_keyword, exclude_dates=_published_dates)
-        for od in ordinal_drafts:
-            (draft_posts_dir / od["filename"]).write_text(od["content"], encoding="utf-8")
-    except Exception as e:
-        logger.debug("[Stelle] Ordinal draft prefill skipped: %s", e)
-
-    # memory/feedback/edits/ — auto-saved draft→posted edit diffs only.
-    # Operator-typed client feedback files are NOT symlinked in — they
-    # encode the operator's interpretation of client reactions, which is
-    # prescriptive and out-of-policy. Client-direct content belongs in
-    # transcripts/.
-    feedback_dir = mem / "feedback"
-    feedback_dir.mkdir()
-    edits_dir = feedback_dir / "edits"
-    edits_dir.mkdir()
-
-    # context/research/ — fetch BEFORE profile.md so we can fallback
-    research_files = _fetch_research_files(company_keyword)
-    research_dir = ctx / "research"
-    research_dir.mkdir(parents=True, exist_ok=True)
-    _person_research_content: str = ""
-    for rf in research_files:
-        (research_dir / rf["filename"]).write_text(rf["content"], encoding="utf-8")
-        if rf["filename"] == "person.md":
-            _person_research_content = rf["content"]
-
-    # memory/profile.md — LinkedIn profile data (APIMaestro, or person.md fallback)
-    profile_summary = _fetch_linkedin_profile(company_keyword)
-    if profile_summary:
-        (mem / "profile.md").write_text(profile_summary, encoding="utf-8")
-    elif _person_research_content:
-        (mem / "profile.md").write_text(
-            "# Client Profile (from deep research)\n\n" + _person_research_content[:8000],
-            encoding="utf-8",
-        )
-        logger.info("[Stelle] Using person.md research as profile.md fallback")
-
-    # Cyrene's strategic brief — treated as source material (like a transcript)
-    # so Stelle can read content_priorities, content_avoid, etc. without
-    # being prescriptively told what to write.
-    cyrene_brief_path = client_mem / "cyrene_brief.json"
-    if cyrene_brief_path.exists():
-        import json as _json
-        try:
-            brief = _json.loads(cyrene_brief_path.read_text(encoding="utf-8"))
-            brief_text = (
-                "# Strategic Brief (from Cyrene's account review)\n\n"
-                + _json.dumps(brief, indent=2, default=str)
-            )
-            (source_mat / "cyrene-strategic-brief.txt").write_text(
-                brief_text, encoding="utf-8",
-            )
-            logger.info("[Stelle] Loaded Cyrene brief into source-material/")
-        except Exception as e:
-            logger.debug("[Stelle] Cyrene brief load skipped: %s", e)
-
-    # memory/constraints.md — voice/tone rules from accepted posts (placeholder if empty)
-    accepted_src = client_mem / "accepted"
-    if accepted_src.exists() and any(accepted_src.iterdir()):
-        constraint_lines = ["Voice and tone reference from accepted posts:\n"]
-        for f in sorted(accepted_src.iterdir()):
-            if f.is_file() and f.suffix in (".txt", ".md"):
-                constraint_lines.append(f"--- {f.name} ---\n{f.read_text(encoding='utf-8', errors='replace')}\n")
-        (mem / "constraints.md").write_text("\n".join(constraint_lines), encoding="utf-8")
-    else:
-        (mem / "constraints.md").write_text(
-            "No accepted posts yet. Infer voice and tone from voice-examples/.",
-            encoding="utf-8",
-        )
-
-    # memory/config.md — bounded agent memory, persisted across sessions
-    persistent_config = client_mem / "config.md"
-    ws_config = mem / "config.md"
-    if persistent_config.exists():
-        os.symlink(persistent_config.resolve(), ws_config)
-    else:
-        persistent_config.parent.mkdir(parents=True, exist_ok=True)
-        persistent_config.write_text("", encoding="utf-8")
-        os.symlink(persistent_config.resolve(), ws_config)
-
-    # memory/story-inventory.md — cross-session record of stories told/untold
-    persistent_inventory = client_mem / "story_inventory.md"
-    ws_inventory = mem / "story-inventory.md"
-    if persistent_inventory.exists():
-        os.symlink(persistent_inventory.resolve(), ws_inventory)
-    else:
-        persistent_inventory.parent.mkdir(parents=True, exist_ok=True)
-        persistent_inventory.write_text("", encoding="utf-8")
-        os.symlink(persistent_inventory.resolve(), ws_inventory)
-
-    # ----- context/ hierarchy (our additions beyond Jacquard) -----
-    # ctx dir and ctx/research/ already created above (before profile.md)
-    ctx.mkdir(exist_ok=True)
-
-    # context/org/ — company context from research
-    org_dir = ctx / "org"
-    org_dir.mkdir(exist_ok=True)
-    company_research = research_dir / "company.md"
-    if company_research.exists():
-        os.symlink(company_research.resolve(), org_dir / "company.md")
-
-    # context/topic-velocity.md — intentionally NOT symlinked. Previously
-    # Perplexity-generated trending-topic summary auto-injected into
-    # Stelle's context, which violated the "transcripts/ + deltas +
-    # engagement only" input policy. If Stelle needs trending-topic
-    # context during drafting she reaches for the web_search tool.
-
-    # ----- Other top-level dirs -----
-    for subdir in ("abm_profiles", "revisions"):
-        src = client_mem / subdir
-        dst = workspace / subdir
-        if src.exists():
-            os.symlink(src.resolve(), dst)
-
-    # scratch/ and output/ — preserved across runs
-    scratch_dir = workspace / "scratch"
-    scratch_dir.mkdir(exist_ok=True)
-    (scratch_dir / "drafts").mkdir(exist_ok=True)
-    (scratch_dir / "final").mkdir(exist_ok=True)
-    (workspace / "output").mkdir(exist_ok=True)
-
-    # Observation digest: dump top-N scored posts (full text + full
-    # engagement numbers) into memory/post-history.md. Replaces the
-    # query_observations tool — same raw data, delivered up-front,
-    # so Stelle reads it like any other memory file.
-    digest = _build_observation_digest(company_keyword, n=10)
-    if digest:
-        (mem / "post-history.md").write_text(digest, encoding="utf-8")
-
-    _write_tool_scripts(workspace)
+    for script in ("draft.sh", "edit.sh", "memory.sh"):
+        p = workspace / script
+        if p.is_symlink() or p.is_file():
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
     logger.info(
-        "[Stelle] Workspace staged at %s (%d published posts, %d voice examples, %d research files)",
-        workspace, len(pub_posts), len(voice_examples), len(research_files),
+        "[Stelle] Scratch workspace staged at %s. Client data reads flow "
+        "through the workspace_fs dispatchers (Jacquard Supabase + GCS).",
+        workspace,
     )
-
     return workspace
 
 
@@ -2191,37 +2001,67 @@ _OVERRIDE_MIN_EDITS_FOR_CHAR_LIMIT = 5
 # Dynamic directives
 # ---------------------------------------------------------------------------
 
-_LINEAGE_DIRECTIVES_TOOL_OVERRIDES = """\
-## Tool semantics that differ from the default Amphoreus prompt
+_WORKSPACE_TOOL_SEMANTICS = """\
+## Tool semantics
 
-Several instructions in the default system prompt referenced paths or files
-that **do not exist in the Lineage workspace**, or suggested workflows that
-create duplicate drafts. Here's how to do the same things correctly:
+The workspace is a virtual view over the client's data source (Supabase
++ GCS). Everything you read flows through that — there is no fly-local
+``memory/`` tree.
 
-- `memory/post-history.md` → use `<slug>/post-history.md` (top 10
-  performers, rendered on read) and `<slug>/engagement/posts.json` (every
-  scored post, raw engagement numbers + per-reaction breakdown). Filter
-  and summarize in-context.
+- `<slug>/post-history.md` — top 10 performers for this user, rendered
+  on read from ``linkedin_posts``. Your baseline: everything you write
+  is compared against this distribution.
+- `<slug>/engagement/posts.json` — every scored post with raw engagement
+  numbers + per-reaction breakdown. Filter and summarize in-context.
 
-- `memory/voice-examples/` → use `<slug>/posts/published/` or
-  `<slug>/tone/`. Every post file carries engagement metadata in its
-  header so you can rank yourself; `tone/` exposes curated
+- `<slug>/posts/published/` or `<slug>/tone/` — use these for voice
+  examples. Every post file carries engagement metadata in its header
+  so you can rank yourself; `tone/` exposes curated
   ``tone_references`` picks.
 
-- `query_observations` tool → not available in direct-only Lineage mode.
-  Read the engagement files above instead; they carry the same data.
+- `query_observations` tool → not available. Read the engagement files
+  above instead; they carry the same data.
 
-- `bash` is DISABLED in Lineage mode (scratch filesystem isn't wired).
+- **`retrieve_similar_posts` (cross-creator corpus, ~390k real LinkedIn
+  posts, semantic search).** Your client's own post history is a
+  biased prior — it only shows what that person has tried before, not
+  what actually lands on LinkedIn in their space. Use this tool to
+  escape the basin.
+
+  Call it repeatedly, not once. Typical usage shape:
+  * **Before drafting** — query by topic/angle phrases extracted from
+    the transcript to see what high-reaction posts in that space look
+    like structurally (length, pacing, stance, hook form).
+  * **During angle exploration** — narrower queries per candidate
+    angle to confirm the form is real, not one-off.
+  * **Before submitting** — sanity-check: "does this angle already
+    exist?" If yes, how did it land? Revise or differentiate.
+
+  Suggested args:
+    query: free text (topic, angle, or a candidate draft)
+    k: 10-20 for exploration, 3-5 for comparison
+    min_reactions: 50-200 for outlier-biased views (optional)
+    exclude_creator: pass the client's LinkedIn username to avoid
+      retrieving their own posts
+    exclude_archetypes: ["announcement","celebration","promotional_post"]
+      filters out brag-adjacent content when you want content-lane
+      precedents (optional)
+
+  Read the returned posts as REAL precedents, not prescriptions —
+  adapt form, not content. Cite them in your `why_post` rationale when
+  relevant so the operator can trace your thinking.
+
+- `bash` is DISABLED (the workspace is virtual, not a real filesystem).
 
 - `write_file` / `edit_file` route BY PATH:
-  * **Lineage mount paths are READ-ONLY.** Any write under
+  * **Client data-source paths are READ-ONLY.** Any write under
     ``transcripts/``, ``research/``, ``engagement/``, ``reports/``,
     ``context/``, ``posts/``, ``edits/``, ``tone/``, ``strategy/``, or
     the shared ``conversations/``, ``slack/``, ``tasks/``, ``.pi/``
     is refused — those are the client's files. The error message tells
     you exactly where to write instead.
   * **Scratch paths work normally.** Write freely to anything OUTSIDE
-    the Lineage mounts: ``scratch/post1-v1.md``, ``scratch/plan.md``,
+    the data-source mounts: ``scratch/post1-v1.md``, ``scratch/plan.md``,
     ``notes/brainstorm.md``, ``drafts/wip.md`` — whatever you want.
     Those land on your fly-local SandboxFs, persist for the run, and
     you can ``read_file``/``list_directory`` them back normally.
@@ -2249,9 +2089,10 @@ create duplicate drafts. Here's how to do the same things correctly:
         why_post="<rationale>",       # stored alongside the draft
       )
 
-  **Where the draft lands.** ``submit_draft`` persists the draft for
-  the FOC user whose slug you passed. The operator reviews from
-  whichever surface triggered this run (Lineage or amphoreus.app).
+  **Where the draft lands.** ``submit_draft`` persists the draft to
+  Amphoreus's ``local_posts`` table for the FOC user whose slug you
+  passed. The operator reviews at amphoreus.app/posts and pushes to
+  Ordinal from there.
 
   ``submit_draft`` also runs Castorice fact-check on your content before
   persisting — the fact-check report + citations are appended to
@@ -2269,29 +2110,28 @@ create duplicate drafts. Here's how to do the same things correctly:
 """
 
 
-_LINEAGE_DIRECTIVES_USER_TARGETED = """\
-# Lineage Mode — USER-TARGETED RUN
+_WORKSPACE_LAYOUT_USER_TARGETED = """\
+# Workspace — USER-TARGETED RUN
 
-You are running against a REMOTE workspace served by Lineage (virio-api),
-scoped to a single FOC user for this run. Every draft you produce will
-be attributed to that user.
+You are scoped to a single FOC user for this run. Every draft you
+produce will be attributed to that user.
 
-**Lineage's workspace is READ-ONLY to you.** Calls to `list_directory`,
-`read_file`, `search_files` on Lineage paths proxy through to the
-client's workspace over HTTPS. ``write_file`` / ``edit_file`` on those
-same paths are refused.
+**The client data source is READ-ONLY to you.** Calls to
+`list_directory`, `read_file`, `search_files` on data-source paths
+read from Jacquard's Supabase + GCS. ``write_file`` / ``edit_file`` on
+those same paths are refused.
 
-**But scratch paths work normally.** Any path OUTSIDE the Lineage mount
-tree (``scratch/``, ``notes/``, ``drafts/``, loose top-level files) is
-your own fly-local SandboxFs — read, write, edit, list freely.
+**But scratch paths work normally.** Any path OUTSIDE the data-source
+mount tree (``scratch/``, ``notes/``, ``drafts/``, loose top-level
+files) is your own fly-local SandboxFs — read, write, edit, list freely.
 
-- Lineage paths (routed to client's workspace, READ-ONLY for writes):
+- Data-source paths (READ-ONLY for writes):
   ``transcripts/``, ``research/``, ``engagement/``, ``reports/``,
   ``context/``, ``posts/``, ``edits/``, ``tone/``, ``strategy/``, and
   the shared ``conversations/``, ``slack/``, ``tasks/``, ``.pi/``.
 - Scratch paths (fly-local, read/write): anything else.
 
-Classic iteration pattern still works:
+Classic iteration pattern:
 
     write_file("scratch/post1-v1.md", <draft>)
     → get_reader_reaction(draft_text=<draft>)
@@ -2302,7 +2142,7 @@ Classic iteration pattern still works:
 You can also keep drafts purely in-context — ``get_reader_reaction``
 takes the full draft directly. Use whichever feels natural.
 
-Only ``submit_draft`` writes to Lineage (finished posts only).
+Only ``submit_draft`` persists finished posts.
 
 ## Workspace layout (read-only; paths auto-prefixed to the target user)
 
@@ -2318,7 +2158,7 @@ Only ``submit_draft`` writes to Lineage (finished posts only).
 - `posts/drafts/` — existing unpushed drafts. Do NOT write here — use `submit_draft`.
 - `edits/` — FEEDBACK SIGNAL. Per-draft first-snapshot vs. final-published diffs with threaded operator comments. Read before drafting.
 - `tone/` — curated voice/style references.
-- `strategy/` — persistent cross-run strategy memory. Read-only in Lineage.
+- `strategy/` — persistent cross-run strategy memory. Read-only.
 - `post-history.md` — synthesized top-performing posts. Baseline — everything you write is compared to this distribution.
 - `profile.md` — synthesized LinkedIn profile.
 
@@ -2326,19 +2166,20 @@ Shared (not user-scoped; don't prepend slug):
 - `conversations/trigger-log.jsonl` — chronological replay of every prior trigger (interviews, CE feedback with diffs, manual runs). Scan at session start.
 - `tasks/<id>.json` — pending review tasks.
 - `slack/` — Slack channel snapshots.
-- `.pi/` — Jacquard-agent skill files. IGNORE.
+- `.pi/` — historical Pi skill files. IGNORE.
 
 ## Draft write contract
 
 **Use ``submit_draft`` for finished posts.** One call per finished post.
-``submit_draft`` persists the draft for the FOC user whose slug you
-passed. The operator reviews from whichever surface triggered this run.
+``submit_draft`` persists the draft to Amphoreus's ``local_posts`` for
+the FOC user whose slug you passed. The operator reviews at
+amphoreus.app/posts and pushes to Ordinal from there.
 
 ``submit_draft`` runs Castorice fact-check on your content before
 persisting. The fact-check report + citations are appended to
 ``why_post`` so the operator sees them during review.
 
-## Ingestion order at session start (Lineage mode)
+## Ingestion order at session start
 
 1. ``list_directory("")`` — confirm the target slug and what's available.
 2. ``read_file("conversations/trigger-log.jsonl")`` — your history with
@@ -2356,22 +2197,20 @@ persisting. The fact-check report + citations are appended to
 """
 
 
-_LINEAGE_DIRECTIVES_COMPANY_WIDE = """\
-# Lineage Mode — COMPANY-WIDE RUN
+_WORKSPACE_LAYOUT_COMPANY_WIDE = """\
+# Workspace — COMPANY-WIDE RUN
 
-You are running against a REMOTE workspace served by Lineage (virio-api).
 Filesystem tool calls route BY PATH:
 
-- **Lineage mount paths** (``transcripts/``, ``research/``, ``engagement/``,
+- **Data-source paths** (``transcripts/``, ``research/``, ``engagement/``,
   ``reports/``, ``context/``, ``posts/``, ``edits/``, ``tone/``,
   ``strategy/``, and the shared ``conversations/``, ``slack/``, ``tasks/``,
-  ``.pi/``) hit the client's remote workspace over HTTPS. These are
-  READ-ONLY for writes — ``write_file``/``edit_file`` on them is refused.
+  ``.pi/``) read from the client's Supabase + GCS. These are READ-ONLY
+  for writes — ``write_file``/``edit_file`` on them is refused.
 - **Scratch paths** (``scratch/``, ``notes/``, ``drafts/``, any loose
   top-level file) land on your fly-local SandboxFs. Read/write freely.
-  Classic scratch-file draft iteration works exactly as in local mode.
 
-Only ``submit_draft`` writes to Lineage (finished posts only).
+Only ``submit_draft`` persists finished posts.
 
 ## Workspace layout (all read-only)
 
@@ -2391,7 +2230,7 @@ then use explicit slug prefixes in every filesystem call.
 - `<slug>/posts/drafts/` — existing unpushed drafts. Do NOT write here — use `submit_draft`.
 - `<slug>/edits/` — FEEDBACK SIGNAL. Per-draft first-snapshot vs. final-published diffs with threaded operator comments. Read before drafting.
 - `<slug>/tone/` — curated voice/style references.
-- `<slug>/strategy/` — persistent cross-run strategy memory. Read-only in Lineage.
+- `<slug>/strategy/` — persistent cross-run strategy memory. Read-only.
 - `<slug>/post-history.md` — synthesized top-performing posts. Baseline — everything you write is compared to this distribution.
 - `<slug>/profile.md` — synthesized LinkedIn profile.
 
@@ -2399,7 +2238,7 @@ Shared (not user-scoped; don't prepend slug):
 - `conversations/trigger-log.jsonl` — chronological replay of every prior trigger (interviews, CE feedback with diffs, manual runs). Scan at session start.
 - `tasks/<id>.json` — pending review tasks.
 - `slack/` — Slack channel snapshots.
-- `.pi/` — Jacquard-agent skill files. IGNORE.
+- `.pi/` — historical Pi skill files. IGNORE.
 
 ## Per-draft author attribution
 
@@ -2413,14 +2252,14 @@ The slug determines attribution — there is no separate ``author`` field.
 ## Draft write contract
 
 **Use ``submit_draft`` for finished posts.** One call per finished post.
-``submit_draft`` persists the draft under the target user. The operator
-publishes from whichever surface triggered this run.
+``submit_draft`` persists the draft to Amphoreus's ``local_posts`` under
+the target user. The operator reviews at amphoreus.app/posts.
 
 ``submit_draft`` runs Castorice fact-check on your content before
 persisting. The fact-check report + citations are appended to
 ``why_post`` so the operator sees them during review.
 
-## Ingestion order at session start (Lineage mode)
+## Ingestion order at session start
 
 1. ``list_directory("")`` — discover the FOC-user slugs.
 2. ``read_file("conversations/trigger-log.jsonl")`` — history of prior
@@ -2463,17 +2302,15 @@ def _build_dynamic_directives(company_keyword: str) -> str:
 
     Always emits the today-preamble so Stelle knows what day it is.
 
-    Additionally emits one of two Lineage-mode overlays when running
-    against the remote workspace:
+    Additionally emits the workspace-layout overlay when a client data
+    source is configured (Jacquard Supabase + GCS):
 
-    - ``USER-TARGETED`` when the runner was given ``--lineage-user-slug``.
-      Every draft is attributed to that user and paths are auto-prefixed.
-    - ``COMPANY-WIDE``  when no user slug was supplied. Stelle sees the
-      full workspace with all FOC-user subtrees and must include the
-      slug in every filesystem call.
+    - ``USER-TARGETED`` when ``LINEAGE_USER_SLUG`` is set. Every draft
+      is attributed to that user and paths are auto-prefixed.
+    - ``COMPANY-WIDE``  when no user slug is set. Stelle sees the full
+      workspace and must include the slug in every filesystem call.
 
-    In local mode (no Lineage env vars), only the today-preamble is
-    emitted.
+    Without a data source, only the today-preamble is emitted.
     """
     preamble = _today_preamble()
     try:
@@ -2481,19 +2318,11 @@ def _build_dynamic_directives(company_keyword: str) -> str:
         if not _lfs.is_lineage_mode():
             return preamble
         layout = (
-            _LINEAGE_DIRECTIVES_USER_TARGETED
+            _WORKSPACE_LAYOUT_USER_TARGETED
             if _lfs.is_user_targeted()
-            else _LINEAGE_DIRECTIVES_COMPANY_WIDE
+            else _WORKSPACE_LAYOUT_COMPANY_WIDE
         )
-        # Always append the tool-override block so Stelle doesn't try to read
-        # memory/post-history.md or memory/voice-examples/ which don't exist.
-        return (
-            preamble
-            + "\n"
-            + layout
-            + "\n\n"
-            + _LINEAGE_DIRECTIVES_TOOL_OVERRIDES
-        )
+        return preamble + "\n" + layout + "\n\n" + _WORKSPACE_TOOL_SEMANTICS
     except Exception:
         return preamble
 
@@ -4416,21 +4245,20 @@ def generate_one_shot(
     """
     # Data-source detection is best-effort: if Jacquard's Supabase is
     # reachable and the company resolves, reads come from there. Otherwise
-    # reads are empty (Phase 2 will add a fly-local memory/<slug>/ fallback).
-    # Either way Stelle runs — the write destination is decided separately
-    # by is_lineage_ui_initiated() in _dispatch_submit_draft.
+    # reads are empty. Either way Stelle runs; drafts always land in
+    # Amphoreus's local_posts.
     try:
         from backend.src.agents.lineage_fs_client import is_lineage_mode
-        _lineage_active = is_lineage_mode()
+        _data_source_active = is_lineage_mode()
     except Exception as _lm_err:
-        logger.warning("[Stelle] lineage_fs_client unavailable: %s", _lm_err)
-        _lineage_active = False
+        logger.warning("[Stelle] workspace_fs unavailable: %s", _lm_err)
+        _data_source_active = False
 
-    if not _lineage_active:
+    if not _data_source_active:
         logger.info(
-            "[Stelle] running without Jacquard data source — transcripts/"
+            "[Stelle] running without a client data source — transcripts/"
             "engagement/research reads will return empty. Ensure the "
-            "company slug is registered in Jacquard's user_companies or "
+            "company is registered in Jacquard's user_companies or "
             "expect generic output."
         )
 

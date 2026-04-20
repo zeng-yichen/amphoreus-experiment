@@ -29,199 +29,46 @@ strings so Stelle's agent loop can react.
 
 from __future__ import annotations
 
-import base64
-import json
 import logging
 import os
-import threading
-import time
 from typing import Any
 
-import httpx
-
-logger = logging.getLogger("stelle.lineage_fs")
+logger = logging.getLogger("stelle.workspace_fs")
 
 # Max characters to return in a single read_file call (matches stelle.py)
 MAX_TOOL_OUTPUT_CHARS = 80_000
 
 
 class LineageIngestionError(RuntimeError):
-    """Raised when a read against Jacquard's Lineage data fails and we
+    """Raised when a read against the client data source fails and we
     cannot recover. Deliberately NOT caught by Stelle's tool-dispatch
     try/except — the run aborts instead of proceeding with missing data.
 
-    Produced when either:
-    - direct mode was enabled but both direct AND HTTP fallback failed
-    - lineage mode was enabled but the HTTP call errored / 5xx'd / 401'd
-    - a read returned a content payload shaped like an error
-
-    Pure-local runs (``is_lineage_mode() == False``) never raise this —
-    they use local disk paths where a missing file is just "empty dir"
-    or "file not found", not a fatal ingestion failure.
+    Only fires when ``is_lineage_mode()`` is True (Supabase creds +
+    LINEAGE_COMPANY_ID present) AND the read then fails. Runs without a
+    configured data source never raise this.
     """
-
-# Shared HTTP client — connection pooling across many tool calls during a run.
-# 60s per-request timeout matches Stelle's bash timeout.
-_client: httpx.Client | None = None
-
-# Refresh the run token when it has this many seconds (or fewer) left.
-# Matches Jacquard's ``REFRESH_GRACE_SECONDS`` of 30 min — we refresh
-# well before the grace window to avoid racing with a real expiry.
-_REFRESH_WINDOW_SECONDS = 10 * 60
-
-# Serialize concurrent refresh attempts from the same process.
-_refresh_lock = threading.Lock()
-
-
-def _get_client() -> httpx.Client:
-    global _client
-    if _client is None:
-        _client = httpx.Client(timeout=60.0)
-    return _client
 
 
 def is_lineage_mode() -> bool:
-    """True when Stelle has enough config to READ Jacquard data.
-
-    This governs filesystem reads (transcripts, engagement, research,
-    context, edits). It does NOT govern write destination — see
-    ``is_lineage_ui_initiated()`` for that.
+    """True when Stelle has enough config to READ client data from
+    Jacquard's Supabase + GCS.
 
     Required:
-      - LINEAGE_COMPANY_ID (which company to query)
-      - Either direct-mode (GCS + Supabase) OR HTTP-mode (workspace URL + run token)
+      - LINEAGE_COMPANY_ID — the Jacquard user_companies.id to query
+      - SUPABASE_URL + SUPABASE_KEY — shared Jacquard project creds
+      - GCS_CREDENTIALS_B64 — service-account JSON for transcript blobs
 
-    Direct-only deployments (our current default) skip the workspace URL
-    and run token — no virio-api dependency, no JWT minting. Amphoreus
-    reads from Jacquard's Supabase + GCS using its own service credentials.
+    The name is historical — it predates the Lineage-UI integration
+    deprecation. Conceptually today this is ``has_client_data_source()``.
     """
     if not os.environ.get("LINEAGE_COMPANY_ID", "").strip():
         return False
-    # Direct mode: Supabase + GCS credentials in env.
-    direct_ok = bool(
+    return bool(
         os.environ.get("GCS_CREDENTIALS_B64", "").strip()
         and os.environ.get("SUPABASE_URL", "").strip()
         and os.environ.get("SUPABASE_KEY", "").strip()
     )
-    # HTTP mode (legacy/fallback): workspace URL + run token.
-    http_ok = bool(
-        os.environ.get("LINEAGE_WORKSPACE_URL", "").strip()
-        and os.environ.get("LINEAGE_RUN_TOKEN", "").strip()
-    )
-    return direct_ok or http_ok
-
-
-def is_lineage_ui_initiated() -> bool:
-    """True when the run was kicked off from Lineage's UI (via virio-api).
-
-    Governs WRITE DESTINATION — ``submit_draft`` sends drafts to
-    Jacquard's ``drafts`` table when True, to Amphoreus's ``local_posts``
-    when False. Orthogonal to ``is_lineage_mode()`` (which governs
-    reads).
-
-    Signal: ``LINEAGE_WORKSPACE_URL`` is set only when Jacquard's
-    virio-api spawned the run (HTTP-proxy mode). Direct-mode reads and
-    amphoreus.app-initiated runs never set it — data still flows from
-    Jacquard's Supabase, but drafts stay on the Amphoreus side for
-    review in amphoreus.app's Posts tab.
-    """
-    return bool(os.environ.get("LINEAGE_WORKSPACE_URL", "").strip())
-
-
-def _base_url() -> str:
-    url = os.environ["LINEAGE_WORKSPACE_URL"].rstrip("/")
-    return url
-
-
-def _decode_jwt_exp(token: str) -> int | None:
-    """Return the ``exp`` (unix seconds) claim from a JWT without verifying.
-
-    We don't need to verify — we only read ``exp`` to decide whether to
-    pre-emptively refresh. Verification happens on the server side.
-    Returns None for any malformed token (caller then falls through to
-    the old behavior of letting the server reject an expired token).
-    """
-    try:
-        parts = token.split(".")
-        if len(parts) != 3:
-            return None
-        payload_b64 = parts[1]
-        # Pad to a multiple of 4 for urlsafe_b64decode.
-        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
-        data = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")))
-        exp = data.get("exp")
-        if isinstance(exp, (int, float)):
-            return int(exp)
-        return None
-    except Exception:
-        return None
-
-
-def _refresh_run_token() -> bool:
-    """Ask Jacquard for a fresh run token using our current (possibly
-    near-expired) one. Updates ``LINEAGE_RUN_TOKEN`` in-place on success.
-
-    Returns True on success. On failure logs a warning and returns False;
-    the caller then proceeds with the old token — the server will 401 if
-    it's actually expired.
-    """
-    with _refresh_lock:
-        # Re-check inside the lock — if another thread already refreshed,
-        # we don't want to burn a second round-trip.
-        current = os.environ.get("LINEAGE_RUN_TOKEN", "")
-        exp = _decode_jwt_exp(current)
-        if exp is not None and exp - int(time.time()) > _REFRESH_WINDOW_SECONDS:
-            return True  # Already refreshed by another thread.
-
-        try:
-            resp = _get_client().post(
-                f"{_base_url()}/refresh-token",
-                headers={
-                    "Authorization": f"Bearer {current}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-            )
-        except httpx.HTTPError as exc:
-            logger.warning("[lineage_fs] refresh-token network error: %s", exc)
-            return False
-        if resp.status_code >= 300:
-            logger.warning(
-                "[lineage_fs] refresh-token %s: %s",
-                resp.status_code, resp.text[:200],
-            )
-            return False
-        try:
-            data = resp.json()
-            new_token = data.get("token")
-        except Exception as exc:
-            logger.warning("[lineage_fs] refresh-token parse failed: %s", exc)
-            return False
-        if not isinstance(new_token, str) or not new_token:
-            return False
-        os.environ["LINEAGE_RUN_TOKEN"] = new_token
-        logger.info("[lineage_fs] run token refreshed successfully")
-        return True
-
-
-def _headers() -> dict[str, str]:
-    token = os.environ.get("LINEAGE_RUN_TOKEN", "")
-    # Pre-emptive refresh: if the token expires within the refresh window,
-    # rotate it BEFORE making the call. Skip for refresh-token calls
-    # themselves (infinite recursion) — we detect those by the caller
-    # already holding the refresh lock via best-effort check.
-    if token:
-        exp = _decode_jwt_exp(token)
-        if exp is not None:
-            now = int(time.time())
-            if exp - now <= _REFRESH_WINDOW_SECONDS:
-                _refresh_run_token()
-                token = os.environ.get("LINEAGE_RUN_TOKEN", token)
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
 
 
 def _normalize_path(rel: str) -> str:
@@ -660,46 +507,14 @@ def exec_list_directory(_workspace_root: Any, args: dict) -> str:
             )
         return direct
 
-    # HTTP mode — only reachable in legacy deployments where direct isn't
-    # configured (no GCS creds). Kept for Jacquard-initiated runs.
-    try:
-        resp = _get_client().get(
-            f"{_base_url()}/list",
-            params={"path": f"/{rel}" if rel else ""},
-            headers=_headers(),
-        )
-    except httpx.HTTPError as exc:
-        logger.error("[lineage_fs] FATAL list error: %s", exc)
-        raise LineageIngestionError(
-            f"list_directory({rel!r}): HTTP failed: {exc}"
-        ) from exc
-
-    if resp.status_code == 401:
-        raise LineageIngestionError(
-            f"list_directory({rel!r}): run token invalid or expired — ingestion auth broken"
-        )
-    if resp.status_code >= 500:
-        raise LineageIngestionError(
-            f"list_directory({rel!r}): workspace returned {resp.status_code}: {resp.text[:200]}"
-        )
-    if resp.status_code != 200:
-        raise LineageIngestionError(
-            f"list_directory({rel!r}): workspace returned {resp.status_code}"
-        )
-
-    data = resp.json()
-    entries = data.get("entries", [])
-    if not entries:
-        return "(empty directory)"
-
-    lines: list[str] = []
-    for e in entries:
-        name = e.get("name", "?")
-        if e.get("type") == "directory":
-            lines.append(f"  {name}/")
-        else:
-            lines.append(f"  {name}")
-    return "\n".join(lines)
+    # HTTP-mode fallback was removed with the Lineage-UI deprecation.
+    # Direct reads are now the only path; a _direct_list miss (None) is
+    # surfaced above as an empty hint. See _lineage_deprecated/http_client
+    # for the removed code.
+    raise LineageIngestionError(
+        f"list_directory({rel!r}): direct-mode reader not configured "
+        "(GCS_CREDENTIALS_B64 + SUPABASE_URL + SUPABASE_KEY required)"
+    )
 
 
 def exec_read_file(_workspace_root: Any, args: dict) -> str:
@@ -708,7 +523,6 @@ def exec_read_file(_workspace_root: Any, args: dict) -> str:
     if not norm:
         return "Error: path is required"
 
-    # Direct-mode path — Supabase + GCS, no HTTP hop.
     if _direct_enabled():
         try:
             direct = _direct_read(norm)
@@ -717,368 +531,74 @@ def exec_read_file(_workspace_root: Any, args: dict) -> str:
                 f"read_file({rel!r}): direct read failed: {exc}"
             ) from exc
         if direct is None:
-            # 404-ish — file not found is soft-failure (Stelle can retry
-            # with a different path), but a direct-backend miss means we
-            # genuinely don't know where to look.
             return f"Error: file not found: {rel}"
         content = direct
         if len(content) > MAX_TOOL_OUTPUT_CHARS:
             content = content[:MAX_TOOL_OUTPUT_CHARS] + f"\n\n... [truncated at {MAX_TOOL_OUTPUT_CHARS} chars]"
         return content
 
-    # HTTP mode fallback (legacy).
-    try:
-        resp = _get_client().get(
-            f"{_base_url()}/file",
-            params={"path": f"/{norm}"},
-            headers=_headers(),
-        )
-    except httpx.HTTPError as exc:
-        logger.error("[lineage_fs] FATAL read error %s: %s", norm, exc)
-        raise LineageIngestionError(
-            f"read_file({rel!r}): HTTP failed: {exc}"
-        ) from exc
-
-    # 404 is the one non-fatal case: "file genuinely doesn't exist in
-    # Lineage" is different from "we couldn't talk to Lineage." Stelle
-    # handling a missing file (retrying with a different name) shouldn't
-    # kill the run.
-    if resp.status_code == 404:
-        return f"Error: file not found: {rel}"
-    if resp.status_code == 401:
-        raise LineageIngestionError(
-            f"read_file({rel!r}): run token invalid or expired — ingestion auth broken"
-        )
-    if resp.status_code != 200:
-        raise LineageIngestionError(
-            f"read_file({rel!r}): workspace returned {resp.status_code}: {resp.text[:200]}"
-        )
-
-    content = resp.json().get("content", "")
-    if len(content) > MAX_TOOL_OUTPUT_CHARS:
-        content = content[:MAX_TOOL_OUTPUT_CHARS] + f"\n\n... [truncated at {MAX_TOOL_OUTPUT_CHARS} chars]"
-    return content
-
-
-def exec_write_file(_workspace_root: Any, args: dict) -> str:
-    rel = args.get("path", "") or ""
-    content = args.get("content", "") or ""
-    norm = _rewrite_path(rel)
-    if not norm:
-        return "Error: path is required"
-    try:
-        resp = _get_client().post(
-            f"{_base_url()}/write",
-            headers=_headers(),
-            json={"path": f"/{norm}", "content": content},
-        )
-    except httpx.HTTPError as exc:
-        logger.warning("[lineage_fs] write error %s: %s", norm, exc)
-        return f"Error: remote write failed: {exc}"
-
-    if resp.status_code == 403:
-        return f"Error: {rel} is read-only in the Lineage workspace"
-    if resp.status_code == 401:
-        return "Error: run token invalid or expired"
-    if resp.status_code >= 300:
-        return f"Error: remote write {resp.status_code}: {resp.text[:200]}"
-    return f"Wrote {len(content)} chars to {rel}"
-
-
-def exec_edit_file(_workspace_root: Any, args: dict) -> str:
-    """Read → replace-exactly-once → write, all via HTTP."""
-    rel = args.get("path", "") or ""
-    old_text = args.get("old_text", "") or ""
-    new_text = args.get("new_text", "") or ""
-    if not rel:
-        return "Error: path is required"
-    if not old_text:
-        return "Error: old_text is required"
-
-    # Read
-    current = exec_read_file(None, {"path": rel})
-    if current.startswith("Error:"):
-        return current
-
-    count = current.count(old_text)
-    if count == 0:
-        return f"Error: old_text not found in {rel}"
-    if count > 1:
-        return f"Error: old_text matches {count} locations — must be unique"
-    updated = current.replace(old_text, new_text, 1)
-
-    # Write
-    result = exec_write_file(None, {"path": rel, "content": updated})
-    if result.startswith("Error:"):
-        return result
-    return f"Edited {rel} — replaced {len(old_text)} chars with {len(new_text)} chars"
-
-
-def exec_search_files(_workspace_root: Any, args: dict) -> str:
-    """Grep-style recursive search over the Lineage workspace.
-
-    Mirrors Pi's ``search_files`` tool output format so Stelle sees
-    identical results:  ``<path>:<line>: <trimmed-content>``.
-    """
-    query = args.get("query", "") or ""
-    directory = args.get("directory", ".") or "."
-    if not query:
-        return "Error: query is required"
-
-    # Prepend user slug (targeted mode) or leave as-is (company-wide).
-    norm_dir = _rewrite_path(directory if directory != "." else "")
-
-    try:
-        resp = _get_client().post(
-            f"{_base_url()}/search",
-            headers=_headers(),
-            json={
-                "query": query,
-                "path": f"/{norm_dir}" if norm_dir else "",
-                "maxResults": 100,
-            },
-        )
-    except httpx.HTTPError as exc:
-        logger.warning("[lineage_fs] search error: %s", exc)
-        return f"Error: remote search failed: {exc}"
-
-    if resp.status_code == 401:
-        return "Error: run token invalid or expired"
-    if resp.status_code != 200:
-        return f"Error: remote search {resp.status_code}: {resp.text[:200]}"
-
-    data = resp.json()
-    results = data.get("results", [])
-    if not results:
-        return "(no matches)"
-
-    lines = [
-        f"{r.get('path', '?')}:{r.get('line', '?')}: {r.get('text', '')}"
-        for r in results
-    ]
-    if data.get("truncated"):
-        lines.append("... (truncated at 100 matches)")
-    return "\n".join(lines)
-
-
-def exec_bash_lineage_stub(_workspace_root: Any, args: dict) -> str:
-    """Lineage-mode replacement for the local ``bash`` tool.
-
-    Pi's bash ran inside the virtual workspace so the agent could invoke
-    shell pipelines against real workspace files. Under Lineage mode the
-    workspace lives on a remote host; running bash locally on the fly.io
-    container would execute against a scratch filesystem the agent has
-    no reason to touch.
-
-    Rather than silently succeed with bogus results, we fail loud with
-    specific guidance on the tool to use instead.
-    """
-    cmd = (args.get("command") or "")[:120]
-    return (
-        "Error: bash is disabled in Lineage mode — the remote workspace "
-        "is not reachable via a local shell.\n"
-        "Use structured tools instead:\n"
-        "  • read/list/edit/write_file for filesystem ops\n"
-        "  • search_files for grep-style search\n"
-        "  • mention_resolve for LinkedIn URN lookup\n"
-        "  • web_search / fetch_url for web calls\n"
-        f"(rejected command: {cmd!r})"
+    raise LineageIngestionError(
+        f"read_file({rel!r}): direct-mode reader not configured"
     )
 
 
-def exec_submit_draft(_workspace_root: Any, args: dict) -> str:
-    """Submit a FINAL draft — atomic create with all metadata.
-
-    Mirrors the intent of Amphoreus's ``write_file(posts/drafts/<id>/content.md)``
-    BUT in one call sets content + scheduled_date + approvers + rationale.
-    This avoids the v1/v2 duplicate-draft bug that happens when an agent
-    writes a rough pass, then writes a revision as a new file — each
-    write-through DraftsFs created its own ``drafts`` row.
-
-    Required:  user_slug (str), content (str)
-    Optional:  scheduled_date (YYYY-MM-DD), approver_user_ids (list[uuid]),
-               publication_order (int), why_post (str)
+def exec_write_file(_workspace_root: Any, args: dict) -> str:
+    """Writes against the data-source workspace are always refused —
+    the workspace is read-only (it's the client's Supabase data).
+    Scratch writes are dispatched to the fly-local sandbox by the
+    caller; this function only runs for paths that resolved to a
+    client-data mount.
     """
-    user_slug = args.get("user_slug") or ""
-    content = args.get("content") or ""
-    if not user_slug:
-        return "Error: user_slug is required (pick the FOC user this post is for)"
-    if not content:
-        return "Error: content is required"
+    rel = args.get("path", "") or ""
+    return f"Error: {rel} is read-only (client data source, not scratch)"
 
-    payload: dict[str, Any] = {"user_slug": user_slug, "content": content}
-    if args.get("scheduled_date"):
-        payload["scheduled_date"] = args["scheduled_date"]
-    if isinstance(args.get("approver_user_ids"), list):
-        payload["approver_user_ids"] = args["approver_user_ids"]
-    if isinstance(args.get("publication_order"), int):
-        payload["publication_order"] = args["publication_order"]
-    if args.get("why_post"):
-        payload["why_post"] = args["why_post"]
 
-    try:
-        resp = _get_client().post(
-            f"{_base_url()}/submit-draft",
-            headers=_headers(),
-            json=payload,
-        )
-    except httpx.HTTPError as exc:
-        logger.warning("[lineage_fs] submit_draft error: %s", exc)
-        return f"Error: submit_draft call failed: {exc}"
+def exec_edit_file(_workspace_root: Any, args: dict) -> str:
+    rel = args.get("path", "") or ""
+    return f"Error: {rel} is read-only (client data source, not scratch)"
 
-    if resp.status_code == 401:
-        return "Error: run token invalid or expired"
-    if resp.status_code == 404:
-        return resp.text
-    if resp.status_code >= 300:
-        return f"Error: submit_draft {resp.status_code}: {resp.text[:300]}"
 
-    import json as _json
-    out = resp.json()
-    d = out.get("draft") or {}
+def exec_search_files(_workspace_root: Any, args: dict) -> str:
+    """Grep-style recursive search — not implemented in direct mode.
+
+    The direct-mode reader materializes files on demand from Supabase
+    queries; there's no pre-built index to grep over. Callers should
+    list the target directory and read specific files instead.
+    """
     return (
-        "Draft submitted successfully.\n"
-        f"  id: {d.get('id')}\n"
-        f"  status: {d.get('status')}\n"
-        f"  scheduled_date: {d.get('scheduled_date')}\n"
-        f"  approver_ids: {d.get('approver_ids')}\n"
-        f"  title: {(d.get('title') or '')[:80]}\n"
-        "\n"
-        "The draft row is now in Lineage's `drafts` table and a "
-        "review_draft task has been created for the approver(s)."
+        "Error: search_files is not supported in direct-mode reads. "
+        "Use list_directory + read_file to explore the workspace instead."
     )
 
 
 def exec_query_observations(_workspace_root: Any, args: dict) -> str:
-    """Query scored observations via Lineage's ``POST /api/workspace/observations``.
-
-    Parity with Analyst's ``query_observations`` tool. Args mirror
-    Amphoreus exactly: ``min_reward``, ``max_reward``, ``limit``,
-    ``summary_only``. Returns the same JSON shape so Stelle's existing
-    logic (filtering by reward, reading reward_mean / reward_std, etc.)
-    continues to work unchanged.
-
-    Direct-only deployments (the default on Fly — no workspace URL, no
-    run token, reads come from Supabase+GCS) have no virio-api endpoint
-    to POST to, so this tool would fail with a DNS error. Short-circuit
-    with a friendly redirect pointing at the files that carry the same
-    data: ``<slug>/post-history.md`` (top performers) and
-    ``<slug>/engagement/posts.json`` (all scored posts).
+    """Direct-mode redirect — query_observations is not wired in
+    standalone Amphoreus. Point the caller at the engagement JSON
+    files that carry the same data.
     """
-    if not os.environ.get("LINEAGE_WORKSPACE_URL", "").strip():
-        return (
-            "Error: query_observations is unavailable in direct-only Lineage "
-            "mode (no workspace URL configured).\n\n"
-            "Use these file paths instead — same data, different packaging:\n"
-            "  • `<slug>/post-history.md` — top 10 performers with full text "
-            "and engagement metrics. Your baseline.\n"
-            "  • `<slug>/engagement/posts.json` — every scored post with raw "
-            "engagement numbers + per-reaction breakdown. Filter / summarize "
-            "in-context however you need.\n"
-            "  • `<slug>/engagement/reactions.json`, `comments.json`, "
-            "`profiles.json` — engager-level detail if you need it."
-        )
-
-    body: dict[str, Any] = {}
-    for k in ("min_reward", "max_reward", "limit", "summary_only"):
-        if k in args:
-            body[k] = args[k]
-
-    try:
-        resp = _get_client().post(
-            f"{_base_url()}/observations",
-            headers=_headers(),
-            json=body,
-        )
-    except httpx.HTTPError as exc:
-        logger.warning("[lineage_fs] query_observations error: %s", exc)
-        return f"Error: observations call failed: {exc}"
-
-    if resp.status_code == 401:
-        return "Error: run token invalid or expired"
-    if resp.status_code != 200:
-        return f"Error: observations {resp.status_code}: {resp.text[:200]}"
-
-    # Pass through — shape matches Analyst's query_observations output.
-    return resp.text
+    return (
+        "Error: query_observations is not available in direct-only mode.\n\n"
+        "Use these file paths instead — same data, different packaging:\n"
+        "  • `<slug>/post-history.md` — top 10 performers with full text "
+        "and engagement metrics. Your baseline.\n"
+        "  • `<slug>/engagement/posts.json` — every scored post with raw "
+        "engagement numbers + per-reaction breakdown. Filter / summarize "
+        "in-context however you need.\n"
+        "  • `<slug>/engagement/reactions.json`, `comments.json`, "
+        "`profiles.json` — engager-level detail if you need it."
+    )
 
 
 def exec_mention_resolve(_workspace_root: Any, args: dict) -> str:
-    """Resolve a LinkedIn username to a mention URN via Lineage's
-    ``POST /api/workspace/mention-resolve``. Returns the same JSON shape
-    as Pi's ``mention-resolve`` custom command:
-        {"name": ..., "urn": "urn:li:member:...", "url": ...}
-    """
-    raw = (args.get("username") or "").strip()
-    if not raw:
-        return "Error: username is required"
-    username = raw.lstrip("@")
-
-    try:
-        resp = _get_client().post(
-            f"{_base_url()}/mention-resolve",
-            headers=_headers(),
-            json={"username": username},
-        )
-    except httpx.HTTPError as exc:
-        logger.warning("[lineage_fs] mention-resolve error: %s", exc)
-        return f"Error: mention-resolve failed: {exc}"
-
-    if resp.status_code == 404:
-        return f"Error: could not resolve LinkedIn username {username!r}"
-    if resp.status_code == 401:
-        return "Error: run token invalid or expired"
-    if resp.status_code != 200:
-        return f"Error: mention-resolve {resp.status_code}: {resp.text[:200]}"
-
-    import json as _json
-    return _json.dumps(resp.json(), indent=2)
-
-
-def create_review_task(draft_id: str, title: str) -> tuple[bool, str]:
-    """Mirror Pi's post-run hook: create a ``review_draft`` task row so
-    the CS review queue picks up the new draft. No-op in company-wide mode
-    (the agent's explicit ``write_file`` may already have issued this,
-    and we don't know which user the draft belongs to from here).
-    """
-    if not is_lineage_mode():
-        return False, "skipped: not in Lineage mode"
-    try:
-        resp = _get_client().post(
-            f"{_base_url()}/task",
-            headers=_headers(),
-            json={
-                "type": "review_draft",
-                "title": title,
-                "priority": "medium",
-                "entityType": "draft",
-                "entityId": draft_id,
-            },
-        )
-    except httpx.HTTPError as exc:
-        return False, f"Error: task creation failed: {exc}"
-
-    if resp.status_code >= 300:
-        return False, f"Error: task create {resp.status_code}: {resp.text[:200]}"
-    return True, "task created"
+    """Mention-resolve is not available in direct mode (it used to proxy
+    through virio-api's APImaestro-backed resolver; see
+    _lineage_deprecated/http_client.py if reconnecting)."""
+    return "Error: mention_resolve is not available in direct-only mode"
 
 
 # ---------------------------------------------------------------------------
 # Direct helpers used by the runner's post-write path (not tool handlers)
 # ---------------------------------------------------------------------------
-
-
-def write_draft(path: str, content: str) -> tuple[bool, str]:
-    """Write a draft file to the Lineage workspace.
-
-    Returns (ok, message). Used by the final-output phase of Stelle when
-    running in Lineage mode — the path is typically
-    ``{user-slug}/posts/{draft_id}/draft.json``; supabase-fs's DraftsFs
-    maps that to a Supabase ``drafts`` table row.
-    """
-    msg = exec_write_file(None, {"path": path, "content": content})
-    ok = not msg.startswith("Error:")
-    return ok, msg
 
 
 # Directories at the workspace root that aren't FOC-user mounts. Used
@@ -1087,9 +607,9 @@ _SYSTEM_DIRS = frozenset({".pi", "conversations", "slack", "tasks", ".keep"})
 
 
 def resolve_primary_user_slug() -> str | None:
-    """Discover a FOC-user directory in the Lineage workspace.
+    """Discover a FOC-user directory in the workspace.
 
-    supabase-fs mounts one directory per user-with-``posts_content=true``
+    Supabase-fs mounts one directory per user-with-``posts_content=true``
     under the workspace root. For an MVP Stelle run, we pick the first
     non-system directory — later we can let the /generate request specify
     which user the drafts should be attributed to.
@@ -1111,18 +631,11 @@ def resolve_primary_user_slug() -> str | None:
 
 
 def write_draft_for_current_run(draft_id: str, content: str) -> tuple[bool, str]:
-    """Attribute a finished post to the user-targeted FOC user.
+    """Deprecated — the HTTP-mode DraftsFs write path is gone.
 
-    Only meaningful in **user-targeted mode** — when ``LINEAGE_USER_SLUG``
-    is set, this writes to ``{slug}/posts/drafts/{draft_id}/content.md``
-    which DraftsFs parses into a Supabase ``drafts`` row.
-
-    In **company-wide mode** this returns a sentinel ``(False, "skipped: ...")``
-    — the caller is expected to skip the auto-write since the agent will
-    have issued its own ``write_file`` calls with the proper user prefix.
+    Used to write ``{slug}/posts/drafts/{draft_id}/content.md`` which
+    virio-api's DraftsFs mapped to a Jacquard ``drafts`` row. See
+    ``backend/src/_lineage_deprecated/drafts_writer.insert_draft`` for
+    a direct-Supabase equivalent if reconnecting.
     """
-    slug = _targeted_slug()
-    if slug is None:
-        return False, "skipped: company-wide run (agent issues its own write_file calls)"
-    path = f"{slug}/posts/drafts/{draft_id}/content.md"
-    return write_draft(path, content)
+    return False, "deprecated: HTTP-mode drafts write is gone"
