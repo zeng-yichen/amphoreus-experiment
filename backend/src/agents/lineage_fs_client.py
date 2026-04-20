@@ -81,7 +81,11 @@ def _get_client() -> httpx.Client:
 
 
 def is_lineage_mode() -> bool:
-    """True when Stelle has enough config to read Jacquard data.
+    """True when Stelle has enough config to READ Jacquard data.
+
+    This governs filesystem reads (transcripts, engagement, research,
+    context, edits). It does NOT govern write destination — see
+    ``is_lineage_ui_initiated()`` for that.
 
     Required:
       - LINEAGE_COMPANY_ID (which company to query)
@@ -105,6 +109,23 @@ def is_lineage_mode() -> bool:
         and os.environ.get("LINEAGE_RUN_TOKEN", "").strip()
     )
     return direct_ok or http_ok
+
+
+def is_lineage_ui_initiated() -> bool:
+    """True when the run was kicked off from Lineage's UI (via virio-api).
+
+    Governs WRITE DESTINATION — ``submit_draft`` sends drafts to
+    Jacquard's ``drafts`` table when True, to Amphoreus's ``local_posts``
+    when False. Orthogonal to ``is_lineage_mode()`` (which governs
+    reads).
+
+    Signal: ``LINEAGE_WORKSPACE_URL`` is set only when Jacquard's
+    virio-api spawned the run (HTTP-proxy mode). Direct-mode reads and
+    amphoreus.app-initiated runs never set it — data still flows from
+    Jacquard's Supabase, but drafts stay on the Amphoreus side for
+    review in amphoreus.app's Posts tab.
+    """
+    return bool(os.environ.get("LINEAGE_WORKSPACE_URL", "").strip())
 
 
 def _base_url() -> str:

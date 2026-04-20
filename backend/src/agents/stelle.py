@@ -1062,16 +1062,18 @@ def _dispatch_submit_draft(root, args):
             title = stripped.lstrip("#").strip()[:200]
             break
 
-    # 1) Persist the draft. In Lineage mode this lands in Jacquard's
-    # ``drafts`` Supabase table so it shows up in Lineage's review UI.
-    # In local mode (amphoreus.app standalone runs, tests) it lands in
-    # Amphoreus's local_posts table and the operator reviews it at
-    # amphoreus.app/posts. This matches the contract the user wants:
-    # amphoreus.app → Amphoreus; Lineage → Jacquard.
-    destination = "Amphoreus Posts tab"  # updated below in Lineage branch
+    # 1) Persist the draft. Write destination depends ONLY on whether
+    # this run was initiated from Lineage's UI (signal: LINEAGE_WORKSPACE_URL
+    # set by Jacquard's virio-api proxy) — NOT on whether we have read
+    # access to Jacquard's Supabase (which is often true for amphoreus.app
+    # runs too, since both use the same data source).
+    #
+    #   Lineage-UI-initiated  → Jacquard drafts table  (reviewed in Lineage)
+    #   amphoreus.app / other → local_posts            (reviewed in Amphoreus)
+    destination = "Amphoreus Posts tab"  # overwritten below in Lineage branch
     try:
         from backend.src.agents import lineage_fs_client as _lfs
-        _in_lineage = _lfs.is_lineage_mode()
+        _in_lineage = _lfs.is_lineage_ui_initiated()
     except Exception:
         _in_lineage = False
 
@@ -2247,11 +2249,9 @@ create duplicate drafts. Here's how to do the same things correctly:
         why_post="<rationale>",       # stored alongside the draft
       )
 
-  **Where the draft lands.** In Lineage mode, ``submit_draft`` inserts
-  directly into Jacquard's ``drafts`` table (status=``review``) — the
-  draft appears in Lineage's review UI for the FOC user whose slug you
-  passed. The operator reviews and publishes from Lineage the same way
-  they would a Jacquard-native draft.
+  **Where the draft lands.** ``submit_draft`` persists the draft for
+  the FOC user whose slug you passed. The operator reviews from
+  whichever surface triggered this run (Lineage or amphoreus.app).
 
   ``submit_draft`` also runs Castorice fact-check on your content before
   persisting — the fact-check report + citations are appended to
@@ -2331,10 +2331,8 @@ Shared (not user-scoped; don't prepend slug):
 ## Draft write contract
 
 **Use ``submit_draft`` for finished posts.** One call per finished post.
-``submit_draft`` inserts the draft into Jacquard's ``drafts`` table
-(status=``review``) for the FOC user whose slug you passed. It shows
-up in Lineage's review UI alongside Jacquard-native drafts. The
-operator reviews and publishes from Lineage.
+``submit_draft`` persists the draft for the FOC user whose slug you
+passed. The operator reviews from whichever surface triggered this run.
 
 ``submit_draft`` runs Castorice fact-check on your content before
 persisting. The fact-check report + citations are appended to
@@ -2415,9 +2413,8 @@ The slug determines attribution — there is no separate ``author`` field.
 ## Draft write contract
 
 **Use ``submit_draft`` for finished posts.** One call per finished post.
-``submit_draft`` inserts into Jacquard's ``drafts`` table
-(status=``review``) under the target user. The draft appears in
-Lineage's review UI and the operator publishes from there.
+``submit_draft`` persists the draft under the target user. The operator
+publishes from whichever surface triggered this run.
 
 ``submit_draft`` runs Castorice fact-check on your content before
 persisting. The fact-check report + citations are appended to
@@ -4153,30 +4150,30 @@ def _process_result(
     except Exception:
         _sqlite_available = False
 
-    # In Lineage mode, ``submit_draft`` is the one write path to posts —
-    # Castorice fact-check, local_posts insert, RuanMei observation, and
-    # Ordinal-side bookkeeping all happen inside that wrapper. Repeating
-    # the work in the write_result loop produces duplicate local_posts
-    # rows (one with scheduling metadata from submit_draft, one without
-    # from here) and burns Castorice/why-post/validation API calls a
-    # second time for no added value. Short-circuit the heavy
-    # post-processing when running under Lineage.
-    in_lineage = False
+    # ``submit_draft`` is the one write path to posts — Castorice
+    # fact-check, persist, RuanMei observation all happen inside its
+    # wrapper. Repeating that work in the write_result loop produces
+    # duplicate rows and burns API calls for no added value. Short-
+    # circuit the heavy post-processing whenever the Jacquard data source
+    # is live — our proxy for "the submit_draft wrapper was active and
+    # fired per-post".
+    skip_per_post_processing = False
     try:
         from backend.src.agents import lineage_fs_client as _lfs
-        in_lineage = _lfs.is_lineage_mode()
+        skip_per_post_processing = _lfs.is_lineage_mode()
     except Exception:
-        in_lineage = False
+        skip_per_post_processing = False
 
     castorice = Castorice()
     output_lines = [f"# {client_name.upper()} — ONE-SHOT POSTS (Stelle)\n"]
     output_lines.append(f"Generated {len(posts)} posts via jacquard-style agentic workflow.\n")
-    if in_lineage:
+    if skip_per_post_processing:
         output_lines.append(
-            "_Lineage mode: per-post fact-check, validation, and local_posts "
-            "persistence were already handled by `submit_draft`. This file is "
-            "a minimal dump of the result; authoritative drafts live in the "
-            "Amphoreus Posts tab._\n"
+            "_Per-post fact-check, validation, and draft persistence were "
+            "already handled by `submit_draft`. This file is a minimal dump "
+            "of the result; authoritative drafts live in their destination "
+            "table (local_posts for amphoreus.app runs, Jacquard drafts for "
+            "Lineage-UI runs)._\n"
         )
 
     verification = result.get("verification", "")
@@ -4235,7 +4232,7 @@ def _process_result(
         # SQLite persist) was already done per-post by submit_draft's
         # wrapper. Skip to the next post to avoid duplicate writes and
         # duplicate API spend.
-        if in_lineage:
+        if skip_per_post_processing:
             output_lines.append("---\n")
             continue
 
@@ -4417,44 +4414,24 @@ def generate_one_shot(
     NOT injected — everything beyond transcripts + observations is a tool
     call.
     """
-    # Lineage-only contract: Stelle REQUIRES the Lineage workspace as her
-    # data source. Pure-local runs (reading from memory/<company>/ on disk)
-    # are no longer supported — every run must have LINEAGE_WORKSPACE_URL +
-    # LINEAGE_RUN_TOKEN set so Stelle can read transcripts, engagement,
-    # research, context, and edit history from Jacquard via the workspace
-    # HTTP API (or direct Supabase+GCS when GCS_CREDENTIALS_B64 is also set).
-    #
-    # If you're seeing this error, the /api/ghostwriter/generate handler
-    # didn't wire up Lineage env vars for this run. Likely causes:
-    #   - caller didn't pass ``companyId`` and the slug-to-Jacquard-UUID
-    #     lookup came back empty
-    #   - GHOSTWRITER_SHARED_SECRET or JACQUARD_WORKSPACE_URL not set
-    #   - caller is Jacquard's virio-api but it didn't forward the
-    #     X-Lineage-Workspace-URL / Authorization Bearer headers
+    # Data-source detection is best-effort: if Jacquard's Supabase is
+    # reachable and the company resolves, reads come from there. Otherwise
+    # reads are empty (Phase 2 will add a fly-local memory/<slug>/ fallback).
+    # Either way Stelle runs — the write destination is decided separately
+    # by is_lineage_ui_initiated() in _dispatch_submit_draft.
     try:
         from backend.src.agents.lineage_fs_client import is_lineage_mode
         _lineage_active = is_lineage_mode()
     except Exception as _lm_err:
-        raise RuntimeError(
-            f"Stelle requires Lineage mode, but lineage_fs_client could not be "
-            f"imported: {_lm_err}"
-        ) from _lm_err
+        logger.warning("[Stelle] lineage_fs_client unavailable: %s", _lm_err)
+        _lineage_active = False
 
     if not _lineage_active:
-        raise RuntimeError(
-            "Stelle refuses to run without Lineage mode. The workspace "
-            "(transcripts, engagement, research, context, edits) must come "
-            "from Jacquard — pure-local memory/<company>/ runs are no "
-            "longer supported.\n\n"
-            "For direct-mode (no virio-api), the subprocess needs:\n"
-            "  - LINEAGE_COMPANY_ID (Jacquard user_companies.id UUID)\n"
-            "  - GCS_CREDENTIALS_B64 (service account JSON for the "
-            "lino-meeting-transcripts bucket)\n"
-            "  - SUPABASE_URL + SUPABASE_KEY (shared Jacquard project)\n\n"
-            "If you're hitting this via the ghostwriter API, verify the "
-            "request's company slug or companyId resolves to a Jacquard "
-            "user_companies row and that the GCS/Supabase creds are in "
-            "the parent process env."
+        logger.info(
+            "[Stelle] running without Jacquard data source — transcripts/"
+            "engagement/research reads will return empty. Ensure the "
+            "company slug is registered in Jacquard's user_companies or "
+            "expect generic output."
         )
 
     # --- CLI mode: run through Claude CLI with Max plan (no API cost) ---
