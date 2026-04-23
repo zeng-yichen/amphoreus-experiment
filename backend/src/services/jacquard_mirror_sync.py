@@ -959,8 +959,17 @@ def _load_virio_serviced_company_ids(amph) -> set[str]:
     Expanded 2026-04-23 (later same day): the original narrowing only
     checked ``local_posts`` — too tight for newly-onboarded clients
     we haven't drafted for yet (Vendelux being the surfaced case).
+    Expanded again the same day after a client audit showed 24
+    Virio-serviced companies were being silently skipped: Commenda,
+    Netlify, Concord Visa, AICRO, Crescendo, Koah, Mappedin, etc. —
+    every one had an ``ordinal_auth`` row (i.e. a Virio-owned Ordinal
+    API key) but no local_posts / cyrene_briefs / context yet.
+
     A Virio client is now recognised by ANY of:
 
+      * ``ordinal_auth`` row (Virio has an Ordinal API key for them —
+        strongest signal; the ``ordinal_auth`` table is Virio's Ordinal
+        workspace directory mirrored into Amphoreus)
       * ``local_posts`` row (we've drafted for them)
       * ``cyrene_briefs`` row (we've run Cyrene for them)
       * ``context_files`` row with ``_source='amphoreus'``
@@ -968,13 +977,25 @@ def _load_virio_serviced_company_ids(amph) -> set[str]:
       * ``meetings`` row with ``_source='amphoreus'``
         (Tribbie/Cyrene live-interviewed someone at this client)
       * explicit inclusion via ``AMPHOREUS_VIRIO_CLIENT_COMPANY_IDS``
-        env var — comma-separated UUIDs, for clients that genuinely
-        have none of the above signals yet but we still want scraped
-        (e.g. just-onboarded clients in pre-work stage)
+        env var — comma-separated UUIDs, for edge cases not caught
+        above
 
     Union semantics: a company only needs ONE signal to qualify.
     """
     ids: set[str] = set()
+
+    # Signal 0 (strongest): ordinal_auth membership. Every row is a
+    # Virio-owned Ordinal workspace key keyed by company_id — if it's
+    # mirrored here, Virio actively services this client.
+    try:
+        rows = (
+            amph.table("ordinal_auth").select("company_id")
+                .limit(500).execute().data
+            or []
+        )
+        ids.update(str(r["company_id"]) for r in rows if r.get("company_id"))
+    except Exception as exc:
+        logger.warning("[mirror_sync] ordinal_auth lookup failed: %s", exc)
 
     # Signal 1: local_posts (we've drafted for them)
     try:
@@ -1058,9 +1079,13 @@ def _load_tracked_creators(jcq, amph=None) -> list[str]:
          creators dominating 58% of mirrored posts — `areganti` alone
          was 23% of the entire mirror).
 
-    ``is_internal`` is deliberately NOT filtered: Virio teammates who
-    have Stelle generate their posts need their own LinkedIn history
-    mirrored so Stelle can voice-match.
+    ``is_internal=true`` (Virio teammates) is narrowed by the
+    ``AMPHOREUS_VIRIO_TEAMMATE_USERNAMES`` env var when set — a
+    comma-separated allowlist of LinkedIn usernames to keep from the
+    Virio internal company. When unset, ALL internal teammates are
+    included (legacy behaviour; was 18 people as of 2026-04-23 —
+    ~90 actor calls/week of Apify spend for no downstream consumer
+    since cross-teammate retrieval isn't wired).
 
     We extract the username from ``linkedin_url`` with a simple regex —
     Amphoreus doesn't store a dedicated ``linkedin_username`` column.
@@ -1079,6 +1104,19 @@ def _load_tracked_creators(jcq, amph=None) -> list[str]:
             "Jacquard customers' FOCs)"
         )
 
+    # Internal-teammate allowlist: when set, only these usernames count
+    # from ``is_internal=true`` rows. Non-internal FOCs are unaffected.
+    teammate_allowlist_raw = os.environ.get(
+        "AMPHOREUS_VIRIO_TEAMMATE_USERNAMES", "",
+    ).strip()
+    teammate_allowlist: Optional[set[str]] = None
+    if teammate_allowlist_raw:
+        teammate_allowlist = {
+            u.strip().lower().rstrip("/")
+            for u in teammate_allowlist_raw.split(",")
+            if u.strip()
+        }
+
     try:
         q = (
             jcq.table("users")
@@ -1093,14 +1131,24 @@ def _load_tracked_creators(jcq, amph=None) -> list[str]:
         logger.warning("[mirror_sync] _load_tracked_creators failed: %s", exc)
         return []
     out: set[str] = set()
+    teammate_dropped = 0
     for u in resp.data or []:
         url_v = (u.get("linkedin_url") or "").strip()
         m = _re.search(r"linkedin\.com/in/([^/?#]+)", url_v)
-        if m:
-            out.add(m.group(1).strip().lower().rstrip("/"))
+        if not m:
+            continue
+        uname = m.group(1).strip().lower().rstrip("/")
+        # If internal + allowlist configured, skip when not in allowlist.
+        if teammate_allowlist is not None and bool(u.get("is_internal")):
+            if uname not in teammate_allowlist:
+                teammate_dropped += 1
+                continue
+        out.add(uname)
     logger.info(
-        "[mirror_sync] tracked_creators: %d creators from %d Virio-serviced companies",
-        len(out), len(virio_company_ids),
+        "[mirror_sync] tracked_creators: %d creators from %d Virio-serviced companies "
+        "(teammate_dropped=%d%s)",
+        len(out), len(virio_company_ids), teammate_dropped,
+        " [allowlist active]" if teammate_allowlist else "",
     )
     return sorted(out)
 
