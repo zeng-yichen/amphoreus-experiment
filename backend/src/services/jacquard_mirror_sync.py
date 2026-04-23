@@ -954,19 +954,93 @@ def _load_virio_serviced_company_ids(amph) -> set[str]:
     row across Jacquard's multi-tenant users table — which included
     FOCs from OTHER Jacquard customers (areganti / kevinparknz /
     growthspecialist etc.) that Virio has no relationship with. Result
-    was ~58% of the mirrored linkedin_posts were non-Virio creators,
-    polluting voice-reference reads and wasting mirror space.
+    was ~58% of the mirrored linkedin_posts were non-Virio creators.
+
+    Expanded 2026-04-23 (later same day): the original narrowing only
+    checked ``local_posts`` — too tight for newly-onboarded clients
+    we haven't drafted for yet (Vendelux being the surfaced case).
+    A Virio client is now recognised by ANY of:
+
+      * ``local_posts`` row (we've drafted for them)
+      * ``cyrene_briefs`` row (we've run Cyrene for them)
+      * ``context_files`` row with ``_source='amphoreus'``
+        (operator uploaded context for them)
+      * ``meetings`` row with ``_source='amphoreus'``
+        (Tribbie/Cyrene live-interviewed someone at this client)
+      * explicit inclusion via ``AMPHOREUS_VIRIO_CLIENT_COMPANY_IDS``
+        env var — comma-separated UUIDs, for clients that genuinely
+        have none of the above signals yet but we still want scraped
+        (e.g. just-onboarded clients in pre-work stage)
+
+    Union semantics: a company only needs ONE signal to qualify.
     """
+    ids: set[str] = set()
+
+    # Signal 1: local_posts (we've drafted for them)
     try:
         rows = (
             amph.table("local_posts").select("company")
                 .limit(5000).execute().data
             or []
         )
+        ids.update(r["company"] for r in rows if r.get("company"))
     except Exception as exc:
-        logger.warning("[mirror_sync] Virio-company lookup failed: %s", exc)
-        return set()
-    return {r["company"] for r in rows if r.get("company")}
+        logger.warning("[mirror_sync] local_posts company lookup failed: %s", exc)
+
+    # Signal 2: cyrene_briefs (we've run Cyrene for them)
+    try:
+        rows = (
+            amph.table("cyrene_briefs").select("company")
+                .limit(1000).execute().data
+            or []
+        )
+        ids.update(r["company"] for r in rows if r.get("company"))
+    except Exception as exc:
+        logger.debug("[mirror_sync] cyrene_briefs company lookup failed: %s", exc)
+
+    # Signal 3: context_files uploaded in Amphoreus (operator context push)
+    try:
+        rows = (
+            amph.table("context_files").select("company_id")
+                .eq("_source", "amphoreus")
+                .limit(1000).execute().data
+            or []
+        )
+        # Note: context_files stores UUID in company_id, cast to string
+        # to match the rest of the set which is UUID-as-string.
+        ids.update(str(r["company_id"]) for r in rows if r.get("company_id"))
+    except Exception as exc:
+        logger.debug("[mirror_sync] context_files company lookup failed: %s", exc)
+
+    # Signal 4: meetings with _source='amphoreus' (live-interviewed)
+    try:
+        rows = (
+            amph.table("meetings").select("calendar_attendees")
+                .eq("_source", "amphoreus")
+                .limit(500).execute().data
+            or []
+        )
+        for r in rows:
+            attend = r.get("calendar_attendees") or {}
+            if not isinstance(attend, dict):
+                continue
+            cid = attend.get("amphoreus_company_id")
+            if cid:
+                ids.add(str(cid))
+    except Exception as exc:
+        logger.debug("[mirror_sync] meetings company lookup failed: %s", exc)
+
+    # Signal 5: explicit env override — for clients that have no
+    # Amphoreus-side activity yet but we still want in the scrape set.
+    # Comma-separated company UUIDs, whitespace tolerated.
+    override = os.environ.get("AMPHOREUS_VIRIO_CLIENT_COMPANY_IDS", "").strip()
+    if override:
+        for uuid_str in override.split(","):
+            uuid_str = uuid_str.strip()
+            if uuid_str:
+                ids.add(uuid_str)
+
+    return ids
 
 
 def _load_tracked_creators(jcq, amph=None) -> list[str]:
