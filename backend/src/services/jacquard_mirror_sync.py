@@ -1061,6 +1061,18 @@ def _load_virio_serviced_company_ids(amph) -> set[str]:
             if uuid_str:
                 ids.add(uuid_str)
 
+    # Exclusion — subtract company UUIDs that one of the above signals
+    # flagged but we explicitly don't want scraped. Virio-DEV is the
+    # canonical case: it has an ordinal_auth row (dev workspace slug
+    # ``virioai``) so ordinal_auth matches it, but it's our staging
+    # tenant, not a real client. Same comma-separated UUID format.
+    excluded = os.environ.get("AMPHOREUS_EXCLUDED_COMPANY_IDS", "").strip()
+    if excluded:
+        for uuid_str in excluded.split(","):
+            uuid_str = uuid_str.strip()
+            if uuid_str:
+                ids.discard(uuid_str)
+
     return ids
 
 
