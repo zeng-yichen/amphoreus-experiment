@@ -15,7 +15,7 @@ import {
   startOfWeek,
 } from "date-fns";
 import { Calendar, ChevronLeft, ChevronRight } from "lucide-react";
-import { ghostwriterApi, postsApi, imagesApi } from "@/lib/api";
+import { ghostwriterApi, postsApi, imagesApi, type Comment } from "@/lib/api";
 import Link from "next/link";
 
 interface TerminalLine {
@@ -58,28 +58,51 @@ export default function GhostwriterIDE() {
   const [posts, setPosts] = useState<any[]>([]);
   const [loadingPosts, setLoadingPosts] = useState(false);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
+  // LinkedIn handle is now read-only from Jacquard's users.linkedin_url.
+  // The local-edit inputs/savers were removed — source of truth lives
+  // server-side so the two stores can't drift.
   const [linkedinUsername, setLinkedinUsername] = useState<string | null | undefined>(undefined);
-  const [linkedinInput, setLinkedinInput] = useState("");
-  const [savingUsername, setSavingUsername] = useState(false);
   const terminalRef = useRef<HTMLDivElement>(null);
 
   // Story mode: show Amphoreus story lines instead of raw tool calls.
   // We start with production-safe defaults on BOTH server and client
-  // (isLocalhost=false, storyMode=true) to avoid a hydration mismatch.
-  // After mount, the effect below flips these if we're actually on
-  // localhost — so devs still get the debug view and toggle by default.
-  const [isLocalhost, setIsLocalhost] = useState(false);
+  // (storyMode=true) to avoid a hydration mismatch, then reconcile
+  // with the real preference on mount.
+  //
+  // Preference precedence (mount-time):
+  //   1. localStorage ``amphoreus.storyMode`` if set — explicit user
+  //      choice, persists across reloads and companies.
+  //   2. Otherwise: storyMode=true in prod, storyMode=false on
+  //      localhost (devs default to the debug view). The toggle
+  //      button is available everywhere, so anyone can flip and
+  //      the choice sticks.
+  const _STORY_MODE_STORAGE_KEY = "amphoreus.storyMode";
   const [storyMode, setStoryMode] = useState(true);
   const [storyLines, setStoryLines] = useState<string[]>([]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(_STORY_MODE_STORAGE_KEY);
+    if (stored === "true" || stored === "false") {
+      setStoryMode(stored === "true");
+      return;
+    }
+    // No explicit preference — fall back to host-based default.
     const host = window.location.hostname;
     if (host === "localhost" || host === "127.0.0.1") {
-      setIsLocalhost(true);
       setStoryMode(false);
     }
   }, []);
+
+  const toggleStoryMode = () => {
+    setStoryMode((v) => {
+      const next = !v;
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(_STORY_MODE_STORAGE_KEY, String(next));
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     fetch("/amphoreus_story.json")
@@ -131,18 +154,6 @@ export default function GhostwriterIDE() {
       .catch(() => setLinkedinUsername(null));
   }, [company]);
 
-  async function handleSaveUsername() {
-    if (!linkedinInput.trim()) return;
-    setSavingUsername(true);
-    try {
-      const res = await ghostwriterApi.saveLinkedInUsername(company, linkedinInput);
-      setLinkedinUsername(res.username);
-      setLinkedinInput("");
-    } finally {
-      setSavingUsername(false);
-    }
-  }
-
   const loadRuns = useCallback(async () => {
     setLoadingRuns(true);
     try {
@@ -189,34 +200,84 @@ export default function GhostwriterIDE() {
   // user navigate away (or close + reopen) and rejoin the live terminal.
   const activeJobKey = `amphoreus_stelle_job_${company}`;
 
+  // Polling-based event consumer. Replaces the old SSE iterator —
+  // SSE was hanging silently for ~15-30s after Generate click (proxy
+  // buffering / first-event delay), which looked indistinguishable
+  // from "broken" to the operator. Refresh worked because it hit the
+  // REST endpoint, which is exactly what polling does on a timer now.
+  //
+  // Implementation notes:
+  //   - Dedupes by run_events.id (stored in the `id` query param on
+  //     subsequent polls as `after_id` — a hint only; the client also
+  //     tracks a Set of seen ids so reconnects / double-fires don't
+  //     render dupes).
+  //   - 2s poll interval → ≤2s event latency. Imperceptible over
+  //     multi-minute Stelle runs.
+  //   - Stops when the run reaches a terminal status OR when the
+  //     caller flips ``cancelledRef.current``.
   const consumeStream = useCallback(
-    async (jobId: string, afterId = 0) => {
-      try {
-        for await (const data of ghostwriterApi.streamJob(jobId, afterId)) {
-          // Always store the raw event. Story-mode vs debug-mode
-          // presentation is decided at render time so toggling the
-          // button instantly swaps all lines (past and future).
-          const text = extractText(data);
-          setLines((prev) => [
-            ...prev,
-            {
-              type: data.type === "done" ? "done" : data.type === "error" ? "error" : (data.type as string),
-              text,
-              timestamp: (data.timestamp || Date.now() / 1000) * 1000,
-            },
-          ]);
-          if (data.type === "done" || data.type === "error") {
+    async (
+      jobId: string,
+      afterId = 0,
+      cancelledRef?: { current: boolean },
+    ) => {
+      const seen = new Set<number>();
+      let cursor = afterId;
+      const POLL_MS = 2_000;
+
+      const applyEvents = (events: Array<{ id: number; event_type: string; data: unknown; timestamp: number }>) => {
+        const fresh = events.filter((ev) => !seen.has(ev.id) && ev.id > cursor);
+        if (fresh.length === 0) return;
+        const toAppend: TerminalLine[] = fresh.map((ev) => {
+          seen.add(ev.id);
+          if (ev.id > cursor) cursor = ev.id;
+          const parsed =
+            typeof ev.data === "string"
+              ? (() => {
+                  try {
+                    return JSON.parse(ev.data as string);
+                  } catch {
+                    return {};
+                  }
+                })()
+              : ev.data || {};
+          return {
+            type: ev.event_type,
+            text: extractText({ type: ev.event_type, data: parsed }),
+            timestamp: ev.timestamp * 1000,
+          };
+        });
+        setLines((prev) => [...prev, ...toAppend]);
+      };
+
+      while (true) {
+        if (cancelledRef?.current) return;
+        try {
+          const res = await ghostwriterApi.getRunEvents(jobId);
+          applyEvents(res.events || []);
+          const status = res.run?.status;
+          if (status === "completed" || status === "failed") {
+            setLines((prev) => [
+              ...prev,
+              {
+                type: status === "failed" ? "error" : "done",
+                text: status === "failed"
+                  ? `Run ${status}: ${res.run?.error || "(no error detail)"}`
+                  : "Run completed.",
+                timestamp: Date.now(),
+              },
+            ]);
             localStorage.removeItem(activeJobKey);
             setIsGenerating(false);
+            return;
           }
+        } catch (e) {
+          // Transient fetch error — keep polling, but surface after
+          // repeated failures so the operator knows something's wrong.
+          // For now just log silently; polling will self-heal on the
+          // next tick.
         }
-        setIsGenerating(false);
-      } catch (e) {
-        setLines((prev) => [
-          ...prev,
-          { type: "error", text: String(e), timestamp: Date.now() },
-        ]);
-        setIsGenerating(false);
+        await new Promise((r) => setTimeout(r, POLL_MS));
       }
     },
     [activeJobKey],
@@ -248,57 +309,119 @@ export default function GhostwriterIDE() {
     }
   }
 
-  // On mount: if a job was in-flight when the user navigated away or
-  // closed the tab, rehydrate the terminal from run_events and resume
-  // the live stream from the last event id.
+  // On mount: rehydrate the terminal with the most recent run's events
+  // so a page refresh preserves what the user was looking at.
+  //
+  // Behavior:
+  //   - If a job is in-flight (localStorage key present OR the latest
+  //     run is status=running): load history, then resume the live SSE
+  //     stream from the last event id.
+  //   - If the latest run is completed/failed: load history read-only;
+  //     no stream resume.
+  //   - If the client has never had a run: terminal stays empty.
+  //
+  // Previously we cleared the terminal entirely on refresh for any
+  // completed/failed run, which lost the Irontomb reactions and
+  // submit_draft confirmations the operator wanted to review.
   useEffect(() => {
-    const savedJobId = localStorage.getItem(activeJobKey);
-    if (!savedJobId) return;
     let cancelled = false;
 
     (async () => {
-      try {
-        const res = await ghostwriterApi.getRunEvents(savedJobId);
-        if (cancelled) return;
-        const status = res.run?.status;
-        if (status === "completed" || status === "failed") {
-          localStorage.removeItem(activeJobKey);
+      // Pick the run to rehydrate: saved "in-flight" job wins, else the
+      // most recent run for this client.
+      const savedJobId = localStorage.getItem(activeJobKey);
+      let runId: string | null = savedJobId;
+      if (!runId) {
+        try {
+          const listing = await ghostwriterApi.getRuns(company, 1);
+          runId = listing.runs?.[0]?.id ?? null;
+        } catch {
           return;
         }
-        setIsGenerating(true);
-        setActiveTab("terminal");
-        const hist: TerminalLine[] = res.events.map((ev) => {
-          const parsed =
-            typeof ev.data === "string"
-              ? (() => {
-                  try {
-                    return JSON.parse(ev.data as string);
-                  } catch {
-                    return {};
-                  }
-                })()
-              : ev.data || {};
-          return {
-            type: ev.event_type,
-            text: extractText({ type: ev.event_type, data: parsed }),
-            timestamp: ev.timestamp * 1000,
-          };
-        });
-        setLines([
-          { type: "status", text: `Rejoining job ${savedJobId}…`, timestamp: Date.now() },
-          ...hist,
-        ]);
-        const maxId = res.events.reduce((m, e) => (e.id > m ? e.id : m), 0);
-        await consumeStream(savedJobId, maxId);
+      }
+      if (!runId || cancelled) return;
+
+      let res;
+      try {
+        res = await ghostwriterApi.getRunEvents(runId);
       } catch {
         localStorage.removeItem(activeJobKey);
+        return;
+      }
+      if (cancelled) return;
+
+      const status = res.run?.status;
+      const isLive = status !== "completed" && status !== "failed";
+
+      const hist: TerminalLine[] = res.events.map((ev) => {
+        const parsed =
+          typeof ev.data === "string"
+            ? (() => {
+                try {
+                  return JSON.parse(ev.data as string);
+                } catch {
+                  return {};
+                }
+              })()
+            : ev.data || {};
+        return {
+          type: ev.event_type,
+          text: extractText({ type: ev.event_type, data: parsed }),
+          timestamp: ev.timestamp * 1000,
+        };
+      });
+
+      // Headline reflects why we're showing history — "Rejoining…" on
+      // live runs (stream will append), "Last run (…)" on ended runs.
+      // Race guard — the async fetches above can take 100s of ms. If
+      // the user clicked Generate in that window, ``handleGenerate`` has
+      // already cleared ``lines`` and pushed "Job started", AND stored
+      // the NEW job id in localStorage. We must NOT clobber their state
+      // or resume a stale stream for the (old) run we just fetched.
+      const currentSavedId = localStorage.getItem(activeJobKey);
+      const raceLost = currentSavedId !== null && currentSavedId !== runId;
+
+      const headline = isLive
+        ? `Rejoining job ${runId}…`
+        : `Last run (${status}) — ${runId}`;
+
+      // setLines via updater so we can observe the current state and
+      // bail if the user has already populated it. Keep the activeTab
+      // switch unconditional — they're going to the terminal either way.
+      let alreadyInteracted = false;
+      setLines((prev) => {
+        if (prev.length > 0) {
+          alreadyInteracted = true;
+          return prev;
+        }
+        return [
+          { type: "status", text: headline, timestamp: Date.now() },
+          ...hist,
+        ];
+      });
+      setActiveTab("terminal");
+
+      if (raceLost || alreadyInteracted) {
+        // User started something; their consumeStream is authoritative.
+        return;
+      }
+
+      if (isLive) {
+        setIsGenerating(true);
+        const maxId = res.events.reduce((m, e) => (e.id > m ? e.id : m), 0);
+        await consumeStream(runId, maxId);
+      } else {
+        // Only drop the stale key if it's the one we resolved against.
+        if (currentSavedId === runId) {
+          localStorage.removeItem(activeJobKey);
+        }
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [activeJobKey, consumeStream]);
+  }, [activeJobKey, company, consumeStream]);
 
   return (
     <div className="flex h-screen flex-col">
@@ -328,50 +451,48 @@ export default function GhostwriterIDE() {
         >
           {isGenerating ? "Generating..." : "Generate"}
         </button>
-        {isLocalhost && (
-          <button
-            onClick={() => setStoryMode((v) => !v)}
-            className="rounded-lg border border-stone-300 px-3 py-1.5 text-xs text-stone-500 transition-colors hover:bg-stone-100"
-            title={storyMode ? "Switch to debug view (tool calls)" : "Switch to story mode"}
-          >
-            {storyMode ? "Debug" : "Story"}
-          </button>
-        )}
+        <button
+          onClick={toggleStoryMode}
+          className="rounded-lg border border-stone-300 px-3 py-1.5 text-xs text-stone-500 transition-colors hover:bg-stone-100"
+          title={
+            storyMode
+              ? "Switch to debug view — show the real tool calls + model output"
+              : "Switch to story mode — show the Amphoreus narrative overlay"
+          }
+        >
+          {storyMode ? "Debug" : "Story"}
+        </button>
       </header>
 
-      {/* LinkedIn username prompt */}
+      {/* LinkedIn handle display — read-only.
+          The canonical source is now Jacquard's users.linkedin_url;
+          the in-app editor was retired to prevent the two-stores-drift
+          bug that caused Maxwell-as-Flora's-FOC. If the handle is
+          wrong, fix it in Jacquard.
+       */}
       {linkedinUsername === null && (
-        <div className="flex items-center gap-3 border-b border-amber-200 bg-amber-50 px-6 py-2.5">
-          <span className="shrink-0 text-sm text-amber-800">
-            <span className="font-semibold">LinkedIn username required</span> — needed to look up past posts and push to Ordinal.
+        <div className="flex items-center gap-3 border-b border-amber-200 bg-amber-50 px-6 py-2.5 text-sm text-amber-800">
+          <span className="font-semibold">No LinkedIn handle on file for this FOC</span>
+          <span className="text-amber-700">
+            — set <code className="rounded bg-amber-100 px-1 font-mono text-[11px]">users.linkedin_url</code> in Jacquard so Stelle can pull voice + dedup history.
           </span>
-          <input
-            value={linkedinInput}
-            onChange={(e) => setLinkedinInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleSaveUsername()}
-            placeholder="e.g. andrew-hume (after linkedin.com/in/)"
-            className="flex-1 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm focus:border-amber-500 focus:outline-none"
-          />
-          <button
-            onClick={handleSaveUsername}
-            disabled={savingUsername || !linkedinInput.trim()}
-            className="shrink-0 rounded-lg bg-amber-500 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-amber-600 disabled:opacity-50"
-          >
-            {savingUsername ? "Saving..." : "Save"}
-          </button>
         </div>
       )}
       {linkedinUsername && (
-        <div className="flex items-center gap-2 border-b border-stone-100 bg-stone-50 px-6 py-1.5 text-xs text-stone-400">
-          <span>LinkedIn:</span>
-          <span className="font-medium text-stone-600">{linkedinUsername}</span>
-          <button
-            onClick={() => setLinkedinUsername(null)}
-            className="ml-1 text-stone-300 hover:text-stone-500"
-            title="Change username"
+        <div className="flex items-center gap-3 border-b border-stone-100 bg-stone-50 px-6 py-2 text-xs text-stone-500">
+          <span className="text-stone-400">LinkedIn:</span>
+          <a
+            href={`https://linkedin.com/in/${linkedinUsername}`}
+            target="_blank"
+            rel="noreferrer"
+            className="font-medium text-stone-700 underline decoration-stone-300 underline-offset-2 hover:decoration-stone-600"
+            title="Open LinkedIn profile in new tab"
           >
-            ✎
-          </button>
+            {linkedinUsername}
+          </a>
+          <span className="ml-auto text-[11px] text-stone-400">
+            Source: Jacquard <code className="rounded bg-stone-200 px-1 font-mono">users.linkedin_url</code>. Edit there if wrong.
+          </span>
         </div>
       )}
 
@@ -807,6 +928,28 @@ function PostsManager({
   const [editText, setEditText] = useState("");
   const [factReport, setFactReport] = useState<{ id: string; report: string } | null>(null);
   const [citationData, setCitationData] = useState<Record<string, string[]>>({});
+
+  // Comments (draft_feedback) state. Per-post so toggling one panel
+  // doesn't clobber another's loaded list.
+  const [commentsByPost, setCommentsByPost] = useState<Record<string, Comment[]>>({});
+  const [openCommentsFor, setOpenCommentsFor] = useState<string | null>(null);
+  const [composerText, setComposerText] = useState<Record<string, string>>({});
+  // Inline mode — populated by the selection handler inside the post
+  // (2026-04-23) Removed ``composerSelection`` + ``captureInlineSelection``.
+  // The composer textarea below the body is now post-wide-ONLY — the
+  // old onMouseUp auto-staging of a highlighted range into the
+  // composer was confusing (a "Commenting on selection…" blurb would
+  // appear without the operator having opted in). Inline comments are
+  // created exclusively through the right-click popup
+  // (``openInlineCommentPopup``), which is explicit and matches the
+  // mental model operators expect from any other text editor.
+  // Inline-edit-in-place state for existing comments.
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingCommentText, setEditingCommentText] = useState("");
+  // Soft cross-highlight: hover/click a mark or its rail card →
+  // briefly highlight the matching pair so the operator can see the
+  // anchor relationship at a glance.
+  const [highlightedCommentId, setHighlightedCommentId] = useState<string | null>(null);
   const [imageJobId, setImageJobId] = useState<string | null>(null);
   const [imageLines, setImageLines] = useState<{ type: string; text: string }[]>([]);
   const [generatingImageFor, setGeneratingImageFor] = useState<string | null>(null);
@@ -835,6 +978,31 @@ function PostsManager({
       })
       .finally(() => setLoadingOrdinalUsers(false));
   }, [pushModalPost, pushAllOpen, company]);
+
+  // Prefetch comments so each post card can show a "N comments" badge
+  // without the operator having to open the panel. Parallel fetch, silent
+  // on failure — per-post panels still refetch on toggle/mutation, so a
+  // prefetch miss just means the badge is blank until then.
+  useEffect(() => {
+    const ids = posts.map((p) => p.id).filter(Boolean);
+    if (ids.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      ids.map((id) =>
+        postsApi.listComments(id, true)
+          .then((res) => [id, res.comments ?? []] as const)
+          .catch(() => [id, [] as Comment[]] as const),
+      ),
+    ).then((pairs) => {
+      if (cancelled) return;
+      setCommentsByPost((cur) => {
+        const next = { ...cur };
+        for (const [id, list] of pairs) next[id] = list;
+        return next;
+      });
+    });
+    return () => { cancelled = true; };
+  }, [posts]);
 
   function openPushModal(post: any) {
     setPushPublishLocal(defaultPublishDatetimeLocal());
@@ -954,6 +1122,86 @@ function PostsManager({
     try {
       await postsApi.delete(postId);
       onRefresh();
+    } catch (e) {
+      // Surface the backend detail string instead of silently swallowing —
+      // a missing catch here turned real 500s into "button did nothing."
+      window.alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      onAction(null);
+    }
+  }
+
+  // Reject — distinct from Delete. Preserves the draft row + all paired
+  // draft_feedback comments so Stelle / Aglaea can learn from the
+  // rejection on future runs. Use when the client explicitly turns
+  // down a draft (Ordinal "Blocked" or equivalent).
+  async function handleReject(postId: string) {
+    const reason = prompt(
+      "Reject this draft?\n\n" +
+        "The draft + all client comments will be preserved as a negative " +
+        "learning signal for Stelle / Aglaea. The draft will NOT appear " +
+        "as dedup signal on future runs.\n\n" +
+        "Optional reason (press Enter to skip):",
+      ""
+    );
+    if (reason === null) return; // user cancelled
+    onAction(postId);
+    try {
+      await postsApi.reject(postId, reason || undefined);
+      onRefresh();
+    } finally {
+      onAction(null);
+    }
+  }
+
+  // Manually pair this draft to the LinkedIn post that was actually
+  // published. Asks the operator for the PST/PDT calendar day the post
+  // went live; the server converts to UTC, matches against
+  // linkedin_posts for the creator on that LA day, and stamps
+  // matched_provider_urn on the draft. Stelle's next run then renders
+  // DELTA (draft → published) inline in the post bundle — the signal
+  // that was dormant after Ordinal churned.
+  async function handleSetPublishDate(postId: string) {
+    // Default to today's LA date — the most common case. Users type
+    // over it for back-fills.
+    const todayLA = new Date().toLocaleDateString("en-CA", {
+      timeZone: "America/Los_Angeles",
+    }); // "YYYY-MM-DD"
+    const input = prompt(
+      "Pair this draft with its published LinkedIn post.\n\n" +
+        "Enter the date the FOC published it (PST/PDT, YYYY-MM-DD).\n" +
+        "The server finds the matching LinkedIn post from their page " +
+        "on that calendar day and links the two.\n\n" +
+        "Requires: the post must already be scraped into our mirror.",
+      todayLA,
+    );
+    if (!input) return;
+    const trimmed = input.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      alert("Date must be YYYY-MM-DD.");
+      return;
+    }
+    onAction(postId);
+    try {
+      const r = await postsApi.setPublishDate(postId, trimmed);
+      alert(
+        `Paired.\n\n` +
+          `Published: ${(r.matched_posted_at || "").slice(0, 16)}\n` +
+          `Reactions: ${r.matched_reactions}\n` +
+          `Hook: "${r.matched_hook}"`,
+      );
+      onRefresh();
+    } catch (err: any) {
+      // Server returns 409 for zero-match / multi-match — surface the
+      // detail message so the operator knows whether to retry after
+      // the next scrape or disambiguate.
+      const detail =
+        err?.body?.detail ?? err?.message ?? "Pairing failed.";
+      alert(
+        typeof detail === "string"
+          ? `Pair failed: ${detail}`
+          : `Pair failed: ${JSON.stringify(detail, null, 2)}`,
+      );
     } finally {
       onAction(null);
     }
@@ -993,6 +1241,287 @@ function PostsManager({
       setEditingId(null);
       setEditText("");
       onRefresh();
+    } finally {
+      onAction(null);
+    }
+  }
+
+  // --- Comments (draft_feedback) ---
+  // Load comments for a single post; used on panel toggle and after
+  // every mutation so counts stay accurate.
+  async function refreshComments(postId: string) {
+    try {
+      const res = await postsApi.listComments(postId, true);
+      setCommentsByPost((m) => ({ ...m, [postId]: res.comments ?? [] }));
+    } catch {
+      // Mirror may be pre-migration; show empty list rather than an error.
+      setCommentsByPost((m) => ({ ...m, [postId]: [] }));
+    }
+  }
+
+  function toggleComments(postId: string) {
+    setOpenCommentsFor((cur) => {
+      const next = cur === postId ? null : postId;
+      if (next) void refreshComments(postId);
+      return next;
+    });
+  }
+
+  async function handleAddComment(postId: string) {
+    // Post-wide only — inline comments go through the right-click
+    // popup (``openInlineCommentPopup``). No selection to thread here.
+    const body = (composerText[postId] || "").trim();
+    if (!body) return;
+    onAction(postId);
+    try {
+      await postsApi.addComment(postId, body, {
+        authorEmail: null,   // backend stamps from auth when wired
+        authorName: null,
+      });
+      setComposerText((m) => ({ ...m, [postId]: "" }));
+      await refreshComments(postId);
+    } finally {
+      onAction(null);
+    }
+  }
+
+  async function handleResolveComment(postId: string, commentId: string) {
+    try {
+      await postsApi.resolveComment(postId, commentId);
+      await refreshComments(postId);
+    } catch {}
+  }
+
+  async function handleDeleteComment(postId: string, commentId: string) {
+    if (!window.confirm("Delete this comment? This cannot be undone.")) return;
+    try {
+      await postsApi.deleteComment(postId, commentId);
+      await refreshComments(postId);
+    } catch {}
+  }
+
+  function startEditingComment(c: Comment) {
+    setEditingCommentId(c.id);
+    setEditingCommentText(c.body);
+  }
+
+  async function handleSaveEditComment(postId: string, commentId: string) {
+    const next = editingCommentText.trim();
+    if (!next) return;
+    try {
+      await postsApi.editComment(postId, commentId, next);
+      setEditingCommentId(null);
+      setEditingCommentText("");
+      await refreshComments(postId);
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // Pair-scrolling helpers used by the highlight ↔ comment-card link.
+  // Scoped to a single post via the prefix so two cards on the page
+  // can't collide on element ids.
+  function scrollToCommentCard(postId: string, commentId: string) {
+    setHighlightedCommentId(commentId);
+    const el = document.getElementById(`cmt-card-${postId}-${commentId}`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    window.setTimeout(() => setHighlightedCommentId(null), 1500);
+  }
+  function scrollToCommentMark(postId: string, commentId: string) {
+    setHighlightedCommentId(commentId);
+    const el = document.getElementById(`cmt-mark-${postId}-${commentId}`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => setHighlightedCommentId(null), 1500);
+  }
+
+  // Right-click inline-comment popup. When the operator selects text
+  // in a post body and right-clicks, we pop an anchored composer at
+  // the cursor so they can drop a thought without scrolling to the
+  // comment rail. The popup targets feel like the rest of the
+  // ghostwriter page (dark surface, cyan accents, thin rings).
+  //
+  // Shape: ``{postId, content, x, y, selection}`` — content is the
+  // full post body text (used to re-verify the offsets if the popup
+  // re-renders), x/y are viewport-space pixel coordinates where the
+  // card anchors, selection is the captured {start, end, text}.
+  const [inlinePopup, setInlinePopup] = useState<
+    | {
+        postId: string;
+        content: string;
+        x: number;
+        y: number;
+        selection: { start: number; end: number; text: string };
+        draft: string;
+      }
+    | null
+  >(null);
+  const [inlinePopupBusy, setInlinePopupBusy] = useState(false);
+  const inlinePopupTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Click-on-mark edit/delete popup. Left-clicking an existing inline
+  // highlight opens a compact card at the mark's position showing the
+  // comment body with Edit + Delete affordances. Replaces the older
+  // "scroll to rail" behavior — the rail still exists, but editing
+  // inline without leaving the draft is the expected flow. Shares
+  // theme with ``inlinePopup`` (the add-comment variant) so the two
+  // paths feel like the same primitive.
+  const [markPopup, setMarkPopup] = useState<
+    | {
+        postId: string;
+        commentId: string;
+        x: number;
+        y: number;
+        mode: "view" | "edit";
+        draft: string;
+      }
+    | null
+  >(null);
+  const [markPopupBusy, setMarkPopupBusy] = useState(false);
+  const markPopupTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  function openMarkPopup(
+    e: React.MouseEvent<HTMLElement>,
+    postId: string,
+    commentId: string,
+    initialBody: string,
+  ) {
+    e.preventDefault();
+    e.stopPropagation();
+    setMarkPopup({
+      postId,
+      commentId,
+      x: e.clientX,
+      y: e.clientY,
+      mode: "view",
+      draft: initialBody,
+    });
+  }
+
+  async function handleMarkPopupSaveEdit() {
+    if (!markPopup) return;
+    const next = markPopup.draft.trim();
+    if (!next) return;
+    setMarkPopupBusy(true);
+    try {
+      await postsApi.editComment(markPopup.postId, markPopup.commentId, next);
+      await refreshComments(markPopup.postId);
+      setMarkPopup(null);
+    } catch (e) {
+      window.alert(`Edit failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setMarkPopupBusy(false);
+    }
+  }
+
+  async function handleMarkPopupDelete() {
+    if (!markPopup) return;
+    if (!window.confirm("Delete this inline comment? The highlighted text will lose its mark.")) return;
+    setMarkPopupBusy(true);
+    try {
+      await postsApi.deleteComment(markPopup.postId, markPopup.commentId);
+      await refreshComments(markPopup.postId);
+      setMarkPopup(null);
+    } catch (e) {
+      window.alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setMarkPopupBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!markPopup) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMarkPopup(null);
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && markPopup?.mode === "edit") {
+        e.preventDefault();
+        void handleMarkPopupSaveEdit();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [markPopup]);
+
+  // onContextMenu handler bound to each post's rendered body. Reads
+  // the current browser selection, resolves it to char offsets inside
+  // ``postContent``, suppresses the native menu, and opens the popup
+  // at the click coordinates. Falls through (native menu shows) when
+  // there's no selection — operators can still copy/paste via right-
+  // click on un-selected text.
+  function openInlineCommentPopup(
+    e: React.MouseEvent<HTMLElement>,
+    postId: string,
+    postContent: string,
+  ) {
+    if (typeof window === "undefined") return;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;                     // no selection → native menu
+    const text = sel.toString();
+    if (!text.trim()) return;
+    const start = postContent.indexOf(text);
+    if (start < 0) return;                                    // selection spans outside body
+    e.preventDefault();
+    const end = start + text.length;
+    setInlinePopup({
+      postId,
+      content: postContent,
+      x: e.clientX,
+      y: e.clientY,
+      selection: { start, end, text },
+      draft: "",
+    });
+    // Defer focus until the popup has mounted + react committed.
+    requestAnimationFrame(() => {
+      inlinePopupTextareaRef.current?.focus();
+    });
+  }
+
+  async function handleInlinePopupSave() {
+    if (!inlinePopup) return;
+    const body = inlinePopup.draft.trim();
+    if (!body) return;
+    setInlinePopupBusy(true);
+    try {
+      await postsApi.addComment(inlinePopup.postId, body, {
+        authorEmail: null,
+        authorName: null,
+        selection: inlinePopup.selection,
+      });
+      await refreshComments(inlinePopup.postId);
+      // Make sure the newly-commented post's rail is open so the
+      // operator sees their comment land.
+      setOpenCommentsFor(inlinePopup.postId);
+      setInlinePopup(null);
+    } catch (e) {
+      window.alert(`Could not save comment: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setInlinePopupBusy(false);
+    }
+  }
+
+  // Dismiss the popup on Escape + on clicks outside its box. We don't
+  // use a portal because the popup never leaves the page's scrolling
+  // viewport, and anchoring to viewport coordinates is enough.
+  useEffect(() => {
+    if (!inlinePopup) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") { setInlinePopup(null); }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [inlinePopup]);
+
+  // --- Revert to Stelle's original (pre-Castorice). ---
+  async function handleRevertToOriginal(postId: string) {
+    if (!window.confirm(
+      "Revert this post's content to Stelle's original version (before Castorice fact-check)? " +
+      "The current version will be saved in the revision history and can be restored from there later."
+    )) return;
+    onAction(postId);
+    try {
+      await postsApi.revertToOriginal(postId);
+      onRefresh();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
     } finally {
       onAction(null);
     }
@@ -1042,6 +1571,185 @@ function PostsManager({
 
   return (
     <div className="space-y-3">
+      {/* Inline-comment popup. Anchored at the operator's right-click
+          point in the post body; dismisses on Escape or click-outside.
+          Theme: dark surface with thin cyan ring to match the rest of
+          the ghostwriter page without competing for attention. The
+          backdrop is transparent so the operator keeps seeing the
+          highlighted text while they type. */}
+      {inlinePopup && (
+        <div
+          className="fixed inset-0 z-[60]"
+          onClick={() => { if (!inlinePopupBusy) setInlinePopup(null); }}
+        >
+          <div
+            role="dialog"
+            aria-label="Add inline comment"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              // Keep the card inside the viewport even when the click
+              // lands in the far-right/bottom corner. Clamp rather
+              // than transform-translate so textarea selection stays
+              // pixel-aligned for keyboard navigation.
+              left: Math.min(Math.max(12, inlinePopup.x), (typeof window !== "undefined" ? window.innerWidth : 2000) - 340),
+              top: Math.min(Math.max(12, inlinePopup.y + 8), (typeof window !== "undefined" ? window.innerHeight : 2000) - 220),
+            }}
+            className="absolute w-[22rem] rounded-lg border border-stone-700 bg-stone-900/95 p-3 shadow-2xl ring-1 ring-cyan-900/40 backdrop-blur"
+          >
+            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-cyan-400">
+              Inline comment
+            </div>
+            <div className="mb-2 rounded border border-amber-400/30 bg-amber-300/10 px-2 py-1 text-[11px] italic text-amber-200">
+              “{inlinePopup.selection.text.slice(0, 140)}{inlinePopup.selection.text.length > 140 ? "…" : ""}”
+            </div>
+            <textarea
+              ref={inlinePopupTextareaRef}
+              value={inlinePopup.draft}
+              onChange={(e) => setInlinePopup((p) => p ? { ...p, draft: e.target.value } : p)}
+              onKeyDown={(e) => {
+                // Cmd/Ctrl-Enter commits; Escape cancels (handled at window level).
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                  e.preventDefault();
+                  void handleInlinePopupSave();
+                }
+              }}
+              rows={3}
+              placeholder="What's the issue with this chunk?"
+              disabled={inlinePopupBusy}
+              className="w-full resize-none rounded border border-stone-700 bg-stone-950 px-2 py-1.5 text-sm text-stone-100 placeholder:text-stone-500 focus:border-cyan-700 focus:outline-none focus:ring-1 focus:ring-cyan-800"
+            />
+            <div className="mt-2 flex items-center justify-between">
+              <span className="text-[10px] text-stone-500">
+                {inlinePopup.draft.trim().length > 0 ? "⌘↵ to save · Esc to cancel" : "Esc to cancel"}
+              </span>
+              <div className="flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => { if (!inlinePopupBusy) setInlinePopup(null); }}
+                  disabled={inlinePopupBusy}
+                  className="rounded px-2 py-1 text-xs text-stone-400 hover:text-stone-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleInlinePopupSave()}
+                  disabled={inlinePopupBusy || !inlinePopup.draft.trim()}
+                  className="rounded bg-cyan-950 px-2.5 py-1 text-xs font-medium text-cyan-300 ring-1 ring-cyan-800 hover:bg-cyan-900 disabled:opacity-40"
+                >
+                  {inlinePopupBusy ? "Saving…" : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mark-click edit/delete popup. Same theme as the add-comment
+          popup above, but anchored on an existing highlight and
+          showing view→edit transitions + a delete affordance. */}
+      {markPopup && (
+        <div
+          className="fixed inset-0 z-[60]"
+          onClick={() => { if (!markPopupBusy) setMarkPopup(null); }}
+        >
+          <div
+            role="dialog"
+            aria-label="Edit inline comment"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              left: Math.min(Math.max(12, markPopup.x), (typeof window !== "undefined" ? window.innerWidth : 2000) - 340),
+              top:  Math.min(Math.max(12, markPopup.y + 8), (typeof window !== "undefined" ? window.innerHeight : 2000) - 220),
+            }}
+            className="absolute w-[22rem] rounded-lg border border-stone-700 bg-stone-900/95 p-3 shadow-2xl ring-1 ring-amber-400/20 backdrop-blur"
+          >
+            <div className="mb-1.5 flex items-center justify-between">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+                Inline comment
+              </div>
+              {(() => {
+                const c = (commentsByPost[markPopup.postId] ?? []).find((x) => x.id === markPopup.commentId);
+                if (!c) return null;
+                const author = (c.author_email || c.author_name || "").trim();
+                if (!author) return null;
+                return <div className="text-[10px] text-stone-500">{author}</div>;
+              })()}
+            </div>
+
+            {markPopup.mode === "view" ? (
+              <>
+                <div className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded border border-stone-700 bg-stone-950/60 px-2 py-1.5 text-xs text-stone-200">
+                  {markPopup.draft || <span className="italic text-stone-500">(empty)</span>}
+                </div>
+                <div className="mt-2 flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => void handleMarkPopupDelete()}
+                    disabled={markPopupBusy}
+                    className="rounded px-2 py-1 text-xs text-red-400 hover:bg-red-950/30 hover:text-red-300 disabled:opacity-40"
+                  >
+                    Delete
+                  </button>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => { if (!markPopupBusy) setMarkPopup(null); }}
+                      disabled={markPopupBusy}
+                      className="rounded px-2 py-1 text-xs text-stone-400 hover:text-stone-200"
+                    >
+                      Close
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMarkPopup((p) => p ? { ...p, mode: "edit" } : p);
+                        requestAnimationFrame(() => markPopupTextareaRef.current?.focus());
+                      }}
+                      disabled={markPopupBusy}
+                      className="rounded bg-cyan-950 px-2.5 py-1 text-xs font-medium text-cyan-300 ring-1 ring-cyan-800 hover:bg-cyan-900 disabled:opacity-40"
+                    >
+                      Edit
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <textarea
+                  ref={markPopupTextareaRef}
+                  value={markPopup.draft}
+                  onChange={(e) => setMarkPopup((p) => p ? { ...p, draft: e.target.value } : p)}
+                  rows={4}
+                  disabled={markPopupBusy}
+                  className="w-full resize-none rounded border border-stone-700 bg-stone-950 px-2 py-1.5 text-sm text-stone-100 focus:border-cyan-700 focus:outline-none focus:ring-1 focus:ring-cyan-800"
+                />
+                <div className="mt-2 flex items-center justify-between">
+                  <span className="text-[10px] text-stone-500">⌘↵ to save · Esc to cancel</span>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setMarkPopup((p) => p ? { ...p, mode: "view" } : p)}
+                      disabled={markPopupBusy}
+                      className="rounded px-2 py-1 text-xs text-stone-400 hover:text-stone-200"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleMarkPopupSaveEdit()}
+                      disabled={markPopupBusy || !markPopup.draft.trim()}
+                      className="rounded bg-cyan-950 px-2.5 py-1 text-xs font-medium text-cyan-300 ring-1 ring-cyan-800 hover:bg-cyan-900 disabled:opacity-40"
+                    >
+                      {markPopupBusy ? "Saving…" : "Save"}
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {pushModalPost && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div
@@ -1245,14 +1953,10 @@ function PostsManager({
           {posts.length} post{posts.length !== 1 ? "s" : ""}
         </h3>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => openPushAllModal()}
-            disabled={posts.length === 0 || actionInProgress !== null}
-            className="rounded bg-cyan-950 px-2.5 py-1 text-xs font-medium text-cyan-300 ring-1 ring-cyan-800 hover:bg-cyan-900 disabled:opacity-40"
-          >
-            Push all to Ordinal
-          </button>
+          {/* "Push all to Ordinal" removed 2026-04-23 — Virio churning
+              off Ordinal; backend returns 410 Gone. Drafts still land
+              in Amphoreus local_posts and the calendar; publishing will
+              move to the replacement pipeline. */}
           <button onClick={onRefresh} className="text-xs text-stone-500 hover:text-stone-300">
             Refresh
           </button>
@@ -1336,44 +2040,464 @@ function PostsManager({
             </div>
           ) : (
             <>
-              {/* Permansor score badge */}
-              {post.permansor_score != null && (
+              {/* Fact-checked pill — shown when Castorice edited the draft */}
+              {post.pre_revision_content && (
                 <div className="mb-2 flex items-center gap-2">
-                  <span className={`rounded px-2 py-0.5 text-[10px] font-medium ${
-                    post.permansor_score >= 4 ? "bg-emerald-950 text-emerald-400" :
-                    post.permansor_score >= 3.5 ? "bg-amber-950 text-amber-400" :
-                    "bg-red-950 text-red-400"
-                  }`}>
-                    Permansor {post.permansor_score.toFixed(1)}/5
+                  <span className="rounded bg-stone-800 px-2 py-0.5 text-[10px] text-stone-400">
+                    Fact-checked
                   </span>
-                  {post.pre_revision_content && (
-                    <span className="rounded bg-stone-800 px-2 py-0.5 text-[10px] text-stone-400">
-                      Revised by SELF-REFINE
-                    </span>
-                  )}
                 </div>
               )}
 
-              {/* Pre-revision toggle */}
+              {/* Pre-revision toggle + revert-to-original */}
               {post.pre_revision_content && (
                 <details className="mb-3">
                   <summary className="cursor-pointer text-xs text-stone-500 hover:text-stone-300">
-                    Show original draft (before Permansor revision)
+                    Show original draft (before fact-checking)
                   </summary>
                   <div className="mt-2 max-h-[min(50vh,20rem)] overflow-y-auto rounded border border-stone-700/50 bg-stone-950/30 p-3">
                     <pre className="whitespace-pre-wrap break-words text-sm text-stone-400">
                       {post.pre_revision_content}
                     </pre>
                   </div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleRevertToOriginal(post.id)}
+                      disabled={actionInProgress === post.id}
+                      className="rounded bg-stone-800 px-2.5 py-1 text-xs text-stone-300 hover:bg-stone-700 disabled:opacity-40"
+                      title="Replace the current content with Stelle's original. The current version stays in the revision history."
+                    >
+                      ↺ Revert to Stelle&rsquo;s original
+                    </button>
+                    <span className="text-[11px] text-stone-500">
+                      Keeps the current version in revision history.
+                    </span>
+                  </div>
                 </details>
               )}
 
-              {/* Current (revised) post content */}
-              <div className="mb-3 max-h-[min(70vh,32rem)] overflow-y-auto rounded border border-stone-800/80 bg-stone-950/50 p-3">
-                <pre className="whitespace-pre-wrap break-words text-sm text-stone-200">
-                  {post.content || ""}
-                </pre>
-              </div>
+              {/* Body + inline-comment rail. Two columns when inline
+                  comments exist; full-width otherwise. The body wraps
+                  each inline-comment selection in a <mark> element so
+                  the operator can SEE which passages have feedback,
+                  and click-syncs to the rail card. onMouseUp captures
+                  fresh selections to seed the next inline comment. */}
+              {(() => {
+                const allComments = commentsByPost[post.id] ?? [];
+                const inlineComments = allComments
+                  .filter((c) => c.selection_start != null && c.selection_end != null && !!c.selected_text)
+                  .sort((a, b) => (a.selection_start! - b.selection_start!));
+                const postWide = allComments.filter((c) => !inlineComments.includes(c));
+                const content = post.content || "";
+
+                // Build the body as a list of plain-text spans + <mark>
+                // wrappers. Validity check: the text at the stored
+                // offsets must still equal the stored selected_text —
+                // operator edits can desync them, in which case we
+                // skip the highlight (the comment still lives in the
+                // rail, badged 'stale').
+                type Piece = { text: string; commentId?: string; stale?: boolean };
+                const pieces: Piece[] = [];
+                {
+                  let cursor = 0;
+                  for (const c of inlineComments) {
+                    const s = c.selection_start ?? -1;
+                    const e = c.selection_end ?? -1;
+                    if (s < cursor || e <= s || e > content.length) continue; // overlap / past edits
+                    if (content.slice(s, e) !== c.selected_text) continue;     // stale; skip mark
+                    if (s > cursor) pieces.push({ text: content.slice(cursor, s) });
+                    pieces.push({ text: content.slice(s, e), commentId: c.id });
+                    cursor = e;
+                  }
+                  if (cursor < content.length) pieces.push({ text: content.slice(cursor) });
+                }
+                const isStale = (c: Comment) =>
+                  c.selection_start == null || c.selection_end == null ||
+                  content.slice(c.selection_start, c.selection_end) !== c.selected_text;
+
+                return (
+                  <div className="mb-3 flex gap-3">
+                    {/* Left: body with marks */}
+                    <div className="flex-1 max-h-[min(70vh,32rem)] overflow-y-auto rounded border border-stone-800/80 bg-stone-950/50 p-3">
+                      <pre
+                        className="whitespace-pre-wrap break-words text-sm text-stone-200"
+                        onContextMenu={(e) => openInlineCommentPopup(e, post.id, content)}
+                      >
+                        {pieces.length > 0
+                          ? pieces.map((p, i) =>
+                              p.commentId ? (
+                                <mark
+                                  key={`mark-${i}`}
+                                  id={`cmt-mark-${post.id}-${p.commentId}`}
+                                  onClick={(e) => {
+                                    // Left-click → edit/delete popup
+                                    // anchored on the mark itself. The
+                                    // comment's body text is looked up
+                                    // on the fly from commentsByPost so
+                                    // an edit made in the rail reflects
+                                    // here without extra state sync.
+                                    const body =
+                                      (commentsByPost[post.id] ?? []).find(
+                                        (c) => c.id === p.commentId,
+                                      )?.body ?? "";
+                                    openMarkPopup(e, post.id, p.commentId!, body);
+                                  }}
+                                  onMouseEnter={() => setHighlightedCommentId(p.commentId!)}
+                                  onMouseLeave={() => setHighlightedCommentId(null)}
+                                  className={`cursor-pointer rounded px-0.5 transition-colors ${
+                                    highlightedCommentId === p.commentId
+                                      ? "bg-amber-300/70 text-stone-950"
+                                      : "bg-amber-300/25 text-stone-100 hover:bg-amber-300/45"
+                                  }`}
+                                  title="Click to edit or delete this comment"
+                                >
+                                  {p.text}
+                                </mark>
+                              ) : (
+                                <span key={`txt-${i}`}>{p.text}</span>
+                              )
+                            )
+                          : content}
+                      </pre>
+                    </div>
+
+                    {/* Right: inline-comment rail. Only renders when
+                        inline comments exist — no point in a blank
+                        column otherwise. */}
+                    {inlineComments.length > 0 && (
+                      <aside className="w-72 shrink-0 max-h-[min(70vh,32rem)] overflow-y-auto rounded border border-stone-800/80 bg-stone-950/30 p-2">
+                        <div className="mb-1.5 flex items-center justify-between px-1">
+                          <span className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                            Inline comments
+                          </span>
+                          <span className="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200">
+                            {inlineComments.filter((c) => !c.resolved).length}/{inlineComments.length}
+                          </span>
+                        </div>
+                        <div className="space-y-1.5">
+                          {inlineComments.map((c) => {
+                            const stale = isStale(c);
+                            const editing = editingCommentId === c.id;
+                            return (
+                              <div
+                                key={c.id}
+                                id={`cmt-card-${post.id}-${c.id}`}
+                                onMouseEnter={() => setHighlightedCommentId(c.id)}
+                                onMouseLeave={() => setHighlightedCommentId(null)}
+                                onClick={() => !stale && scrollToCommentMark(post.id, c.id)}
+                                className={`cursor-pointer rounded border p-1.5 text-[11px] transition-colors ${
+                                  c.resolved
+                                    ? "border-stone-800 bg-stone-900/30 text-stone-500"
+                                    : highlightedCommentId === c.id
+                                      ? "border-amber-500/60 bg-amber-500/10 text-stone-100"
+                                      : "border-stone-700 bg-stone-900/70 text-stone-200"
+                                }`}
+                              >
+                                <div
+                                  className={`mb-1 truncate text-[10px] italic ${stale ? "text-stone-600 line-through" : "text-emerald-400/80"}`}
+                                  title={c.selected_text || ""}
+                                >
+                                  &ldquo;{c.selected_text}&rdquo;
+                                  {stale && <span className="ml-1 not-italic">stale</span>}
+                                </div>
+                                {editing ? (
+                                  <>
+                                    <textarea
+                                      value={editingCommentText}
+                                      onChange={(e) => setEditingCommentText(e.target.value)}
+                                      rows={3}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="w-full rounded border border-stone-600 bg-stone-950 px-1.5 py-1 text-[11px] text-stone-100 focus:border-stone-400 focus:outline-none"
+                                    />
+                                    <div className="mt-1 flex justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+                                      <button
+                                        type="button"
+                                        onClick={() => { setEditingCommentId(null); setEditingCommentText(""); }}
+                                        className="text-[10px] text-stone-500 hover:text-stone-300"
+                                      >
+                                        cancel
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleSaveEditComment(post.id, c.id)}
+                                        disabled={!editingCommentText.trim()}
+                                        className="rounded bg-stone-700 px-2 py-0.5 text-[10px] font-medium text-stone-100 hover:bg-stone-600 disabled:opacity-40"
+                                      >
+                                        save
+                                      </button>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <div className="whitespace-pre-wrap break-words">{c.body}</div>
+                                )}
+                                <div className="mt-1 flex items-center justify-between text-[9px] text-stone-500" onClick={(e) => e.stopPropagation()}>
+                                  <span className="truncate">
+                                    {c.author_name || c.author_email || "operator"}
+                                  </span>
+                                  {!editing && (
+                                    <span className="flex shrink-0 gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => startEditingComment(c)}
+                                        className="text-stone-500 hover:text-stone-300"
+                                        title="Edit"
+                                      >
+                                        edit
+                                      </button>
+                                      {!c.resolved && (
+                                        <button
+                                          type="button"
+                                          onClick={() => void handleResolveComment(post.id, c.id)}
+                                          className="text-stone-500 hover:text-emerald-400"
+                                        >
+                                          resolve
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleDeleteComment(post.id, c.id)}
+                                        className="text-stone-500 hover:text-red-400"
+                                      >
+                                        delete
+                                      </button>
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </aside>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Castorice notes: why_post rationale + citation_comments.
+                  Previously invisible in the UI and only visible after
+                  push (as Ordinal thread comments). Surfaced here
+                  (2026-04-23) so the operator can review rationale +
+                  fact-check receipts BEFORE pushing. Collapsed by
+                  default so the card stays compact; operator opens
+                  when they want to audit. Null-return when both are
+                  empty — no empty expander ceremony. */}
+              {(() => {
+                const whyPost = (post.why_post || "").trim();
+                let citations: string[] = [];
+                const cc = post.citation_comments;
+                if (cc) {
+                  if (Array.isArray(cc)) {
+                    citations = cc.filter((x: unknown): x is string => typeof x === "string");
+                  } else if (typeof cc === "string") {
+                    // Stored as JSON string in local_posts.citation_comments.
+                    try {
+                      const parsed = JSON.parse(cc);
+                      if (Array.isArray(parsed)) {
+                        citations = parsed.filter((x: unknown): x is string => typeof x === "string");
+                      }
+                    } catch {
+                      /* not valid JSON — treat as a single string entry */
+                      if (cc.trim()) citations = [cc.trim()];
+                    }
+                  }
+                }
+                if (!whyPost && citations.length === 0) return null;
+                const labelBits = [
+                  whyPost ? "rationale" : "",
+                  citations.length ? `${citations.length} citation${citations.length !== 1 ? "s" : ""}` : "",
+                ].filter(Boolean).join(" · ");
+                return (
+                  <details className="mb-3 rounded border border-stone-800 bg-stone-950/40">
+                    <summary className="cursor-pointer px-3 py-1.5 text-xs text-stone-400 hover:text-stone-200 list-none">
+                      <span className="font-medium">Castorice notes</span>
+                      {labelBits && (
+                        <span className="ml-2 text-[10px] text-stone-500">{labelBits}</span>
+                      )}
+                    </summary>
+                    <div className="space-y-3 border-t border-stone-800/70 px-3 py-2 text-xs text-stone-300">
+                      {whyPost && (
+                        <div>
+                          <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-stone-500">
+                            Why we&apos;re posting this (internal)
+                          </div>
+                          <div className="whitespace-pre-wrap">{whyPost}</div>
+                        </div>
+                      )}
+                      {citations.length > 0 && (
+                        <div>
+                          <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-stone-500">
+                            Citations ({citations.length})
+                          </div>
+                          <ul className="space-y-2">
+                            {citations.map((c, i) => (
+                              <li
+                                key={i}
+                                className="rounded border border-stone-800 bg-stone-900/60 p-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap"
+                              >
+                                {c}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </details>
+                );
+              })()}
+
+              {/* Post-wide comments panel (collapsible). Inline ones
+                  already live in the right rail above; this section is
+                  for free-form notes that don't anchor to any passage. */}
+              {(() => {
+                const allComments = commentsByPost[post.id] ?? [];
+                const postWideComments = allComments.filter(
+                  (c) => c.selection_start == null || c.selection_end == null,
+                );
+                const inlineCount = allComments.length - postWideComments.length;
+                const openWide = postWideComments.filter((c) => !c.resolved).length;
+                const isOpen = openCommentsFor === post.id;
+                return (
+                  <div className="mb-3">
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => toggleComments(post.id)}
+                        className="rounded bg-stone-800 px-2.5 py-1 text-xs text-stone-300 hover:bg-stone-700"
+                      >
+                        {isOpen ? "Hide" : "Show"} post-wide comments
+                        {postWideComments.length > 0 && (
+                          <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${openWide > 0 ? "bg-amber-500/30 text-amber-200" : "bg-stone-700 text-stone-400"}`}>
+                            {openWide > 0 ? `${openWide} open` : postWideComments.length}
+                          </span>
+                        )}
+                      </button>
+                      {inlineCount > 0 && (
+                        <span className="text-[10px] text-stone-500">
+                          + {inlineCount} inline {inlineCount === 1 ? "comment" : "comments"} in side rail
+                        </span>
+                      )}
+                      {/* (2026-04-23) The "Commenting on selection…"
+                          blurb used to live here. Removed once the
+                          right-click inline-comment popup shipped —
+                          the blurb was a leftover artifact of the
+                          auto-staging onMouseUp path that no longer
+                          exists. Inline comments now route exclusively
+                          through the popup; the composer below is
+                          post-wide only. */}
+                    </div>
+                    {isOpen && (
+                      <div className="mt-2 space-y-2 rounded border border-stone-800 bg-stone-950/40 p-3">
+                        {postWideComments.length === 0 ? (
+                          <p className="text-[11px] italic text-stone-500">
+                            No post-wide comments yet. Add one below — or highlight text in the post above to leave an inline comment.
+                          </p>
+                        ) : (
+                          postWideComments.map((c) => {
+                            const editing = editingCommentId === c.id;
+                            return (
+                              <div
+                                key={c.id}
+                                className={`rounded border p-2 text-xs ${c.resolved ? "border-stone-800 bg-stone-900/30 text-stone-500" : "border-stone-700 bg-stone-900/70 text-stone-200"}`}
+                              >
+                                {editing ? (
+                                  <>
+                                    <textarea
+                                      value={editingCommentText}
+                                      onChange={(e) => setEditingCommentText(e.target.value)}
+                                      rows={4}
+                                      className="w-full rounded border border-stone-600 bg-stone-950 px-2 py-1.5 text-xs text-stone-100 focus:border-stone-400 focus:outline-none"
+                                    />
+                                    <div className="mt-1 flex justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => { setEditingCommentId(null); setEditingCommentText(""); }}
+                                        className="text-[11px] text-stone-500 hover:text-stone-300"
+                                      >
+                                        cancel
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleSaveEditComment(post.id, c.id)}
+                                        disabled={!editingCommentText.trim()}
+                                        className="rounded bg-stone-700 px-2.5 py-0.5 text-[11px] font-medium text-stone-100 hover:bg-stone-600 disabled:opacity-40"
+                                      >
+                                        save
+                                      </button>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <div className="whitespace-pre-wrap">{c.body}</div>
+                                )}
+                                <div className="mt-1 flex items-center justify-between text-[10px] text-stone-500">
+                                  <span>
+                                    {c.author_name || c.author_email || "operator"}
+                                    {" · "}
+                                    {new Date(c.created_at).toLocaleString()}
+                                    {c.resolved && <span className="ml-2 text-stone-600">resolved</span>}
+                                  </span>
+                                  {!editing && (
+                                    <span className="flex gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => startEditingComment(c)}
+                                        className="text-stone-500 hover:text-stone-300"
+                                      >
+                                        edit
+                                      </button>
+                                      {!c.resolved && (
+                                        <button
+                                          type="button"
+                                          onClick={() => void handleResolveComment(post.id, c.id)}
+                                          className="text-stone-500 hover:text-emerald-400"
+                                        >
+                                          resolve
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleDeleteComment(post.id, c.id)}
+                                        className="text-stone-500 hover:text-red-400"
+                                      >
+                                        delete
+                                      </button>
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+
+                        <div className="pt-1">
+                          <textarea
+                            value={composerText[post.id] || ""}
+                            onChange={(e) =>
+                              setComposerText((m) => ({ ...m, [post.id]: e.target.value }))
+                            }
+                            rows={2}
+                            placeholder="Leave a post-wide comment. Cyrene will see unresolved comments on the next rewrite."
+                            className="w-full rounded border border-stone-700 bg-stone-950 px-2 py-1.5 text-xs text-stone-100 focus:border-stone-500 focus:outline-none"
+                          />
+                          <div className="mt-1 flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleAddComment(post.id)}
+                              disabled={
+                                actionInProgress === post.id ||
+                                !(composerText[post.id] || "").trim()
+                              }
+                              className="rounded bg-stone-700 px-3 py-1 text-xs font-medium text-stone-100 hover:bg-stone-600 disabled:opacity-40"
+                            >
+                              Add comment
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               {(pendingImageByPost[post.id] || post.linked_image_id) && (
                 <div className="mb-3 rounded-lg border border-amber-900/50 bg-stone-950/50 p-3">
                   <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -1447,6 +2571,22 @@ function PostsManager({
                     Ordinal: {post.ordinal_post_id}
                   </span>
                 )}
+                {!post.ordinal_post_id && post.match_kind === "auto" && post.match_provider_urn && (
+                  <span
+                    className="max-w-full truncate rounded bg-emerald-900/40 px-2 py-0.5 font-mono text-[10px] text-emerald-300"
+                    title={`Attributed via semantic match (cosine=${typeof post.match_similarity === "number" ? post.match_similarity.toFixed(3) : "?"}) — draft was likely copy-pasted into Lineage and posted without Ordinal.`}
+                  >
+                    Matched: {post.match_provider_urn}
+                  </span>
+                )}
+                {!post.ordinal_post_id && post.match_kind === "ambiguous" && (
+                  <span
+                    className="rounded bg-amber-900/40 px-2 py-0.5 text-[10px] text-amber-300"
+                    title={`Semantic match was borderline (top sim=${typeof post.match_similarity === "number" ? post.match_similarity.toFixed(3) : "?"}). Operator disambiguation needed.`}
+                  >
+                    Match: ambiguous
+                  </span>
+                )}
                 {citationData[post.id] && (
                   <span
                     title={`${citationData[post.id].length} source annotation${citationData[post.id].length !== 1 ? "s" : ""} ready — will be posted as Ordinal comments on push`}
@@ -1461,13 +2601,20 @@ function PostsManager({
                 >
                   Edit
                 </button>
-                <button
-                  onClick={() => handleRewrite(post)}
-                  disabled={actionInProgress === post.id}
-                  className="rounded bg-stone-800 px-2.5 py-1 text-xs text-stone-300 hover:bg-stone-700 disabled:opacity-50"
-                >
-                  {actionInProgress === post.id ? "..." : "Rewrite"}
-                </button>
+                {/* Rewrite button temporarily disabled (2026-04-20) —
+                    the behavior was surprising (silently commits content
+                    without a visible LLM pass). Re-enable once the
+                    handler is clearly gated on an explicit confirm
+                    and the LLM call is observable in the UI. */}
+                {false && (
+                  <button
+                    onClick={() => handleRewrite(post)}
+                    disabled={actionInProgress === post.id}
+                    className="rounded bg-stone-800 px-2.5 py-1 text-xs text-stone-300 hover:bg-stone-700 disabled:opacity-50"
+                  >
+                    {actionInProgress === post.id ? "..." : "Rewrite"}
+                  </button>
+                )}
                 <button
                   onClick={() => handleFactCheck(post)}
                   disabled={actionInProgress === post.id}
@@ -1482,30 +2629,65 @@ function PostsManager({
                 >
                   {generatingImageFor === post.id ? "Generating..." : "Generate Image"}
                 </button>
-                <button
-                  onClick={() => openPushModal(post)}
-                  disabled={actionInProgress === post.id}
-                  className="rounded bg-stone-800 px-2.5 py-1 text-xs text-cyan-400 hover:bg-stone-700 disabled:opacity-50"
-                >
-                  Push to Ordinal
-                </button>
-                {post.pre_revision_content && (
-                  <button
-                    onClick={() => openPushModal({ ...post, content: post.pre_revision_content, title: `${post.title || "Draft"} (original)` })}
-                    disabled={actionInProgress === post.id}
-                    className="rounded bg-stone-800 px-2.5 py-1 text-xs text-stone-400 hover:bg-stone-700 disabled:opacity-50"
-                  >
-                    Push Original
-                  </button>
-                )}
+                {/* Per-post "Push to Ordinal" + "Push Original" buttons
+                    removed 2026-04-23 — Virio churning off Ordinal.
+                    Backend returns 410 Gone on any remaining caller.
+                    Drafts stay in local_posts; when the replacement
+                    publishing pipeline ships, the button will land
+                    here with a new label + destination. */}
                 <div className="flex-1" />
                 <span className="text-xs text-stone-600">
                   {post.status || "draft"}
                   {post.created_at ? ` \u00b7 ${new Date(post.created_at * 1000).toLocaleDateString()}` : ""}
                 </span>
+                {/* Pair state chip — shows when the draft has been
+                    linked (manually via Set-publish-date or by the
+                    semantic match-back worker) to a published
+                    LinkedIn post. Tooltip carries the full detail
+                    since the list response doesn't include the
+                    published-post body. */}
+                {post.matched_provider_urn && (
+                  <span
+                    title={[
+                      `matched_provider_urn: ${post.matched_provider_urn}`,
+                      `match_method: ${post.match_method || "?"}`,
+                      post.match_similarity != null
+                        ? `match_similarity: ${post.match_similarity}`
+                        : null,
+                      post.matched_at ? `matched_at: ${post.matched_at}` : null,
+                    ]
+                      .filter(Boolean)
+                      .join("\n")}
+                    className="rounded bg-emerald-950/40 px-2 py-1 text-xs text-emerald-300"
+                  >
+                    Paired
+                    {post.match_method ? ` \u00b7 ${post.match_method}` : ""}
+                  </span>
+                )}
+                <button
+                  onClick={() => void handleSetPublishDate(post.id)}
+                  disabled={actionInProgress === post.id}
+                  title={
+                    post.matched_provider_urn
+                      ? `Already paired to published LinkedIn post (${post.match_method || "?"}). Click to re-pair with a different date.`
+                      : "Pair this draft with its published LinkedIn post by date (PST). Once paired, Stelle sees DELTA (draft → published) in her next bundle."
+                  }
+                  className="rounded px-2 py-1 text-xs text-sky-500 hover:bg-sky-950 disabled:opacity-50"
+                >
+                  {post.matched_provider_urn ? "Re-pair" : "Set publish date"}
+                </button>
+                <button
+                  onClick={() => void handleReject(post.id)}
+                  disabled={actionInProgress === post.id || post.status === "rejected"}
+                  title="Mark as rejected by the client. Preserves the draft + comments as a learning signal (NOT dedup signal). Use after deleting the draft from Ordinal."
+                  className="rounded px-2 py-1 text-xs text-amber-500 hover:bg-amber-950 disabled:opacity-50"
+                >
+                  {post.status === "rejected" ? "Rejected" : "Reject"}
+                </button>
                 <button
                   onClick={() => handleDelete(post.id)}
                   disabled={actionInProgress === post.id}
+                  title="Permanently delete the draft. Removes the row and all paired comments from Amphoreus. Use 'Reject' instead if the client turned the draft down — Reject keeps it as a learning signal."
                   className="rounded px-2 py-1 text-xs text-red-500 hover:bg-red-950 disabled:opacity-50"
                 >
                   Delete

@@ -92,45 +92,61 @@ def _call_with_retry(fn, *, max_retries: int = 3, base_delay: float = 2.0, max_d
 _DIRECT_SYSTEM_TEMPLATE = """\
 # Ghostwriter
 
-You ghostwrite LinkedIn posts for the client. Your workspace:
+Stelle, you ghostwrite LinkedIn posts for the client.
 
-- `memory/config.md` — what you know about the client. Bounded at 4000 \
-chars.
-- `memory/story-inventory.md` — cross-session record of stories already \
-told (published or drafted) and candidate stories not yet used. Read this \
-before drafting to avoid repeating angles the client has already published.
-- `memory/profile.md` — client's LinkedIn profile, company facts, ICP \
-segments, active initiatives, recent context.
-- `memory/strategy.md` — content strategy, angles, cadence, guardrails.
-- `memory/constraints.md` — voice/tone rules, brand safety, approval \
-requirements.
-- `memory/source-material/` — raw interview transcripts. Every claim traces \
-here.
-- `memory/references/` — articles, URLs, and reference material the client \
-considers relevant. Treat these as supplementary source material — mine \
-them for insights, angles, and supporting evidence just like transcripts.
-- `memory/published-posts/` — Client's published posts with engagement \
-metrics. Quality assured and exhibits their true voice.
-- `memory/voice-examples/` — The client's **top posts by engagement**. \
-These are the gold standard for voice, tone, and structure. Study these \
-first and match this level of quality.
-- `memory/draft-posts/` — **Authoritative pushed-but-not-yet-live drafts.** \
-Pre-populated at workspace setup from Ordinal's /posts endpoint, filtered \
-to non-Posted statuses. These are drafts that have already been committed \
-to Ordinal and will publish on LinkedIn imminently. READ ONLY — do not \
-write to this directory. These count for dedup; your own in-run drafts \
-do NOT count for dedup until they are pushed to Ordinal by the publisher \
-after your run completes.
-- `memory/feedback/edits/` — auto-captured draft→posted diffs for your \
-own past work (what you wrote vs. what the client actually published). \
-Pure delta data, no editorial commentary. Study these BEFORE writing.
-- `memory/plan.md` — content calendar (if it exists).
-- `scratch/` — your working space.
-- `context/research/` — deep research on client and company.
-- `context/org/` — company context — industry, positioning, competitors.
+## Your inputs
 
-Read all files. Study `memory/voice-examples/` first — that is the voice \
-to match. Then read `memory/published-posts/` for broader patterns.
+There is NO fly-local `memory/` tree. Everything you need is either
+already in this prompt (concatenated into the user message) or served
+by the virtual workspace (read from Amphoreus Supabase + Jacquard GCS).
+
+**In this prompt (already there — don't hunt for them as files):**
+- **POSTS block** — every recent post for this creator with: full body,
+  publishing date, engagement counts (reactions · comments · reposts ·
+  engagement_score), threaded operator comments (inline + post-wide)
+  when present, draft-vs-published edit deltas when the client revised,
+  and top-2 semantic neighbors per block (nearest past posts with their
+  own engagement).
+
+  Each block is one of two classes:
+    * **Post** (default) — either shipped to LinkedIn (real engagement
+      numbers on the ENGAGEMENT line) or sitting in the operator's
+      review queue (`ENGAGEMENT: — (not yet published)`). Both are
+      voice-calibration + dedup signal. Don't distinguish further —
+      the fewer taxonomic buckets, the less prompt bloat.
+    * **Rejected** — client said no to THIS execution. DO learn from
+      the paired comments (they tell you why). DO feel free to write
+      a different post on the same topic. DO NOT regenerate a near-
+      copy of the rejected draft.
+
+  Every post in this block is ALSO a voice example. No separate
+  "voice-examples" or "tone" file — voice is learned from the raw
+  distribution, not curated picks.
+
+- **EXISTING POSTS index** — compact hooks-only list of the same posts,
+  shorter for scan-and-dedup.
+
+**In the virtual workspace (read-only):**
+- `<slug>/transcripts/` — raw interview transcripts. The source of
+  every content claim. **Interview transcripts are content sources;
+  internal sync/standup transcripts (content-eng, GTM weeklies, product
+  demos, team retros) are BACKGROUND ONLY — use them for context /
+  voice, never as the narrative source of a post.**
+- `<slug>/research/` — deep research (company + person). Supplementary.
+- `<slug>/context/` — operator-uploaded brand docs / positioning PDFs.
+- `<slug>/strategy/strategy.md` — cross-run strategy memory left by
+  your previous selves.
+- `<slug>/profile.md` — simple LinkedIn profile summary.
+
+**Shared (no slug prefix):**
+- `conversations/trigger-log.jsonl` — chronological replay of every
+  prior trigger (interviews, CE feedback diffs, manual runs, Slack).
+- `tasks/<id>.json` — pending review tasks.
+- `slack/` — Slack channel snapshots.
+
+Re-read the POSTS block first. It's richer than anything in the
+virtual workspace for engagement / voice / dedup / edit-feedback —
+the workspace dirs above are supplementary.
 
 ## The Magic Moment
 
@@ -164,74 +180,61 @@ sparked the post, the post has no foundation. Do not write it.
 
 - `list_directory` / `read_file` — explore the workspace
 - `write_file` / `edit_file` — write scratch notes, draft posts, content plans
-- `bash` — run shell commands. Every command starts with your workspace as the current directory. Use relative paths like `tools/validate_draft.py` or `memory/plan.md`.
+- `bash` — run shell commands. Every command starts with your workspace as the current directory. Use relative paths like `tools/validate_draft.py` or `scratch/plan.md`.
 - `write_result` — submit your final posts (ends the session)
 - `python3 tools/validate_draft.py "text"` — self-check a draft for AI patterns, banned phrases, and structural issues BEFORE submitting. Also accepts `--file path/to/draft.md`. Returns JSON with issues. If `needs_correction` is true, revise and re-validate with `--attempt N`. After attempt 2, escape hatch activates (issues downgraded, proceeds).
 
 ### Past performance data
 
-`memory/post-history.md` contains this client's top-performing posts by engagement — full text, full numbers, draft vs published versions. Read this before drafting. It is your baseline — everything you write will be compared to this distribution.
+The POSTS block is your baseline. Every recent post (published or in
+the review queue) plus every rejected draft is there with body,
+publishing date, engagement counts, threaded comments, edit deltas,
+and semantic neighbors. Read the distribution in the raw grid and
+infer what's working yourself — no synthesized top-N, no curated
+voice list.
+
 ## Process
 
-1. If `memory/plan.md` doesn't exist, create it first. Read every \
-transcript and published post, mine them for candidate angles, cross-check \
-against `memory/published-posts/` (LinkedIn-live) and `memory/draft-posts/` \
-(Ordinal-pushed, not yet live) to avoid collisions, and write the plan. \
-**Do NOT read your own prior-run scratch files as dedup source** — only \
-posts that are actually in Ordinal or on LinkedIn count. A draft you saved \
-locally last run that was never pushed does not exist for dedup purposes.
-1a. Re-read the plan you just wrote. For each pair of posts, ask: do \
-these share the same core insight? If yes, kill one and replace it with \
-a genuinely different angle from the transcripts. Two posts can share a \
-topic domain but must have different underlying insights. Repeat until \
-every post in the plan is distinct.
-1b. Read `memory/story-inventory.md`. If it is empty or missing, build \
-it now: scan every transcript and every authoritative post (published \
-on LinkedIn OR pushed to Ordinal), and write a list of every story, \
-anecdote, or specific moment you find — one bullet per story, with file \
-+ timestamp + one-sentence description, and whether it has been used. \
-**Authoritative posts only**: `memory/published-posts/` and \
-`memory/draft-posts/` (which is pre-populated from Ordinal). Never scan \
-your own scratch writes as "used" — your in-run drafts don't exist until \
-the publisher pushes them after your run. If the inventory already exists, \
-consult it before picking angles: do not draft a post around a story \
-already marked as used. Do not mark stories as used yourself — the \
-publisher marks them after confirmed Ordinal push.
+1. If a plan doesn't already exist, write one to `scratch/plan.md`. \
+Read the latest 2-3 transcripts, mine them for candidate angles, \
+cross-check against the POSTS block (every post already written, \
+scheduled, or rejected for this creator is there) + the EXISTING \
+POSTS hooks index so you don't collide with anything in the pipeline. \
+Then re-read the plan: for each pair of posts, ask if they share the \
+same core insight — if yes, kill one and replace with a genuinely \
+different angle. Topic overlap is fine; insight overlap is not.
 2. Pick the next unwritten topic from the plan. Identify the specific \
-source material (file + timestamps) you'll draw from.
-3. Draft in `scratch/`. After each paragraph with a factual claim, \
-add a citation comment: `<!-- [filename, timestamp] "quote" -->`. \
-Read it back.
-4. Call `get_reader_reaction` on your draft. Read the reaction \
-string carefully. You are looking for REAL positive engagement, \
-not tolerance. Ship ONLY if the reaction contains felt engagement \
-— phrases like `"felt real"`, `"line stays"`, `"been here"`, \
-`"oh that's a good one"`, `"gonna forward this"`. Passive \
-tolerance or rejection (`"nodding along"`, `"fine"`, `"reasonable \
-take"`, `"pitch deck slide"`, `"read this fifty times"`, `"flex \
-disguised as X"`, anything starting with "cool" or "interesting \
+source material (transcript file + timestamps) you'll draw from.
+3. Draft in-context or in `scratch/post-N.md`. After each paragraph \
+with a factual claim, add a citation comment: \
+`<!-- [filename, timestamp] "quote" -->`. Read it back aloud.
+4. Call `get_reader_reaction` on the draft. You are looking for REAL \
+positive engagement, not tolerance. Ship ONLY if the reaction contains \
+felt engagement — phrases like `"felt real"`, `"line stays"`, \
+`"been here"`, `"oh that's a good one"`, `"gonna forward this"`. \
+Passive tolerance or rejection (`"nodding along"`, `"fine"`, \
+`"reasonable take"`, `"pitch deck slide"`, `"read this fifty times"`, \
+`"flex disguised as X"`, anything starting with "cool" or "interesting \
 but") means the post failed. **The ship gate is absolute: if the \
 reaction isn't felt engagement, you do NOT ship that post. No \
-exceptions.** Two options: (a) one surgical `edit_file` on the \
-anchored span, then re-simulate. (b) If the reaction is about \
-the angle itself, line edits won't save it — kill the post and \
-pick a different angle from the plan. Shipping fewer posts is \
-always better than shipping one Irontomb rejected.
+exceptions.** Two options: (a) one surgical edit on the anchored span, \
+then re-simulate. (b) If the reaction is about the angle itself, line \
+edits won't save it — kill the post and pick a different angle from \
+the plan. Shipping fewer posts beats shipping one Irontomb rejected.
 
 The response includes `_prior_reactions` — the last few reactions \
-from this session with each draft's first line + length so you \
-can track trajectory. If prior reactions were \"lecture\" → \
-\"sermon\" → \"sermon\", your edits aren't helping — make a \
-bigger change or kill the angle. Cap at 12 cycles per post.
-5. Save the final draft to `scratch/final/` — NOT to `memory/draft-posts/`. \
-That directory is authoritative for Ordinal-pushed content and is \
-read-only during your run. `scratch/final/` is also where you read \
-back your own earlier drafts to avoid self-collision across posts \
-in the same batch.
-6. Repeat steps 2-5 for all planned posts. When every post is \
-complete, call `write_result` with the final JSON. The order of \
-posts in the `posts` array IS the publication order — put the \
-post you want published first at index 0.
+from this session with each draft's first line + length so you can \
+track trajectory. If prior reactions went "lecture" → "sermon" → \
+"sermon", your edits aren't helping — make a bigger change or kill \
+the angle. Cap at 12 cycles per post.
+5. Call `submit_draft` with the finished post. `submit_draft` persists \
+the draft to Amphoreus's `local_posts` for operator review and runs \
+Castorice fact-check; fact-check output lands on `why_post` where the \
+operator sees it at review time.
+6. Repeat steps 2-5 for all planned posts. When every post is complete, \
+call `write_result` with the final JSON. The order of posts in the \
+`posts` array IS the publication order — put the post you want \
+published first at index 0.
 
 ## TIME BUDGET
 
@@ -294,30 +297,32 @@ On desktop, ~210 characters.
 - Every claim traces to a source file. No fabrication.
 - No markdown formatting in posts (no #, **, etc.)
 
-Everything else — length, cadence, diction, voice — is learnable from the \
-client's own published posts, voice examples, and engagement history. Do \
-not apply global stylistic rules. If a phrase is a problem for this client, \
-you'll see it in the raw (draft, published) deltas and in the per-reactor \
-data.
+Everything else — length, cadence, diction, voice — is learnable from \
+the POSTS block (every recent post + its real engagement + the client's \
+edits). Do not apply global stylistic rules. If a phrase is a problem for \
+this client, you'll see it in the raw (draft, published) deltas and in \
+the per-reactor data.
 
 ## Planning mode
 
 When asked to create a content plan:
-1. Read the memory files listed above (transcripts, voice examples, profile, published posts, plan, research, org context).
-2. Mine transcripts for every usable story.
-3. Check the EXISTING POSTS list injected into your prompt — don't \
-repeat any topic, angle, or hook that's already been written or scheduled.
-4. Assign stories to post slots.
-5. Write plan to `memory/plan.md`.
-6. Self-dedup: re-read the plan. If any two posts share the same core \
-insight (even if framed differently), kill one and replace it with a \
-different angle. The plan should have zero overlap.
+1. Re-read the POSTS block + EXISTING POSTS index. That tells you \
+what's already been written, scheduled, published, or rejected for \
+this creator. Don't propose anything that collides with an existing \
+topic/angle/hook.
+2. Read the latest 2-3 transcripts from `<slug>/transcripts/` and mine \
+for every usable story.
+3. Assign stories to post slots.
+4. Write the plan to `scratch/plan.md`.
+5. Self-dedup: re-read the plan. If any two posts share the same core \
+insight (even if framed differently), kill one and replace with a \
+different angle. Topic overlap is acceptable, insight overlap is not.
 
 Plan format per post: date, story, source transcript + timestamp, key \
 material.
 
 When asked to write the next post from a plan:
-1. Read `memory/plan.md`, find first `- [ ] Status: unwritten`.
+1. Read `scratch/plan.md`, find first `- [ ] Status: unwritten`.
 2. Write that post following steps above.
 3. Mark `- [x] Status: written`.
 
@@ -456,11 +461,48 @@ _TOOLS = [
         },
     },
     {
+        "name": "check_client_comfort",
+        "description": (
+            "Send a draft to Aglaea, the client-comfort critic. Aglaea "
+            "asks a DIFFERENT question from Irontomb: not 'will readers "
+            "like this?' but 'would THIS specific FOC user actually "
+            "publish this draft as-is?'. It pattern-matches the draft "
+            "against the user's real recent LinkedIn posts (voice "
+            "reference), past operator/client comments on their drafts, "
+            "and past (Stelle-draft → actually-shipped) edit deltas. "
+            "A viral draft the client would never publish is worthless.\n\n"
+            "Use this alongside `get_reader_reaction` — iterate until "
+            "BOTH pass. Irontomb catches 'boring'; Aglaea catches "
+            "'off-voice / off-claim'. They fail for different reasons.\n\n"
+            "Response shape:\n"
+            "  score         — 0..10. 10 = ship unchanged, 8 = minor "
+            "softening, 6 = real edits needed, <6 = would be rejected.\n"
+            "  summary       — one-sentence takeaway.\n"
+            "  flagged_spans — list of {quote, reason, suggestion}. "
+            "quote = verbatim from the draft the client would edit; "
+            "reason = why it's off-voice or flagged in prior feedback; "
+            "suggestion = concrete rewrite direction.\n\n"
+            "Don't argue with the flags — they come from the user's "
+            "real posting history, not your opinion. If score < 8, "
+            "revise the flagged spans and call again."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_text": {
+                    "type": "string",
+                    "description": "The full current draft to evaluate.",
+                },
+            },
+            "required": ["draft_text"],
+        },
+    },
+    {
         "name": "submit_draft",
         "description": (
-            "ATOMIC FINAL-DRAFT SUBMISSION. Use this instead of "
-            "`write_file(posts/drafts/<id>/content.md, text)` to avoid "
-            "leaving rough-draft files in the workspace. One call per "
+            "ATOMIC FINAL-DRAFT SUBMISSION. The single canonical way to "
+            "land a finished post — Amphoreus persists it to local_posts, "
+            "you don't write any draft files yourself. One call per "
             "finished post.\n\n"
             "Args:\n"
             "  user_slug (string, required): FOC user this post belongs to. "
@@ -471,7 +513,7 @@ _TOOLS = [
             "  scheduled_date (string, optional): ISO \"YYYY-MM-DD\". "
             "Use this to lay multi-post runs across a cadence (e.g., "
             "Mon/Wed/Fri or Tue/Thu). The date becomes the post's slot "
-            "on the Lineage calendar.\n"
+            "on the database calendar.\n"
             "  approver_user_ids (list[uuid], optional): explicit approver "
             "list. If omitted, defaults to the company's assigned AM, or "
             "the FOC user themselves if no AM is set.\n"
@@ -501,8 +543,10 @@ _TOOLS = [
         "description": (
             "Query scored post observations. Each observation corresponds to a "
             "LinkedIn post with reward (engagement_score), topic/format tags, "
-            "ICP match rate, and engagement breakdown. Use this instead of "
-            "reading memory/post-history.md — same data, filtered server-side.\n\n"
+            "ICP match rate, and engagement breakdown. Mostly redundant with "
+            "the POSTS block already in this prompt — use when you need a "
+            "server-side filter (e.g. reward >= threshold) that you can't do "
+            "cheaply in-context.\n\n"
             "Args:\n"
             "  min_reward (number, optional): keep only posts with reward >= this\n"
             "  max_reward (number, optional): keep only posts with reward <= this\n"
@@ -541,15 +585,13 @@ _TOOLS = [
             "    reaction count. Default 0. Try 50-200 for outlier-only views.\n"
             "  exclude_creator (string, optional): LinkedIn username to drop "
             "    (e.g. pass the user's own username to avoid retrieving their "
-            "    own posts).\n"
-            "  exclude_archetypes (string[], optional): Jacquard format_archetype "
-            "    labels to skip. Common content-lane filter: "
-            "    ['announcement','celebration','promotional_post']. Omit to "
-            "    see everything.\n\n"
+            "    own posts).\n\n"
+            "Content-type filtering (e.g. 'avoid announcements') should be "
+            "expressed in the query text itself — hand-labeled archetype "
+            "filters were retired.\n\n"
             "Returns JSON: {count, posts: [{post_id, post_text, "
-            "creator_username, reactions, comments, format_archetype, "
-            "topic_tags, posted_at, similarity (0..1)}]}. Sorted by "
-            "descending similarity."
+            "creator_username, reactions, comments, posted_at, "
+            "similarity (0..1)}]}. Sorted by descending similarity."
         ),
         "input_schema": {
             "type": "object",
@@ -558,10 +600,6 @@ _TOOLS = [
                 "k": {"type": "integer", "minimum": 1, "maximum": 50},
                 "min_reactions": {"type": "integer", "minimum": 0},
                 "exclude_creator": {"type": "string"},
-                "exclude_archetypes": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
             },
             "required": ["query"],
         },
@@ -922,17 +960,17 @@ _WORKSPACE_ROOT_PATHS = frozenset({"", ".", "/", "./"})
 
 def _dispatch_list_directory(root, args):
     """Path-aware routing:
-    - Root path (``""`` / ``"."``) in Lineage mode → HTTP proxy root
+    - Root path (``""`` / ``"."``) in database mode → HTTP proxy root
       listing (shows Jacquard's FOC user slugs + shared roots). Without
       this Stelle gets the fly-local scratch workspace on her very first
-      call and has no hint the Lineage mounts exist.
-    - Lineage mount paths → HTTP proxy to virio-api workspace
+      call and has no hint the database mounts exist.
+    - database mount paths → HTTP proxy to virio-api workspace
     - Everything else (scratch/, loose dirs) → fly-local SandboxFs
 
     Same routing rule as _dispatch_write_file so scratch files Stelle
     wrote with ``write_file`` are listable via the same path."""
-    from backend.src.agents import lineage_fs_client as _lfs
-    if _lfs.is_lineage_mode():
+    from backend.src.agents import database_client as _lfs
+    if _lfs.is_database_mode():
         path = args.get("path", "") or ""
         if path in _WORKSPACE_ROOT_PATHS:
             return _lfs.exec_list_directory(root, {"path": ""})
@@ -943,11 +981,11 @@ def _dispatch_list_directory(root, args):
 
 def _dispatch_read_file(root, args):
     """Path-aware routing:
-    - Lineage mount paths → HTTP proxy (transcripts, engagement JSON, etc.)
+    - database mount paths → HTTP proxy (transcripts, engagement JSON, etc.)
     - Scratch paths → fly-local SandboxFs (reads the v1/v2/v3 drafts
       Stelle wrote via write_file in the same run)"""
-    from backend.src.agents import lineage_fs_client as _lfs
-    if _lfs.is_lineage_mode():
+    from backend.src.agents import database_client as _lfs
+    if _lfs.is_database_mode():
         path = args.get("path", "") or ""
         if _lfs.is_lineage_path(path):
             return _lfs.exec_read_file(root, args)
@@ -955,20 +993,20 @@ def _dispatch_read_file(root, args):
 
 
 def _lineage_write_blocked_message(path: str) -> str:
-    """Explain why a write into a Lineage mount is refused and where
+    """Explain why a write into a database mount is refused and where
     Stelle should write instead (scratch paths work fine)."""
     return (
-        f"Error: cannot write to `{path}` — that path is inside Lineage's "
+        f"Error: cannot write to `{path}` — that path is inside database's "
         "workspace, which is READ-ONLY to Stelle (it's the client's space).\n\n"
         "Your options:\n"
         "  • FINAL drafts: call `submit_draft(user_slug, content, "
-        "scheduled_date, why_post)` — the only write tool that reaches Lineage.\n"
+        "scheduled_date, why_post)` — the only write tool that reaches database.\n"
         "  • Scratch / working notes / draft iterations: write to any path "
-        "OUTSIDE the Lineage mount tree. Good choices: `scratch/post1-v1.md`, "
+        "OUTSIDE the database mount tree. Good choices: `scratch/post1-v1.md`, "
         "`scratch/plan.md`, `notes/brainstorm.md`. Those land on your "
         "fly-local SandboxFs, persist for the duration of the run, and "
         "you can `read_file` them back normally.\n\n"
-        "Paths that route to Lineage (read-only for write): anything under "
+        "Paths that route to database (read-only for write): anything under "
         "`transcripts/`, `research/`, `engagement/`, `reports/`, `context/`, "
         "`posts/`, `edits/`, `tone/`, `strategy/`, or the shared "
         "`conversations/`, `slack/`, `tasks/`, `.pi/`."
@@ -978,19 +1016,19 @@ def _lineage_write_blocked_message(path: str) -> str:
 def _dispatch_write_file(root, args):
     """Writes route by path:
 
-    - Paths inside a Lineage mount (transcripts/, posts/, strategy/, …) →
+    - Paths inside a database mount (transcripts/, posts/, strategy/, …) →
       refused with an error redirecting to ``submit_draft`` or a scratch
       path.
-    - Scratch paths (anything NOT a Lineage mount — e.g. ``scratch/*``,
+    - Scratch paths (anything NOT a database mount — e.g. ``scratch/*``,
       ``notes/*``, loose files) → fly-local SandboxFs.
-    - In local (non-Lineage) mode, always fly-local.
+    - In local (non-database) mode, always fly-local.
 
     Preserves Stelle's classic scratch-file iteration pattern
     (``scratch/post1-v1.md`` → ``scratch/post1-v2.md`` → …) while
     keeping the client data source read-only from her perspective.
     Only ``submit_draft`` persists finished posts."""
-    from backend.src.agents import lineage_fs_client as _lfs
-    if _lfs.is_lineage_mode():
+    from backend.src.agents import database_client as _lfs
+    if _lfs.is_database_mode():
         path = args.get("path", "") or ""
         if _lfs.is_lineage_path(path):
             return _lineage_write_blocked_message(path)
@@ -999,8 +1037,8 @@ def _dispatch_write_file(root, args):
 
 def _dispatch_edit_file(root, args):
     """Same path-aware routing as _dispatch_write_file."""
-    from backend.src.agents import lineage_fs_client as _lfs
-    if _lfs.is_lineage_mode():
+    from backend.src.agents import database_client as _lfs
+    if _lfs.is_database_mode():
         path = args.get("path", "") or ""
         if _lfs.is_lineage_path(path):
             return _lineage_write_blocked_message(path)
@@ -1009,10 +1047,10 @@ def _dispatch_edit_file(root, args):
 
 def _dispatch_search_files(root, args):
     """Path-aware routing based on the ``directory`` arg. Searches over
-    Lineage mounts use the HTTP endpoint; searches over scratch paths
+    database mounts use the HTTP endpoint; searches over scratch paths
     use the local ripgrep."""
-    from backend.src.agents import lineage_fs_client as _lfs
-    if _lfs.is_lineage_mode():
+    from backend.src.agents import database_client as _lfs
+    if _lfs.is_database_mode():
         directory = args.get("directory", "") or ""
         if _lfs.is_lineage_path(directory):
             return _lfs.exec_search_files(root, args)
@@ -1023,8 +1061,8 @@ def _dispatch_bash(root, args):
     """Bash in data-source mode is disabled — the workspace is a virtual
     view over Supabase/GCS, not a real filesystem, so shell pipelines
     can't see it. Direct agents to structured tools."""
-    from backend.src.agents import lineage_fs_client as _lfs
-    if _lfs.is_lineage_mode():
+    from backend.src.agents import database_client as _lfs
+    if _lfs.is_database_mode():
         cmd = (args.get("command") or "")[:120]
         return (
             "Error: bash is disabled — the workspace is a virtual view "
@@ -1038,23 +1076,23 @@ def _dispatch_bash(root, args):
 
 
 def _dispatch_mention_resolve(root, args):
-    """Always goes through HTTP — whether local or Lineage mode. The
-    Lineage endpoint wraps the same Supabase + APImaestro resolver Pi
+    """Always goes through HTTP — whether local or database mode. The
+    database endpoint wraps the same Supabase + APImaestro resolver Pi
     used, so behavior is identical. Falls through to a local error when
-    not in Lineage mode (Stelle never had this tool outside Lineage)."""
-    from backend.src.agents import lineage_fs_client as _lfs
-    if _lfs.is_lineage_mode():
+    not in database mode (Stelle never had this tool outside database)."""
+    from backend.src.agents import database_client as _lfs
+    if _lfs.is_database_mode():
         return _lfs.exec_mention_resolve(root, args)
-    return "Error: mention_resolve is only available in Lineage mode"
+    return "Error: mention_resolve is only available in database mode"
 
 
 def _dispatch_submit_draft(root, args):
     """Final-draft submission — branches by mode.
 
-    - **Lineage mode** (LINEAGE_COMPANY_ID + direct Supabase/GCS creds):
+    - **database mode** (DATABASE_COMPANY_ID + direct Supabase/GCS creds):
       inserts a row into Jacquard's ``drafts`` Supabase table with
       status=``review`` under the FOC user resolved from ``user_slug``.
-      The draft shows up in Lineage's review UI alongside
+      The draft shows up in Jacquard's review UI alongside
       Jacquard-native drafts.
     - **Local mode** (amphoreus.app standalone, tests): lands a row in
       the local ``local_posts`` table. The operator reviews at
@@ -1071,7 +1109,7 @@ def _dispatch_submit_draft(root, args):
     Args (from the submit_draft tool schema):
         user_slug (str, required)   FOC user this draft is attributed to.
                                     In pure-local mode the slug == company
-                                    keyword; in lineage-read mode it's
+                                    keyword; in database-read mode it's
                                     the Jacquard FOC-user slug.
         content (str, required)     Final post markdown.
         scheduled_date (str, opt)   ISO YYYY-MM-DD calendar slot.
@@ -1086,19 +1124,120 @@ def _dispatch_submit_draft(root, args):
     from pathlib import Path as _Path
 
     user_slug = (args.get("user_slug") or "").strip()
+    # Env fallback: stelle_runner sets DATABASE_USER_SLUG when the
+    # generate endpoint resolved a specific FOC user for this run. If the
+    # LLM omits ``user_slug`` in its tool call (not always reliable), we
+    # still want the draft attributed correctly — otherwise local_posts
+    # rows land with user_id=None and are invisible in per-FOC views.
+    if not user_slug:
+        env_slug = (_os.environ.get("DATABASE_USER_SLUG") or "").strip()
+        if env_slug:
+            user_slug = env_slug
+            logger.info("[submit_draft] using DATABASE_USER_SLUG env fallback: %r", user_slug)
+
+    # Authoritative env override: DATABASE_USER_UUID, set by
+    # stelle_runner from --user-id, is the direct FOC UUID. We trust
+    # this over any slug-based resolution because (a) the Jacquard
+    # ``users.slug`` column is sometimes NULL, causing slug fallback
+    # to fail silently, and (b) the UUID was resolved by the ghost-
+    # writer endpoint at request time against the same source of truth
+    # list_foc_users uses. When this env var is set we skip slug
+    # resolution entirely and stamp user_id from it directly.
+    env_user_uuid = (_os.environ.get("DATABASE_USER_UUID") or "").strip()
     content = args.get("content") or ""
     if not content:
         return "Error: content is required"
 
-    # Determine company for bookkeeping. Pull from env set by stelle_runner
-    # (LINEAGE_COMPANY_ID present in lineage-read mode, otherwise fall back
-    # to the lineage_user_slug env which in local mode equals company).
-    # LAST resort: if neither is set, use user_slug itself.
+    # Determine company + FOC user for bookkeeping. Pull company from env
+    # set by stelle_runner; derive user_id from the user_slug arg if the
+    # run is scoped to a specific FOC user (disambiguates Trimble-Heather
+    # from Trimble-Mark, Commenda-Logan from Commenda-Sam).
     company = (
         _os.environ.get("STELLE_COMPANY_KEYWORD", "").strip()
         or user_slug
         or "unknown"
     )
+
+    user_id: str | None = None
+    # Priority 1: DATABASE_USER_UUID env (direct, authoritative).
+    if env_user_uuid:
+        user_id = env_user_uuid
+        logger.info("[submit_draft] using DATABASE_USER_UUID env: %s", env_user_uuid)
+    # Priority 2: slug-based resolution (falls back to this when the
+    # UUID env wasn't set — older run paths, or ghostwriter calls
+    # that predate the UUID-env fix).
+    elif user_slug:
+        try:
+            from backend.src.lib.company_resolver import resolve_to_company_and_user
+            # Prefer the full slug path first (works for Amphoreus
+            # pseudo-slugs like ``trimble-heather``).
+            cu, uu = resolve_to_company_and_user(user_slug)
+            user_id = uu
+            # Defensive: if the user_slug carried a company prefix we
+            # didn't have from env, adopt it.
+            if not company or company == "unknown":
+                if cu:
+                    company = cu
+        except Exception as _e:
+            logger.debug("[submit_draft] resolver failed for %r: %s", user_slug, _e)
+
+    # Last-resort safety: never write an orphan at a multi-FOC company.
+    # Two-layer check:
+    #
+    #   Primary (unchanged): if DATABASE_COMPANY_ID is set, refuse any
+    #   NULL-user_id write. The ghostwriter endpoint sets this env var
+    #   on every data-source run, so the guard fires on the full
+    #   runtime path.
+    #
+    #   Secondary (new, 2026-04-22 Trimble fix): ALSO refuse NULL-user
+    #   writes when we can confirm the company has multiple FOC users,
+    #   regardless of whether DATABASE_COMPANY_ID is set. Belt-and-
+    #   suspenders against the ghostwriter guard ever being bypassed —
+    #   even if a future code path calls submit_draft without setting
+    #   the env var (tests, scripts, direct MCP calls), orphans at
+    #   multi-FOC companies are still blocked here.
+    if user_id is None:
+        co_env = (_os.environ.get("DATABASE_COMPANY_ID") or "").strip()
+        # Secondary check: query FOC roster directly for the company
+        # we're writing against. Never swallows — if the lookup fails
+        # AND DATABASE_COMPANY_ID is set, the primary guard still
+        # refuses. If the lookup succeeds and reveals multi-FOC, refuse
+        # regardless.
+        _posting_count = None
+        try:
+            from backend.src.agents.jacquard_direct import list_foc_users as _sd_foc
+            _guard_co = co_env or company
+            if _guard_co:
+                _foc_rows = _sd_foc(_guard_co) or []
+                _posting_count = sum(
+                    1 for u in _foc_rows if u.get("posts_content")
+                )
+        except Exception as _sd_exc:
+            logger.debug(
+                "[submit_draft] FOC-count lookup failed (non-fatal): %s", _sd_exc,
+            )
+
+        if co_env or (_posting_count is not None and _posting_count > 1):
+            logger.error(
+                "[submit_draft] refusing to write orphan draft: no user_id "
+                "resolved (user_slug=%r, DATABASE_USER_SLUG=%r, "
+                "DATABASE_USER_UUID=%r, DATABASE_COMPANY_ID=%r, company=%r, "
+                "posting_foc_count=%r). Re-run with a user-qualified slug "
+                "(e.g. flora-weber) or pass userId.",
+                args.get("user_slug"),
+                _os.environ.get("DATABASE_USER_SLUG"),
+                env_user_uuid,
+                co_env,
+                company,
+                _posting_count,
+            )
+            return (
+                "Error: cannot write draft — no FOC user identified for this "
+                "run. This run was started without a target user at a company "
+                "that has multiple FOCs. Re-run via /api/ghostwriter/generate "
+                "with a user-qualified slug (e.g. `flora-weber`) or an "
+                "explicit `userId` in the request body."
+            )
 
     draft_id = str(_uuid.uuid4())
     scheduled_date = args.get("scheduled_date") or None
@@ -1106,8 +1245,6 @@ def _dispatch_submit_draft(root, args):
     why_post = args.get("why_post") or None
 
     # Title = first non-empty line stripped of markdown headers, max 200 chars.
-    # Matches the heuristic Jacquard's /submit-draft uses so titles look
-    # identical across modes.
     title = None
     for _line in content.splitlines():
         stripped = _line.strip()
@@ -1118,12 +1255,21 @@ def _dispatch_submit_draft(root, args):
     # 1) Persist the draft to Amphoreus's local_posts. The operator
     # reviews drafts at amphoreus.app/posts and pushes to Ordinal from
     # there. Drafts never leave Amphoreus's side.
+    #
+    # ``pre_revision_content`` stores the text Stelle originally passed
+    # (before the session-level Castorice wrapper corrected it). That's
+    # the key ``_process_result`` uses to dedup: its write_result post
+    # array carries pre-Castorice text too, so matching on
+    # ``pre_revision_content`` catches the "same post, two write paths"
+    # case even when Castorice output differs run-to-run.
+    pre_revision_content = args.get("pre_revision_content") or None
     destination = "Amphoreus Posts tab"
     try:
         from backend.src.db.local import create_local_post
         create_local_post(
             post_id=draft_id,
             company=company,
+            user_id=user_id,
             content=content,
             title=title,
             status="draft",
@@ -1132,10 +1278,31 @@ def _dispatch_submit_draft(root, args):
             publication_order=(
                 publication_order if isinstance(publication_order, int) else None
             ),
+            pre_revision_content=pre_revision_content,
         )
     except Exception as exc:
         logger.exception("[submit_draft] create_local_post failed: %s", exc)
         return f"Error: failed to persist draft to local_posts: {exc}"
+
+    # 1a) Back-link convergence-log rows to this local_posts row. Every
+    # Irontomb / Aglaea call during the iteration chain was logged with
+    # ``local_post_id=NULL`` and the draft's content hash. Now that we
+    # have the final ``draft_id``, update all rows whose ``draft_hash``
+    # matches the final content to point at it. Earlier-iteration rows
+    # (different hashes) stay unlinked; a follow-up backfill job can
+    # chain them via temporal proximity if we ever need it. Non-fatal.
+    try:
+        from backend.src.services.convergence_log import backfill_local_post_id
+        backfill_local_post_id(draft_id, content)
+    except Exception as exc:
+        logger.debug("[submit_draft] convergence backfill failed (non-fatal): %s", exc)
+
+    # (Fire-and-forget ``draft_embedding`` stamp removed 2026-04-23.
+    # The v1 ``draft_publish_matcher`` that read that column was
+    # retired; the replacement ``draft_match_worker`` reads from the
+    # ``local_posts.embedding`` column instead, which is written
+    # inline by ``db/local.py::_mirror_embed_local_post_content`` at
+    # insert time — no separate threaded embed spawn needed here.)
 
     # 2) Markdown file mirror — one file per draft, grouped by company,
     # for out-of-band inspection + push tooling that expects files on disk.
@@ -1177,15 +1344,15 @@ def _dispatch_submit_draft(root, args):
 
 
 def _dispatch_query_observations(root, args):
-    """Query scored observations. In Lineage mode goes through the remote
+    """Query scored observations. In database mode goes through the remote
     workspace's ``/observations`` endpoint (backed by linkedin_posts +
-    linkedin_reactions + ICP reports). Outside Lineage mode, falls back
+    linkedin_reactions + ICP reports). Outside database mode, falls back
     to the in-process Analyst implementation when scored_observations are
     pre-computed for this run — else returns empty."""
-    from backend.src.agents import lineage_fs_client as _lfs
-    if _lfs.is_lineage_mode():
+    from backend.src.agents import database_client as _lfs
+    if _lfs.is_database_mode():
         return _lfs.exec_query_observations(root, args)
-    # Non-Lineage fallback — preserve Amphoreus's local behavior.
+    # Non-database fallback — preserve Amphoreus's local behavior.
     try:
         from backend.src.agents.analyst import _tool_query_observations as _q
         # If the agent loop wired scored_observations into module state,
@@ -1222,10 +1389,6 @@ def _dispatch_retrieve_similar_posts(root, args):
     k = max(1, min(k, 50))
     min_reactions = int((args or {}).get("min_reactions") or 0)
     exclude_creator = (args or {}).get("exclude_creator") or None
-    exclude_archetypes = (args or {}).get("exclude_archetypes") or None
-    if isinstance(exclude_archetypes, str):
-        # Be forgiving if the LLM passes a comma-separated string.
-        exclude_archetypes = [s.strip() for s in exclude_archetypes.split(",") if s.strip()]
 
     try:
         rows = retrieve_similar_posts(
@@ -1233,7 +1396,6 @@ def _dispatch_retrieve_similar_posts(root, args):
             k=k,
             min_reactions=min_reactions,
             exclude_creator=exclude_creator,
-            exclude_archetypes=exclude_archetypes,
         )
     except Exception as exc:
         return _json.dumps({"count": 0, "posts": [], "error": str(exc)[:400]})
@@ -1347,13 +1509,87 @@ def _validate_draft_with_llm(post_text: str, company_keyword: str) -> dict:
 # Workspace setup
 # ---------------------------------------------------------------------------
 
+def _resolve_linkedin_username(company_keyword: str) -> str | None:
+    """Return the creator's LinkedIn handle for ``company_keyword``.
+
+    Resolution order:
+      1. Jacquard ``users.linkedin_url`` — canonical source. Works for
+         every FOC-scoped slug in the current dropdown (e.g.
+         ``crescendo-matt``, ``hume-ai-andrew``, ``virio-melissa``,
+         ``trimble-heather``, ``innovocommerce-sachil``). Extracts the
+         ``/in/<handle>`` segment and lowercases.
+      2. Legacy ``memory/<slug>/linkedin_username.txt`` file — kept as
+         a fallback for slugs that predate per-FOC resolution and still
+         have a memory dir on disk. This is the only reason the file
+         still reads here; writes have been retired.
+      3. None — caller decides what to do (most callers short-circuit
+         gracefully).
+
+    Side effect: none. Safe to call freely; each call is one PostgREST
+    round-trip if the resolver hits Jacquard.
+    """
+    import re as _re
+
+    def _extract_handle(url: str | None) -> str | None:
+        if not url:
+            return None
+        m = _re.search(r"linkedin\.com/in/([^/?#]+)", url.strip())
+        return m.group(1).strip().lower().rstrip("/") if m else None
+
+    # 1) Jacquard: prefer exact user resolution (FOC-scoped slugs like
+    #    ``hume-ai-andrew`` → Andrew's linkedin_url).
+    try:
+        from backend.src.lib.company_resolver import resolve_to_company_and_user
+        _company_uuid, _user_id = resolve_to_company_and_user(company_keyword)
+        if _user_id:
+            from backend.src.db.supabase_client import get_amphoreus_supabase
+            jcq = get_amphoreus_supabase()
+            rows = (
+                jcq.table("users")
+                   .select("linkedin_url")
+                   .eq("id", _user_id)
+                   .limit(1)
+                   .execute()
+                   .data
+                or []
+            )
+            if rows:
+                h = _extract_handle(rows[0].get("linkedin_url"))
+                if h:
+                    return h
+        # 1b) Bare company identifier (UUID or company-only slug). When
+        # the company has exactly one tracked FOC, auto-pick that
+        # user's handle — covers single-FOC clients like Hensley
+        # Biostats that the UI sometimes hands us as a raw UUID. Skip
+        # if multiple FOCs (ambiguous; caller needs to pass the
+        # FOC-scoped slug).
+        if _company_uuid:
+            from backend.src.agents.jacquard_direct import list_foc_users
+            foc_users = list_foc_users(_company_uuid) or []
+            if len(foc_users) == 1:
+                h = _extract_handle(foc_users[0].get("linkedin_url"))
+                if h:
+                    return h
+    except Exception as exc:
+        logger.debug(
+            "[Stelle] Jacquard username lookup failed for %s: %s",
+            company_keyword, exc,
+        )
+    # 2) Legacy disk fallback.
+    try:
+        username_path = P.linkedin_username_path(company_keyword)
+        if username_path.exists():
+            v = username_path.read_text().strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    return None
+
+
 def _fetch_linkedin_profile(company_keyword: str) -> str | None:
     """Fetch the client's LinkedIn profile summary via APIMaestro."""
-    username_path = P.linkedin_username_path(company_keyword)
-    if not username_path.exists():
-        return None
-
-    username = username_path.read_text().strip()
+    username = _resolve_linkedin_username(company_keyword)
     if not username or not APIMAESTRO_KEY or not APIMAESTRO_HOST:
         return None
 
@@ -1432,13 +1668,12 @@ def _fetch_linkedin_profile(company_keyword: str) -> str | None:
 
 def _fetch_published_posts(company_keyword: str) -> tuple[list[dict], set[str]]:
     """Fetch the client's own published posts from Supabase. Returns (posts, dates)."""
-    username_path = P.linkedin_username_path(company_keyword)
-    if not username_path.exists():
-        logger.info("[Stelle] No linkedin_username.txt for %s — skipping Supabase", company_keyword)
+    username = _resolve_linkedin_username(company_keyword)
+    if not username:
+        logger.info("[Stelle] No LinkedIn handle for %s — skipping Supabase", company_keyword)
         return [], set()
 
-    username = username_path.read_text().strip()
-    if not username or not SUPABASE_URL or not SUPABASE_KEY:
+    if not SUPABASE_URL or not SUPABASE_KEY:
         return [], set()
 
     logger.info("[Stelle] Fetching published posts for @%s from Supabase...", username)
@@ -1507,11 +1742,7 @@ MAX_VOICE_EXAMPLES = 5
 
 def _fetch_voice_examples(company_keyword: str) -> list[dict]:
     """Fetch the client's top posts by engagement as voice/style exemplars."""
-    username_path = P.linkedin_username_path(company_keyword)
-    if not username_path.exists():
-        return []
-
-    username = username_path.read_text().strip()
+    username = _resolve_linkedin_username(company_keyword)
     if not username or not SUPABASE_URL or not SUPABASE_KEY:
         return []
 
@@ -1568,18 +1799,125 @@ def _fetch_voice_examples(company_keyword: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _get_ordinal_api_key(company_keyword: str) -> str | None:
+    """Return Ordinal api_key for ``company_keyword``.
+
+    **Source of truth: Amphoreus Supabase ``ordinal_auth`` table.**
+    This table mirrors Jacquard's ``ordinal_auth`` row-for-row via
+    :mod:`jacquard_mirror_sync` (36 rows, PK=company_id, full-refresh
+    each sync run). Lookup order:
+
+      1. ``provider_org_slug == keyword`` — legacy pseudo-slug path
+         (e.g. ``runpod-zhen``, ``hume-andrew``).
+      2. ``company_id == resolve_to_uuid(keyword)`` — so mirror-backed
+         dropdown slugs that aren't per-FOC rows still route to their
+         company's shared Ordinal workspace. All FOCs under the same
+         Jacquard company share one key.
+
+    **CSV fallback**: if the Supabase read returns nothing (migration
+    not yet applied, network blip, or a slug not yet synced), we fall
+    back to the on-disk ``/data/memory/ordinal_auth_rows.csv``. This
+    keeps the read path correct during the mirror rollout and also
+    means a teammate who locally curated their own CSV doesn't lose
+    anything. Remove the fallback once the mirror has been verified
+    in production for a few sync cycles.
+    """
+    target = (company_keyword or "").strip().lower()
+    if not target:
+        return None
+
+    # --- Primary: Amphoreus Supabase ``ordinal_auth`` ---------------------
+    try:
+        from backend.src.db.amphoreus_supabase import _get_client, is_configured
+        if is_configured():
+            sb = _get_client()
+            if sb is not None:
+                # 1) direct slug match. Case-insensitive via ilike to
+                # match CSV semantics.
+                try:
+                    rows = (
+                        sb.table("ordinal_auth")
+                          .select("api_key, provider_org_slug, company_id")
+                          .ilike("provider_org_slug", target)
+                          .limit(1)
+                          .execute()
+                          .data
+                    ) or []
+                    if rows:
+                        key = (rows[0].get("api_key") or "").strip()
+                        if key.startswith("ord_"):
+                            return key
+                except Exception as exc:
+                    logger.debug("[Stelle] ordinal_auth slug lookup failed: %s", exc)
+
+                # 2) UUID-resolved company_id match
+                try:
+                    from backend.src.lib.company_resolver import resolve_to_uuid
+                    resolved = resolve_to_uuid(company_keyword)
+                except Exception:
+                    resolved = None
+                if resolved:
+                    try:
+                        rows = (
+                            sb.table("ordinal_auth")
+                              .select("api_key")
+                              .eq("company_id", resolved)
+                              .limit(1)
+                              .execute()
+                              .data
+                        ) or []
+                        if rows:
+                            key = (rows[0].get("api_key") or "").strip()
+                            if key.startswith("ord_"):
+                                return key
+                    except Exception as exc:
+                        logger.debug("[Stelle] ordinal_auth company_id lookup failed: %s", exc)
+    except Exception as exc:
+        logger.debug("[Stelle] ordinal_auth Supabase read failed, falling back to CSV: %s", exc)
+
+    # --- Fallback: on-disk CSV --------------------------------------------
+    # Migration safety net — kept around until the mirror is verified
+    # healthy in production. Remove once we're confident sync covers
+    # every key.
     csv_path = P.ordinal_auth_csv()
     if not csv_path.exists():
         return None
     try:
         with open(csv_path, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                slug = (row.get("provider_org_slug") or "").strip()
-                if slug.lower() == company_keyword.lower():
-                    key = (row.get("api_key") or "").strip()
-                    return key if key.startswith("ord_") else None
+            rows = list(csv.DictReader(f))
     except Exception as e:
         logger.warning("[Stelle] Failed to read ordinal_auth_rows.csv: %s", e)
+        return None
+
+    # 1) direct slug match
+    for row in rows:
+        if (row.get("provider_org_slug") or "").strip().lower() == target:
+            key = (row.get("api_key") or "").strip()
+            if key.startswith("ord_"):
+                logger.info(
+                    "[Stelle] ordinal_auth key for %r served from CSV fallback — "
+                    "Supabase mirror missed this row. Sync may not have caught it yet.",
+                    target,
+                )
+                return key
+
+    # 2) UUID resolution → company_id match
+    try:
+        from backend.src.lib.company_resolver import resolve_to_uuid
+        resolved = resolve_to_uuid(company_keyword)
+    except Exception:
+        resolved = None
+    if resolved:
+        ruid = resolved.lower()
+        for row in rows:
+            if (row.get("company_id") or "").strip().lower() == ruid:
+                key = (row.get("api_key") or "").strip()
+                if key.startswith("ord_"):
+                    logger.info(
+                        "[Stelle] ordinal_auth key for company_id=%s served from "
+                        "CSV fallback — Supabase mirror missed this row.",
+                        resolved,
+                    )
+                    return key
     return None
 
 
@@ -1657,12 +1995,116 @@ def _fetch_ordinal_drafts(company_keyword: str, exclude_dates: set[str] | None =
     return all_posts
 
 
-def _fetch_all_ordinal_hooks(company_keyword: str) -> str:
-    """Fetch hooks/titles of ALL posts in Ordinal (any status) for topic dedup.
+def _fetch_jacquard_dedup_keys(company_keyword: str) -> tuple[set[str], set[str]]:
+    """Thin wrapper returning just ``(provider_urns, content_hashes)``
+    for posts the client has already published to LinkedIn, sourced
+    from Jacquard's ``linkedin_posts``. Used by
+    :func:`_fetch_all_ordinal_hooks` to suppress overlap between the
+    Ordinal dump and the Jacquard-direct dump (same post rendered
+    twice). Full post bodies come from :func:`_fetch_jacquard_posts`.
+    """
+    posts = _fetch_jacquard_posts(company_keyword)
+    urns: set[str] = set()
+    hashes: set[str] = set()
+    for p in posts:
+        u = (p.get("provider_urn") or "").strip()
+        if u:
+            urns.add(u)
+        t = (p.get("post_text") or "").strip()
+        if t:
+            hashes.add(_normalize_for_dedup(t))
+    return urns, hashes
 
-    Returns a formatted string injected into Stelle's user prompt so she
-    knows every topic already written, scheduled, or in-review and avoids
-    duplication. No LLM call — just an API fetch + text formatting.
+
+_JACQUARD_DEDUP_WINDOW_DAYS = 180   # ~6 months
+
+
+def _fetch_jacquard_posts(company_keyword: str) -> list[dict]:
+    """Return the creator's recent LinkedIn posts from Jacquard's
+    ``linkedin_posts`` table — full post text, date, URN.
+
+    Windowed to the last ``_JACQUARD_DEDUP_WINDOW_DAYS`` (180d) because
+    older posts aren't useful dedup signal: LinkedIn's feed has no
+    institutional memory at multi-year timescales, and topics a creator
+    covered 2+ years ago are fair game to cover again from a fresh
+    angle. Older posts still inform *voice* (via
+    :func:`_fetch_voice_examples`, which is unwindowed) — they're just
+    not rendered into the "EXISTING POSTS" block.
+
+    This source covers:
+      * Posts pushed via Ordinal  — overlap with Ordinal's Posted set
+      * Posts drafted in Lineage and posted without going through
+        Ordinal — invisible to the Ordinal API, but visible here
+      * Recent posts from before the client was on Ordinal
+      * Posts published via any other tool
+
+    :func:`_fetch_all_ordinal_hooks` concatenates these into the same
+    EXISTING POSTS prompt block as the Ordinal dump so Stelle has a
+    single dedup surface covering every content path.
+
+    Empty list on any failure so the caller can keep going with just
+    the Ordinal dump.
+    """
+    username = _resolve_linkedin_username(company_keyword)
+    if not username or not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    cutoff = (_dt.now(_tz.utc) - _td(days=_JACQUARD_DEDUP_WINDOW_DAYS)).isoformat()
+
+    try:
+        resp = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/linkedin_posts",
+            params={
+                "select": "provider_urn,post_text,posted_at",
+                "creator_username": f"eq.{username}",
+                "is_company_post": "eq.false",
+                "post_text": "not.is.null",
+                "posted_at": f"gte.{cutoff}",
+                "order": "posted_at.desc",
+                "limit": "200",
+            },
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+            },
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        return resp.json() or []
+    except Exception as exc:
+        logger.debug("[Stelle] jacquard posts fetch skipped: %s", exc)
+        return []
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Collapse whitespace + lowercase the first 200 chars so small
+    formatting differences (bullet chars, paragraph breaks) don't cause
+    false misses when comparing Ordinal's ``li.copy`` to Jacquard's
+    ``post_text``.
+    """
+    import re as _re
+    return _re.sub(r"\s+", " ", text).strip()[:200].lower()
+
+
+def _fetch_all_ordinal_hooks(company_keyword: str) -> str:
+    """Fetch every post in Ordinal (draft/scheduled/approved/posted) and
+    format them into a single prompt block for topic-dedup.
+
+    Injected verbatim into Stelle's user prompt so she knows every topic
+    already written, scheduled, in-review, or live, and avoids
+    duplicates. No LLM call — just API fetch + text formatting.
+
+    Why every status: since the memory/ directory was deprecated in
+    favour of Supabase, Stelle no longer reads a separate "published
+    posts" set from disk. Ordinal's Posted-status entries are now the
+    authoritative view of already-live posts for dedup purposes. The
+    previous implementation filtered those out on the assumption that
+    workspace files would render them separately — that assumption is
+    dead (no code writes ``posts/published/`` anymore), and the filter
+    was silently stripping the dedup signal on every run. Hence the
+    Innovo comparator-arm duplicate (2026-04-20) that matched a
+    2026-04-02 Posted entry.
     """
     api_key = _get_ordinal_api_key(company_keyword)
     if not api_key:
@@ -1676,6 +2118,17 @@ def _fetch_all_ordinal_hooks(company_keyword: str) -> str:
 
     entries: list[str] = []
     cursor: str | None = None
+    # Captured during the Ordinal loop, used below to suppress the
+    # same-post-twice case when we also pull from Jacquard.
+    ordinal_urns_captured: set[str] = set()
+
+    # No status filter. Per the 2026-04-22 workflow redesign: rejected
+    # drafts are manually purged from Ordinal by the operator, so
+    # anything still visible here is legitimately live queue or shipped.
+    # Rejected drafts are preserved in Amphoreus via the Posts-tab
+    # "Reject" action with their comments attached, and surfaced to
+    # Stelle/Aglaea via :mod:`backend.src.services.post_bundle` as a
+    # distinct learning signal (not dedup material).
 
     try:
         while True:
@@ -1699,6 +2152,23 @@ def _fetch_all_ordinal_hooks(company_keyword: str) -> str:
                 title = (p.get("title") or "").strip()
                 if not text and not title:
                     continue
+
+                # Skip if Jacquard already has this post — the workspace
+                # files will surface it on their own. Check URN first
+                # (most reliable when Ordinal exposes it), fall back to
+                # a content-hash match so we don't depend on Ordinal's
+                # field-name stability.
+                urn = (
+                    li.get("urn")
+                    or li.get("postUrn")
+                    or li.get("providerUrn")
+                    or li.get("provider_urn")
+                    or ""
+                ).strip()
+                # Capture URN so the Jacquard append pass below can
+                # suppress the same post rendered twice.
+                if urn:
+                    ordinal_urns_captured.add(urn)
 
                 date_str = ""
                 for date_key in ("publishDate", "publishAt", "createdAt"):
@@ -1724,7 +2194,56 @@ def _fetch_all_ordinal_hooks(company_keyword: str) -> str:
 
     except Exception as e:
         logger.warning("[Stelle] Ordinal hook fetch for dedup failed: %s", e)
-        return ""
+        # Continue with whatever we got — we still want the Jacquard
+        # and local additions below. Returning "" here would silently
+        # lose Lineage-path dedup.
+
+    # Append Jacquard-scraped posts. Ordinal's API only shows posts that
+    # went through Ordinal; Jacquard's scraper sees the LinkedIn profile
+    # directly, so it also covers Lineage-path posts, pasted-directly
+    # posts, pre-Ordinal history, and posts via other tools. Redundancy
+    # with the Ordinal dump is fine — a little extra token spend beats
+    # missing a whole content-path's dedup signal.
+    #
+    # We do a cheap overlap suppression to avoid rendering the exact
+    # same post twice: collect the Ordinal-side URN + normalised-text
+    # sets and skip Jacquard entries that match either.
+    ordinal_urns_seen: set[str] = set(ordinal_urns_captured)
+    ordinal_hash_prefixes_seen: set[str] = set()
+    try:
+        jacquard_posts = _fetch_jacquard_posts(company_keyword)
+        jacquard_added = 0
+        # Build the collision sets from the entries we already emitted.
+        for line in entries:
+            norm = _normalize_for_dedup(line)
+            # 120-char prefix is long enough to avoid false positives
+            # (two unrelated posts rarely share 120 normalised chars)
+            # and short enough to survive small formatting drift.
+            if len(norm) >= 120:
+                ordinal_hash_prefixes_seen.add(norm[:120])
+        for jp in jacquard_posts:
+            text = (jp.get("post_text") or "").strip()
+            if not text:
+                continue
+            urn = (jp.get("provider_urn") or "").strip()
+            if urn and urn in ordinal_urns_seen:
+                continue
+            h = _normalize_for_dedup(text)
+            # Exact-prefix match against any Ordinal line. Looser than
+            # full-string equality (catches minor formatting drift) and
+            # much tighter than the earlier substring-anywhere check.
+            if len(h) >= 120 and h[:120] in ordinal_hash_prefixes_seen:
+                continue
+            date_str = (jp.get("posted_at") or "")[:10]
+            entries.append(f"- [Posted·LinkedIn] {date_str}:\n{text}\n")
+            jacquard_added += 1
+        if jacquard_added:
+            logger.info(
+                "[Stelle] Appended %d Jacquard-only posts to dedup block (%s)",
+                jacquard_added, company_keyword,
+            )
+    except Exception as exc:
+        logger.warning("[Stelle] Jacquard post dump for dedup failed: %s", exc)
 
     # Also include locally generated posts not yet pushed to Ordinal.
     try:
@@ -1752,15 +2271,18 @@ def _fetch_all_ordinal_hooks(company_keyword: str) -> str:
 
     logger.info("[Stelle] Fetched %d existing post hooks for dedup (%s)", len(entries), company_keyword)
     return (
-        "\n\nEXISTING POSTS (all posts in Ordinal and locally generated — "
-        f"{len(entries)} total). Full text included so you can judge "
-        "thematic overlap accurately. DO NOT write a post that covers "
-        "the same TOPIC as any existing post, even from a different "
-        "angle. Two posts about the same activity, setting, or subject "
-        "(e.g. climbing, piano, a specific trial) will read as "
-        "repetition to the audience regardless of angle distinction. "
-        "Every post you write must occupy genuinely new thematic "
-        "territory:\n\n"
+        "\n\nEXISTING POSTS — pipeline view (every draft + published + "
+        "rejected post in the operator's queue, "
+        f"{len(entries)} total). Every published LinkedIn post for this "
+        "creator is already in the POSTS block above (body + engagement "
+        "+ comments + deltas + semantic neighbors) — this list is just "
+        "the hooks-only index for dedup. Treat BOTH sources as "
+        "authoritative for dedup: do NOT write a post that covers the "
+        "same TOPIC as any existing post here OR in the POSTS block, "
+        "even from a different angle. Two posts about the same activity, "
+        "setting, or subject (e.g. climbing, piano, a specific trial) "
+        "will read as repetition regardless of angle. Every post you "
+        "write must occupy genuinely new thematic territory:\n\n"
         + "\n".join(entries)
     )
 
@@ -1807,11 +2329,7 @@ def _fetch_research_files(company_keyword: str) -> list[dict]:
         return []
 
     files: list[dict] = []
-    username_path = P.linkedin_username_path(company_keyword)
-    if not username_path.exists():
-        return []
-
-    username = username_path.read_text().strip()
+    username = _resolve_linkedin_username(company_keyword)
     if not username:
         return []
 
@@ -1857,81 +2375,16 @@ def _fetch_research_files(company_keyword: str) -> list[dict]:
 
 
 
-def _build_observation_digest(company_keyword: str, n: int = 10) -> str:
-    """Compact raw digest of the client's top-N posts by engagement.
-
-    Replaces the `query_observations` tool as Stelle's access to her own
-    performance history. Dumps the N best-reacted-to scored observations
-    as full text + full numbers. No aggregation, no summary: the same raw
-    (draft, published, engagement) triples she used to fetch via the
-    tool, just delivered up-front at workspace-stage time.
-    """
-    try:
-        from backend.src.db.local import ruan_mei_load
-    except Exception:
-        return ""
-
-    state = ruan_mei_load(company_keyword)
-    if not state:
-        return "# Post history\n\n(no scored observations available)\n"
-
-    scored = [
-        o for o in state.get("observations", [])
-        if ((o.get("reward") or {}).get("raw_metrics") or {}).get("impressions")
-    ]
-    if not scored:
-        return "# Post history\n\n(no scored observations available)\n"
-
-    def _reactions(o: dict) -> int:
-        return int(((o.get("reward") or {}).get("raw_metrics") or {}).get("reactions", 0) or 0)
-
-    scored.sort(key=_reactions, reverse=True)
-    top = scored[:n]
-
-    lines: list[str] = []
-    lines.append("# Post history — top performers")
-    lines.append("")
-    lines.append(
-        f"The {len(top)} highest-reacted posts from this client's scored "
-        f"history. Each entry shows the text as Stelle drafted it, the "
-        f"text as the client ultimately published it (may differ after "
-        f"client edits), and the engagement numbers as of the last sync. "
-        f"This is your baseline — everything you write will be compared "
-        f"to this distribution."
-    )
-    lines.append("")
-
-    for i, o in enumerate(top, 1):
-        raw = ((o.get("reward") or {}).get("raw_metrics") or {})
-        r = int(raw.get("reactions", 0) or 0)
-        c = int(raw.get("comments", 0) or 0)
-        rp = int(raw.get("reposts", 0) or 0)
-        imp = int(raw.get("impressions", 0) or 0)
-        posted_at = (o.get("posted_at") or "")[:10]
-        draft = (o.get("post_body") or "").strip()
-        published = (o.get("posted_body") or "").strip()
-
-        lines.append("---")
-        lines.append(f"## Post {i} — {posted_at}")
-        lines.append("")
-        lines.append(f"**Engagement:** {r} reactions · {c} comments · {rp} reposts · {imp} impressions")
-        lines.append("")
-
-        if published and published != draft:
-            lines.append("**Stelle draft:**")
-            lines.append("")
-            lines.append(draft)
-            lines.append("")
-            lines.append("**Client-published version:**")
-            lines.append("")
-            lines.append(published)
-        else:
-            lines.append("**Post text:**")
-            lines.append("")
-            lines.append(draft or published)
-        lines.append("")
-
-    return "\n".join(lines)
+# _build_observation_digest was deleted 2026-04-23. It synthesized
+# memory/post-history.md — a top-10-by-engagement digest with
+# draft-vs-published diffs — but (a) nothing called it anymore, the
+# output file was never written to disk after the virtual-filesystem
+# migration, and (b) the data it rendered is now fully covered by
+# build_post_bundle which delivers every post (not just top 10) with
+# the same body + engagement + delta information, injected directly
+# into user_prompt at generation time. The top-N filter was itself a
+# Bitter Lesson violation: letting Opus see the raw distribution is
+# stricter than pre-chewing "these are the winners" for it.
 
 
 # ---------------------------------------------------------------------------
@@ -1943,7 +2396,7 @@ def _setup_workspace(company_keyword: str) -> Path:
 
     Client data (transcripts, engagement, research, context, edits) is
     read on-demand from Jacquard's Supabase + GCS via the dispatchers
-    in ``lineage_fs_client.py``. Nothing is staged to local disk for
+    in ``database_client.py``. Nothing is staged to local disk for
     reading purposes — local disk is ONLY Stelle's scratch space
     (iteration drafts, notes, ``scratch/final/``).
 
@@ -2008,19 +2461,15 @@ The workspace is a virtual view over the client's data source (Supabase
 + GCS). Everything you read flows through that — there is no fly-local
 ``memory/`` tree.
 
-- `<slug>/post-history.md` — top 10 performers for this user, rendered
-  on read from ``linkedin_posts``. Your baseline: everything you write
-  is compared against this distribution.
-- `<slug>/engagement/posts.json` — every scored post with raw engagement
-  numbers + per-reaction breakdown. Filter and summarize in-context.
-
-- `<slug>/posts/published/` or `<slug>/tone/` — use these for voice
-  examples. Every post file carries engagement metadata in its header
-  so you can rank yourself; `tone/` exposes curated
-  ``tone_references`` picks.
-
-- `query_observations` tool → not available. Read the engagement files
-  above instead; they carry the same data.
+- **Your primary engagement / body / comment / edit / voice signal is
+  the POSTS block already concatenated into the user_prompt above.**
+  Every recent post for this creator is there with body + engagement
+  counts + threaded comments + edit delta + top-2 semantic neighbors.
+  Every one of those posts is itself a voice example — voice is
+  learned from the raw distribution, not from a curated pick-list.
+  Don't hunt for "post-history.md", "engagement/posts.json", "tone/",
+  or "voice-examples/" — those paths were retired. The POSTS block
+  IS that data.
 
 - **`retrieve_similar_posts` (cross-creator corpus, ~390k real LinkedIn
   posts, semantic search).** Your client's own post history is a
@@ -2038,14 +2487,13 @@ The workspace is a virtual view over the client's data source (Supabase
     exist?" If yes, how did it land? Revise or differentiate.
 
   Suggested args:
-    query: free text (topic, angle, or a candidate draft)
+    query: free text (topic, angle, or a candidate draft). Express
+      content-type filtering directly in the query — e.g. "first-person
+      narrative with a specific number, NOT a product announcement".
     k: 10-20 for exploration, 3-5 for comparison
     min_reactions: 50-200 for outlier-biased views (optional)
     exclude_creator: pass the client's LinkedIn username to avoid
       retrieving their own posts
-    exclude_archetypes: ["announcement","celebration","promotional_post"]
-      filters out brag-adjacent content when you want content-lane
-      precedents (optional)
 
   Read the returned posts as REAL precedents, not prescriptions —
   adapt form, not content. Cite them in your `why_post` rationale when
@@ -2100,10 +2548,9 @@ The workspace is a virtual view over the client's data source (Supabase
 
 - **Multi-post runs: vary angles, don't riff one topic twice.**
   When the user asks for N posts, cover N DIFFERENT angles/topics —
-  not the same topic with wording variations. Read
-  ``<slug>/post-history.md`` to see what's landed before and
-  ``<slug>/engagement/posts.json`` for the full scored distribution;
-  pick underrepresented angles. Space the publication dates across the
+  not the same topic with wording variations. The POSTS block at the
+  top of this prompt shows every recent post with engagement; pick
+  underrepresented angles. Space the publication dates across the
   cadence (3 posts/week = Mon/Wed/Fri or Mon/Tue/Thu). Pass each post's
   slot as ``scheduled_date``.
 
@@ -2131,42 +2578,78 @@ files) is your own fly-local SandboxFs — read, write, edit, list freely.
   the shared ``conversations/``, ``slack/``, ``tasks/``, ``.pi/``.
 - Scratch paths (fly-local, read/write): anything else.
 
-Classic iteration pattern:
+Classic iteration pattern — two-critic loop:
 
     write_file("scratch/post1-v1.md", <draft>)
-    → get_reader_reaction(draft_text=<draft>)
+    → get_reader_reaction(draft_text=<draft>)      # will readers engage?
+    → check_client_comfort(draft_text=<draft>)     # will the FOC user ship this?
     → write_file("scratch/post1-v2.md", <revised>)
-    → get_reader_reaction(draft_text=<revised>)
-    → … until Irontomb stops complaining, then submit_draft.
+    → repeat both …
+    → … until BOTH critics pass, then submit_draft.
 
-You can also keep drafts purely in-context — ``get_reader_reaction``
-takes the full draft directly. Use whichever feels natural.
+The two critics optimise different axes — pass both:
+  * Irontomb (`get_reader_reaction`) — engagement / reader stickiness.
+  * Aglaea (`check_client_comfort`) — client voice fidelity, comfort to
+    publish, absence of claims the client has edited out in prior runs.
+  A post can win one and lose the other. Don't ship on half.
+
+You can also keep drafts purely in-context — both tools take the full
+draft text directly. Use whichever feels natural.
 
 Only ``submit_draft`` persists finished posts.
 
 ## Workspace layout (read-only; paths auto-prefixed to the target user)
 
 - `transcripts/` — raw client interview transcripts. Every claim traces here.
+  **Interview transcripts are the source of content; internal sync/standup
+  transcripts (content-eng, GTM weekly, product demos, team retros) are
+  BACKGROUND ONLY — use them to understand context and voice, never as
+  the narrative source of a post.**
 - `research/` — deep research (company + person). Supplementary source material.
-- `engagement/posts.json` — this user's authored LinkedIn posts with engagement metrics.
-- `engagement/reactions.json` / `comments.json` / `profiles.json` — engagement rows + reactor/commenter profiles.
-- `engagement/client_info.json` — summary metadata for this user.
-- `context/account.md` — auto-built: client name, company, posts_per_month target, Slack channels.
 - `context/` — operator-uploaded brand docs / positioning PDFs.
-- `reports/` — latest ICP report + Typst template. Names specific engagers and recurring themes — read before deciding angles.
-- `posts/published/` — published LinkedIn posts; engagement metrics in each file header. Rank for voice examples.
-- `posts/drafts/` — existing unpushed drafts. Do NOT write here — use `submit_draft`.
-- `edits/` — FEEDBACK SIGNAL. Per-draft first-snapshot vs. final-published diffs with threaded operator comments. Read before drafting.
-- `tone/` — curated voice/style references.
 - `strategy/` — persistent cross-run strategy memory. Read-only.
-- `post-history.md` — synthesized top-performing posts. Baseline — everything you write is compared to this distribution.
-- `profile.md` — synthesized LinkedIn profile.
+- `profile.md` — simple synthesized LinkedIn profile summary.
+
+The POSTS block at the top of this prompt already carries every post
+(body + engagement + comments + edit delta + semantic neighbors) for
+this creator. Don't look for engagement/*.json, posts/published/,
+edits/, reports/, post-history.md, or context/account.md — those paths
+were retired. Everything you'd expect to find in them is in the POSTS
+block.
 
 Shared (not user-scoped; don't prepend slug):
-- `conversations/trigger-log.jsonl` — chronological replay of every prior trigger (interviews, CE feedback with diffs, manual runs). Scan at session start.
+- `conversations/trigger-log.jsonl` — chronological replay of every prior trigger (interviews, CE feedback with diffs, manual runs, Slack messages). Scan at session start.
 - `tasks/<id>.json` — pending review tasks.
 - `slack/` — Slack channel snapshots.
 - `.pi/` — historical Pi skill files. IGNORE.
+
+## Client-supplied material (articles / links / pasted text)
+
+Clients share primary source material two ways:
+
+1. **Slack → trigger log.** When a client sends an article, podcast,
+   blog post, etc. in Slack, that message lands in
+   `conversations/trigger-log.jsonl` with its URL intact.
+2. **Operator paste → `transcripts/`.** Content engineers paste client
+   notes, link dumps, or ad-hoc context directly into the Transcripts
+   tab. Those land as `paste-*.md` files in `transcripts/` (listed
+   first because they're the freshest operator-added material).
+
+**Any URL in either source is primary material for this run.** Use
+`fetch_url` to pull the article body, then mine it the same way you'd
+mine a transcript — extract the actual claim, quote, number, or
+anecdote, and build a post around it. This is the ONLY path by which
+a client-supplied link becomes a post, so if the operator's prompt
+doesn't separately call it out, the trigger log + paste transcripts
+are your signal.
+
+Caveats:
+- `fetch_url` on `docs.google.com/*` URLs will fail — Google Docs
+  requires OAuth we don't have. Skip and flag via `missing_resources`.
+- Paywalled articles will often return fragments; if the fetched body
+  is under ~500 chars of real content, skip.
+- Only act on trigger-log entries from the **last 48 hours** unless
+  the operator's prompt says otherwise. Older links are stale.
 
 ## Draft write contract
 
@@ -2181,19 +2664,18 @@ persisting. The fact-check report + citations are appended to
 
 ## Ingestion order at session start
 
-1. ``list_directory("")`` — confirm the target slug and what's available.
-2. ``read_file("conversations/trigger-log.jsonl")`` — your history with
+1. Re-read the POSTS block at the top of this prompt — that's your
+   body + engagement + comments + edits + neighbors for every recent
+   post this creator has. Everything starts from that distribution.
+2. ``list_directory("")`` — confirm the target slug and what else is
+   available (transcripts, research, context, tone, strategy, profile).
+3. ``read_file("conversations/trigger-log.jsonl")`` — your history with
    this company (interviews, CE feedback diffs, prior runs). Scan it.
-3. ``read_file("strategy/strategy.md")`` if it exists — cross-run memory
+4. ``read_file("strategy/strategy.md")`` if it exists — cross-run memory
    left by your previous selves.
-4. ``list_directory("edits/")`` — operator-edit feedback signal.
 5. ``list_directory("transcripts/")`` + read the latest 2-3 transcripts.
-6. ``list_directory("engagement/")`` — the JSON files are your data
-   substrate for what's actually landing with this user's audience.
-7. ``list_directory("reports/")`` — the ICP report names specific
-   engagers and themes. Read it once.
-8. Spot-read ``tone/``, ``posts/published/``, ``context/account.md`` as
-   needed for voice calibration and company facts.
+6. Spot-read ``profile.md`` + ``context/`` (brand PDFs) if you need
+   domain facts the POSTS block + transcripts don't already cover.
 """
 
 
@@ -2219,26 +2701,51 @@ shared roots. Call `list_directory("")` once to discover available slugs,
 then use explicit slug prefixes in every filesystem call.
 
 - `<slug>/transcripts/` — raw client interview transcripts. Every claim traces here.
+  **Interview transcripts are the source of content; internal sync/standup
+  transcripts (content-eng, GTM weekly, product demos, team retros) are
+  BACKGROUND ONLY — use them to understand context and voice, never as
+  the narrative source of a post.**
 - `<slug>/research/` — deep research (company + person). Supplementary source material.
-- `<slug>/engagement/posts.json` — this user's authored LinkedIn posts with engagement metrics.
-- `<slug>/engagement/reactions.json` / `comments.json` / `profiles.json` — engagement rows + reactor/commenter profiles.
-- `<slug>/engagement/client_info.json` — summary metadata for this user.
-- `<slug>/context/account.md` — auto-built: client name, company, posts_per_month target, Slack channels.
 - `<slug>/context/` — operator-uploaded brand docs / positioning PDFs.
-- `<slug>/reports/` — latest ICP report + Typst template. Names specific engagers and recurring themes — read before deciding angles.
-- `<slug>/posts/published/` — published LinkedIn posts; engagement metrics in each file header. Rank for voice examples.
-- `<slug>/posts/drafts/` — existing unpushed drafts. Do NOT write here — use `submit_draft`.
-- `<slug>/edits/` — FEEDBACK SIGNAL. Per-draft first-snapshot vs. final-published diffs with threaded operator comments. Read before drafting.
-- `<slug>/tone/` — curated voice/style references.
 - `<slug>/strategy/` — persistent cross-run strategy memory. Read-only.
-- `<slug>/post-history.md` — synthesized top-performing posts. Baseline — everything you write is compared to this distribution.
-- `<slug>/profile.md` — synthesized LinkedIn profile.
+- `<slug>/profile.md` — simple synthesized LinkedIn profile summary.
+
+The POSTS block at the top of this prompt already carries every post
+(body + engagement + comments + edit delta + semantic neighbors) for
+each creator. Don't look for engagement/*.json, posts/published/,
+edits/, reports/, post-history.md, or context/account.md — those paths
+were retired. Everything you'd expect to find in them is in the POSTS
+block.
 
 Shared (not user-scoped; don't prepend slug):
-- `conversations/trigger-log.jsonl` — chronological replay of every prior trigger (interviews, CE feedback with diffs, manual runs). Scan at session start.
+- `conversations/trigger-log.jsonl` — chronological replay of every prior trigger (interviews, CE feedback with diffs, manual runs, Slack messages). Scan at session start.
 - `tasks/<id>.json` — pending review tasks.
 - `slack/` — Slack channel snapshots.
 - `.pi/` — historical Pi skill files. IGNORE.
+
+## Slack-originated material (articles / links / pasted text from clients)
+
+The `trigger-log.jsonl` carries Slack messages from clients to the
+content team. When a client sends an article, podcast, blog post, or
+any other primary source in Slack (often @-mentioning Lineage and
+saying something like "draft a post from this"), that message lands
+in the trigger log with its URL intact.
+
+**If the most recent trigger-log entries contain URLs from Slack (or
+any source), treat those URLs as primary material for this run.** Use
+`fetch_url` to pull the article body, then mine it the same way you'd
+mine a transcript — extract the actual claim, quote, number, or
+anecdote, and build a post around it. This is the ONLY path by which
+a client-supplied link becomes a post, so if the operator's prompt
+doesn't separately call it out, the trigger log is your signal.
+
+Caveats:
+- `fetch_url` on `docs.google.com/*` URLs will fail — Google Docs
+  requires OAuth we don't have. Skip and flag via `missing_resources`.
+- Paywalled articles will often return fragments; if the fetched body
+  is under ~500 chars of real content, skip.
+- Only act on trigger-log entries from the **last 48 hours** unless
+  the operator's prompt says otherwise. Older links are stale.
 
 ## Per-draft author attribution
 
@@ -2261,17 +2768,18 @@ persisting. The fact-check report + citations are appended to
 
 ## Ingestion order at session start
 
-1. ``list_directory("")`` — discover the FOC-user slugs.
-2. ``read_file("conversations/trigger-log.jsonl")`` — history of prior
+1. Re-read the POSTS block at the top of this prompt — every recent
+   post for every slug is there with body + engagement + comments +
+   edits + neighbors. That is your engagement + voice baseline.
+2. ``list_directory("")`` — discover the FOC-user slugs.
+3. ``read_file("conversations/trigger-log.jsonl")`` — history of prior
    triggers for this company (interviews, CE feedback diffs, manual runs).
-3. For each slug you plan to write for:
+4. For each slug you plan to write for:
    a. ``read_file("<slug>/strategy/strategy.md")`` if it exists.
-   b. ``list_directory("<slug>/edits/")`` — operator-edit feedback.
-   c. ``list_directory("<slug>/transcripts/")`` + read latest 2-3.
-   d. ``list_directory("<slug>/engagement/")`` — JSON data substrate.
-   e. ``list_directory("<slug>/reports/")`` — ICP report if present.
-   f. Spot-read ``<slug>/tone/``, ``<slug>/posts/published/``,
-      ``<slug>/context/account.md`` as needed.
+   b. ``list_directory("<slug>/transcripts/")`` + read latest 2-3.
+   c. Spot-read ``<slug>/profile.md`` + ``<slug>/context/`` (brand PDFs)
+      if you need domain facts the POSTS block + transcripts don't
+      already cover.
 """
 
 
@@ -2280,7 +2788,7 @@ def _today_preamble() -> str:
     the past. Claude's training cutoff means she has no inherent sense
     of what day it is — without this she'll hallucinate dates from
     whatever year felt plausible in training data. Applies in both
-    Lineage and local mode."""
+    database and local mode."""
     from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc)
     today_iso = now.date().isoformat()
@@ -2292,8 +2800,9 @@ def _today_preamble() -> str:
         f"**{tomorrow} or later** — never in the past, never today. "
         "When spacing multiple posts across a cadence (Mon/Wed/Fri, "
         "Tue/Thu, etc.), anchor to today and pick the next N slots going "
-        "forward. The posts_per_month target in `context/account.md` "
-        "tells you the cadence density.\n"
+        "forward. If the operator's prompt didn't specify the cadence, "
+        "infer it from how often this creator has been posting recently "
+        "(see the POSTS block).\n"
     )
 
 
@@ -2305,7 +2814,7 @@ def _build_dynamic_directives(company_keyword: str) -> str:
     Additionally emits the workspace-layout overlay when a client data
     source is configured (Jacquard Supabase + GCS):
 
-    - ``USER-TARGETED`` when ``LINEAGE_USER_SLUG`` is set. Every draft
+    - ``USER-TARGETED`` when ``DATABASE_USER_SLUG`` is set. Every draft
       is attributed to that user and paths are auto-prefixed.
     - ``COMPANY-WIDE``  when no user slug is set. Stelle sees the full
       workspace and must include the slug in every filesystem call.
@@ -2314,8 +2823,8 @@ def _build_dynamic_directives(company_keyword: str) -> str:
     """
     preamble = _today_preamble()
     try:
-        from backend.src.agents import lineage_fs_client as _lfs
-        if not _lfs.is_lineage_mode():
+        from backend.src.agents import database_client as _lfs
+        if not _lfs.is_database_mode():
             return preamble
         layout = (
             _WORKSPACE_LAYOUT_USER_TARGETED
@@ -3053,6 +3562,31 @@ def _find_turn_start(messages: list[dict], idx: int) -> int:
     return -1
 
 
+def _is_tool_result_user_message(msg: dict) -> bool:
+    """True when ``msg`` is a user-role message whose content contains any
+    ``tool_result`` block.
+
+    Such messages are structurally the *response* to the immediately
+    preceding assistant ``tool_use``. Cutting the conversation at such a
+    message orphans the ``tool_use_id`` reference — the Anthropic API
+    rejects the next call with ``"unexpected tool_use_id found in
+    tool_result blocks"``. Detected via both dict-shape blocks (replayed
+    from history) and SDK-shape blocks (freshly returned from the API).
+    """
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if isinstance(block, dict):
+            if block.get("type") == "tool_result":
+                return True
+        elif getattr(block, "type", None) == "tool_result":
+            return True
+    return False
+
+
 def _generate_summary(
     text: str,
     previous_summary: str | None,
@@ -3123,13 +3657,41 @@ def _compact_messages(
     turn_start_idx = -1
 
     if messages[cut_idx].get("role") == "user":
-        pass
+        # A user-role message that *looks* like a turn boundary isn't one
+        # if it contains tool_result blocks — it's the response half of
+        # an assistant(tool_use) ↔ user(tool_result) pair. Cutting there
+        # strands the tool_result with no matching tool_use_id in the
+        # checkpoint-acknowledgement we inject, and the next API call
+        # 400s with ``unexpected tool_use_id``. Advance forward past the
+        # full tool_use/tool_result chain until we land on a plain user
+        # message (start of a fresh turn).
+        while (
+            cut_idx < len(messages)
+            and (
+                _is_tool_result_user_message(messages[cut_idx])
+                or messages[cut_idx].get("role") != "user"
+            )
+        ):
+            cut_idx += 1
+        if cut_idx >= len(messages) - 1:
+            # No clean boundary ahead — skip compaction this pass rather
+            # than produce a malformed message history.
+            return messages
     else:
         turn_start_idx = _find_turn_start(messages, cut_idx)
         if turn_start_idx >= 0 and turn_start_idx > 0:
             is_split_turn = True
         else:
             while cut_idx < len(messages) and messages[cut_idx].get("role") != "user":
+                cut_idx += 1
+            if cut_idx >= len(messages) - 1:
+                return messages
+            # Same hazard on this path: if we just advanced to a
+            # tool_result user message, keep going to a plain user turn.
+            while (
+                cut_idx < len(messages)
+                and _is_tool_result_user_message(messages[cut_idx])
+            ):
                 cut_idx += 1
             if cut_idx >= len(messages) - 1:
                 return messages
@@ -3409,10 +3971,43 @@ def _run_agent_loop(
         # so it must live in the per-run dict, not module-level _TOOL_HANDLERS.
         run_handlers["get_reader_reaction"] = _stelle_get_reader_reaction_handler
 
+        def _stelle_check_client_comfort_handler(_root: Path, args: dict) -> str:
+            """Dispatch a draft to Aglaea for a client-comfort check.
+
+            Aglaea pulls the target FOC user's recent LinkedIn posts,
+            past operator/client feedback on their drafts, and past
+            (draft → published) edit deltas, then returns a 0-10 comfort
+            score + specific flagged spans. Paired with Irontomb's
+            engagement reaction, it gives Stelle a two-axis feedback
+            signal: readers × author.
+            """
+            draft = args.get("draft_text", "")
+            if not draft:
+                return json.dumps({"_error": "draft_text is required"})
+            # Target user resolution: stelle_runner sets DATABASE_USER_SLUG
+            # when the generate endpoint resolved a specific FOC user.
+            # Company slug is STELLE_COMPANY_KEYWORD.
+            import os as _os
+            _user_slug = (_os.environ.get("DATABASE_USER_SLUG") or "").strip() or None
+            _company = company_keyword or None
+            try:
+                from backend.src.agents.aglaea import evaluate_client_comfort
+                result = evaluate_client_comfort(
+                    draft,
+                    user_slug=_user_slug,
+                    company_slug=_company,
+                )
+                return json.dumps(result, default=str)
+            except Exception as _e:
+                logger.warning("[Stelle] Aglaea comfort check failed: %s", _e)
+                return json.dumps({"_error": f"aglaea failed: {str(_e)[:200]}"})
+
+        run_handlers["check_client_comfort"] = _stelle_check_client_comfort_handler
+
         # Wrap submit_draft with a Castorice fact-check gate. The wrapper
         # runs Castorice.fact_check_post on `content` first, replaces the
         # content with the corrected post, and appends the fact-check
-        # report to why_post so the reviewer in Lineage sees Castorice's
+        # report to why_post so the reviewer in database sees Castorice's
         # findings in the draft_comment thread. Failures in Castorice
         # surface as a visible error back to Stelle — she can retry or
         # submit unchecked after acknowledging the failure.
@@ -3424,7 +4019,7 @@ def _run_agent_loop(
             content = args.get("content") or ""
             if not content:
                 return "Error: content is required"
-            # Run Castorice on the clean post text before the Lineage POST.
+            # Run Castorice on the clean post text before the database POST.
             try:
                 from backend.src.agents.castorice import Castorice
                 fc = Castorice().fact_check_post(company_keyword, content)
@@ -3439,8 +4034,13 @@ def _run_agent_loop(
 
             # Build the enriched payload. Keep Stelle's own why_post text
             # and append the fact-check summary so the reviewer sees both.
+            # ``pre_revision_content`` preserves the raw text Stelle
+            # passed so ``_process_result`` can dedup its write_result
+            # loop against this row without caring about non-deterministic
+            # Castorice corrections.
             forwarded = dict(args)
             forwarded["content"] = corrected
+            forwarded["pre_revision_content"] = content
             existing_why = forwarded.get("why_post") or ""
             fc_summary_parts: list[str] = []
             if existing_why:
@@ -3588,7 +4188,29 @@ def _run_agent_loop(
             if event_callback:
                 event_callback("status", {"message": status_msg})
 
-            messages.append({"role": "assistant", "content": response.content})
+            # Anthropic API rejects assistant messages whose FINAL content
+            # block is a ``thinking`` block ("messages.N: The final block in
+            # an assistant message cannot be 'thinking'"). This happens when
+            # Claude's extended-thinking response ends on an unpaired
+            # thinking block — rare, but seen in practice when the stream
+            # is interrupted or the model emits thinking with no following
+            # text/tool_use. Strip trailing thinking blocks before
+            # appending; keep any earlier thinking blocks intact so the
+            # signature verification on following turns still validates.
+            assistant_content = list(response.content)
+            while assistant_content and getattr(assistant_content[-1], "type", None) == "thinking":
+                assistant_content.pop()
+            if not assistant_content:
+                # Degenerate response: no text / tool_use / non-thinking
+                # content at all. Can't safely continue the conversation —
+                # log and terminate the run cleanly.
+                logger.warning(
+                    "[Stelle] turn %d: response contained only thinking blocks "
+                    "(stop_reason=%s); terminating run",
+                    turn, response.stop_reason,
+                )
+                break
+            messages.append({"role": "assistant", "content": assistant_content})
 
             if response.stop_reason == "end_turn":
                 for block in response.content:
@@ -3702,21 +4324,21 @@ def _run_agent_loop(
                         output = run_handlers[name](workspace_root, args)
                         is_error = False
                     except Exception as e:
-                        # Lineage ingestion failures are FATAL. Don't convert
+                        # database ingestion failures are FATAL. Don't convert
                         # to a tool error and let Stelle muddle on with
                         # missing data — re-raise so the subprocess crashes
                         # cleanly and job_manager records a failed run.
-                        from backend.src.agents.lineage_fs_client import (
-                            LineageIngestionError as _LineageErr,
+                        from backend.src.agents.database_client import (
+                            DatabaseIngestionError as _LineageErr,
                         )
                         if isinstance(e, _LineageErr):
                             logger.error(
-                                "[Stelle] FATAL: Lineage ingestion failed during "
+                                "[Stelle] FATAL: database ingestion failed during "
                                 "%s — aborting run. %s", name, e,
                             )
                             if event_callback:
                                 event_callback("error", {
-                                    "message": f"Lineage ingestion failed: {e}",
+                                    "message": f"database ingestion failed: {e}",
                                     "fatal": True,
                                 })
                             raise
@@ -3979,31 +4601,75 @@ def _process_result(
     except Exception:
         _sqlite_available = False
 
-    # ``submit_draft`` is the one write path to posts — Castorice
-    # fact-check, persist, RuanMei observation all happen inside its
-    # wrapper. Repeating that work in the write_result loop produces
-    # duplicate rows and burns API calls for no added value. Short-
-    # circuit the heavy post-processing whenever the Jacquard data source
-    # is live — our proxy for "the submit_draft wrapper was active and
-    # fired per-post".
-    skip_per_post_processing = False
+    # Resolve (company_uuid, user_id) from the company_keyword the
+    # subprocess was spawned under. For pseudo-slugs like
+    # ``trimble-heather`` this picks out the specific FOC user so rows
+    # are stamped with user_id, letting the Posts tab disambiguate
+    # Heather's drafts from Mark's.
+    _company_uuid: str | None = None
+    _user_id: str | None = None
     try:
-        from backend.src.agents import lineage_fs_client as _lfs
-        skip_per_post_processing = _lfs.is_lineage_mode()
-    except Exception:
-        skip_per_post_processing = False
+        from backend.src.lib.company_resolver import resolve_to_company_and_user
+        _company_uuid, _user_id = resolve_to_company_and_user(company_keyword)
+    except Exception as _rexc:
+        logger.debug("[Stelle] _process_result resolver failed: %s", _rexc)
+
+    # ``submit_draft`` is the preferred per-post write path (Castorice
+    # fact-check + persist + RuanMei observation all happen inside its
+    # wrapper). If Stelle called submit_draft for a given post, then
+    # the prompt-mandated follow-up ``write_result`` call would naively
+    # re-do all that work and write a second local_posts row for the
+    # same content.
+    #
+    # Per-run gating is unreliable (CLI vs native, past vs current
+    # deploy). Per-post content-hash dedup is reliable: if a row with
+    # the same (company, content) already exists in local_posts when we
+    # reach this iteration, submit_draft already handled the post and
+    # the heavy block below is pure duplicate spend.
+    def _already_persisted(content: str) -> str | None:
+        """Return the id of an existing local_posts row for this FOC
+        user + content, or None.
+
+        Scope order:
+          - if a resolved ``user_id`` exists, match on user_id (most
+            specific — catches Heather's drafts without clashing with
+            Mark's even though both share the Trimble company UUID)
+          - else match on the resolved company UUID
+          - else fall back to the raw ``company_keyword``
+
+        Matches either ``content`` (post-Castorice) or
+        ``pre_revision_content`` (pre-Castorice). Castorice is
+        non-deterministic so the raw-text match is what makes this
+        robust across the submit_draft → write_result dedup boundary.
+        """
+        if not _sqlite_available or not content:
+            return None
+        try:
+            from backend.src.db.local import get_connection
+            with get_connection() as conn:
+                if _user_id:
+                    row = conn.execute(
+                        "SELECT id FROM local_posts "
+                        "WHERE user_id = ? AND (content = ? OR pre_revision_content = ?) "
+                        "LIMIT 1",
+                        (_user_id, content, content),
+                    ).fetchone()
+                else:
+                    scope = _company_uuid or company_keyword
+                    row = conn.execute(
+                        "SELECT id FROM local_posts "
+                        "WHERE company = ? AND (content = ? OR pre_revision_content = ?) "
+                        "LIMIT 1",
+                        (scope, content, content),
+                    ).fetchone()
+            return row[0] if row else None
+        except Exception as _e:
+            logger.debug("[Stelle] dedup lookup failed: %s", _e)
+            return None
 
     castorice = Castorice()
     output_lines = [f"# {client_name.upper()} — ONE-SHOT POSTS (Stelle)\n"]
     output_lines.append(f"Generated {len(posts)} posts via jacquard-style agentic workflow.\n")
-    if skip_per_post_processing:
-        output_lines.append(
-            "_Per-post fact-check, validation, and draft persistence were "
-            "already handled by `submit_draft`. This file is a minimal dump "
-            "of the result; authoritative drafts live in their destination "
-            "table (local_posts for amphoreus.app runs, Jacquard drafts for "
-            "Lineage-UI runs)._\n"
-        )
 
     verification = result.get("verification", "")
     if verification:
@@ -4056,12 +4722,16 @@ def _process_result(
         output_lines.append("### Draft\n")
         output_lines.append(text + "\n")
 
-        # Lineage-mode fast-exit: everything below this point (Castorice,
-        # why-post, image-suggestion, LLM validation, RuanMei analysis,
-        # SQLite persist) was already done per-post by submit_draft's
-        # wrapper. Skip to the next post to avoid duplicate writes and
-        # duplicate API spend.
-        if skip_per_post_processing:
+        # Per-post dedup: if submit_draft already persisted this exact
+        # (company, content) in this session, skip the heavy block
+        # (Castorice, why-post, image-suggestion, LLM validation,
+        # RuanMei analysis, SQLite persist) — it would be a duplicate.
+        _prior_id = _already_persisted(text)
+        if _prior_id:
+            output_lines.append(
+                f"_Already persisted via `submit_draft` (draft_id: {_prior_id}) — "
+                "skipping duplicate post-processing._\n"
+            )
             output_lines.append("---\n")
             continue
 
@@ -4164,17 +4834,14 @@ def _process_result(
             # landscape brief references were also removed earlier in the
             # prescriptive-injection strip.)
 
-            # Prediction tracking — score this post with the draft scorer
-            # BEFORE it's published so we can compare predicted vs actual
-            # engagement after the post is scored. This closes the validation
-            # loop: does the model actually get better over time?
-            try:
-                from backend.src.utils.draft_scorer import score_drafts
-                _draft_scores = score_drafts(company_keyword, [{"text": corrected}])
-                if _draft_scores and _draft_scores[0].model_source != "no_model":
-                    _extra_fields["predicted_engagement"] = _draft_scores[0].predicted_score
-            except Exception:
-                pass
+            # (Draft-scorer call removed 2026-04-23 as a Bitter Lesson
+            # cleanup. The underlying regression model was retired on
+            # 2026-04-11 — ``score_drafts`` had since been returning
+            # ``model_source='no_model'`` rows that Stelle immediately
+            # discarded, but the function itself still ran a Supabase
+            # k-NN lookup on every generation. Dead compute on a path
+            # whose only purpose was to feed a trained engagement
+            # predictor we explicitly don't want to bring back.)
 
             if _extra_fields:
                 for _obs in reversed(_rm_inst._state.get("observations", [])):
@@ -4188,22 +4855,49 @@ def _process_result(
         if _sqlite_available:
             try:
                 _gen_meta = dict(_extra_fields) if _extra_fields else {}
+                # Stamp the run-level neighbor-signal stats onto this
+                # draft's generation_metadata. Enables the offline
+                # ``neighbor_signal_audit`` CLI to compare drafts
+                # generated with neighbor context against those
+                # without, without us needing to parse the bundle
+                # string after the fact.
+                if _bundle_stats:
+                    _gen_meta["neighbor_signal_present"] = bool(
+                        _bundle_stats.get("blocks_with_neighbors", 0) > 0
+                    )
+                    _gen_meta["neighbor_blocks_with_neighbors"] = int(
+                        _bundle_stats.get("blocks_with_neighbors", 0)
+                    )
+                    _gen_meta["neighbor_bundle_blocks_total"] = int(
+                        _bundle_stats.get("blocks_total", 0)
+                    )
+                    _gen_meta["neighbor_skip_reason"] = (
+                        _bundle_stats.get("skip_reason") or None
+                    )
                 _save_post(
                     post_id=_draft_id,
-                    company=company_keyword,
+                    # Use the resolved company UUID if available — falls
+                    # back to the raw keyword (slug) for backward compat
+                    # with callers that haven't been wired through the
+                    # canonicalizer yet.
+                    company=_company_uuid or company_keyword,
+                    user_id=_user_id,
                     content=corrected,
                     title=hook[:200] if hook else None,
                     status="draft",
                     why_post=why_post or None,
                     citation_comments=citation_comments,
-                    pre_revision_content=None,
+                    # Store the pre-Castorice raw text so a later
+                    # submit_draft for the same post could dedup against
+                    # this row if the ordering ever inverted.
+                    pre_revision_content=text if text != corrected else None,
                     cyrene_score=None,
                     generation_metadata=_gen_meta if _gen_meta else None,
                 )
             except Exception as _e:
                 logger.warning("[Stelle] Could not save post %d to local SQLite: %s", i, _e)
 
-        # DELETED: the old Lineage-parallel-write path.
+        # DELETED: the old database-parallel-write path.
         # Stelle is read-only against Jacquard. Drafts land exclusively in
         # Amphoreus's local_posts table + output/ markdown mirror; the
         # operator pushes to Ordinal from Amphoreus's Posts tab. Nothing
@@ -4248,8 +4942,8 @@ def generate_one_shot(
     # reads are empty. Either way Stelle runs; drafts always land in
     # Amphoreus's local_posts.
     try:
-        from backend.src.agents.lineage_fs_client import is_lineage_mode
-        _data_source_active = is_lineage_mode()
+        from backend.src.agents.database_client import is_database_mode
+        _data_source_active = is_database_mode()
     except Exception as _lm_err:
         logger.warning("[Stelle] workspace_fs unavailable: %s", _lm_err)
         _data_source_active = False
@@ -4280,23 +4974,25 @@ def generate_one_shot(
 
     P.ensure_dirs(company_keyword)
 
-    # Purge any unpushed draft rows in local_posts from prior runs for this
-    # company. Per the project's dedup model, a draft that was never pushed
-    # to Ordinal "doesn't exist" — it must not persist across runs, because
-    # Stelle's dedup reads pushed/published content only. This is the DB-side
-    # companion to the memory/ + scratch/ filesystem wipe in _setup_workspace.
-    # Rows with a non-empty ordinal_post_id are preserved (they are owned by
-    # Ordinal), as are non-draft statuses (posted/scheduled/failed).
-    try:
-        from backend.src.db.local import purge_unpushed_drafts as _purge_drafts
-        _purged = _purge_drafts(company_keyword)
-        if _purged:
-            logger.info(
-                "[Stelle] Purged %d unpushed draft(s) from local_posts for %s",
-                _purged, company_keyword,
-            )
-    except Exception as _purge_err:
-        logger.warning("[Stelle] local_posts purge skipped: %s", _purge_err)
+    # 2026-04-23: DISABLED — unpushed drafts are now retained across runs.
+    #
+    # Previously we wiped every unpushed draft for the company at run
+    # start, on the theory that a draft not yet pushed to Ordinal
+    # "didn't exist" and must not persist. That model broke once:
+    #
+    #   1. Operators started adding inline + post-wide comments to
+    #      unpushed drafts (see draft_feedback + post_bundle). Wiping
+    #      the draft orphaned its comments.
+    #   2. ``build_post_bundle`` now surfaces unpushed drafts in a
+    #      dedicated UNPUSHED section with their comments attached, so
+    #      Stelle uses them as dedup signal exactly like Ordinal-pushed
+    #      drafts. Re-generating the same topic two runs in a row is
+    #      now prevented regardless of Ordinal state.
+    #
+    # The bundle still marks REJECTED drafts separately (learning
+    # signal, not dedup). Nothing gets deleted here anymore — deletes
+    # happen only via the explicit /api/posts/{id} DELETE route,
+    # operator-initiated.
 
     logger.info("[Stelle] Setting up workspace...")
     workspace_root = _setup_workspace(company_keyword)
@@ -4313,22 +5009,40 @@ def generate_one_shot(
     # representations sitting between raw data and the writer. Stelle now
     # queries raw observations/transcripts directly at generation time.
 
-    # Existing posts from Ordinal — all statuses — for topic dedup.
-    # Operational (not prescriptive), so it stays: prevents Stelle from
-    # writing the same post twice.
+    # Unified post bundle — every post we have signal on, with body +
+    # engagement + comments + edit delta + semantic neighbors bundled
+    # per entry. Replaces the prior ``_fetch_all_ordinal_hooks`` hook-
+    # list which stripped most of those facets. Two classes only:
+    # POSTS (published + unpublished mixed, ship-state inferred from
+    # the ENGAGEMENT line in each block) and REJECTED (paired comments
+    # are learning signal, not dedup signal — client said no to the
+    # execution, not the topic). See backend/src/services/post_bundle.py
+    # for the full contract.
     existing_posts_context = ""
+    # Bundle-build stats are captured at run-start and stamped onto
+    # each saved draft's ``generation_metadata`` so a post-hoc audit
+    # can correlate "did Stelle see neighbor context?" with the
+    # resulting output. See backend/src/services/neighbor_signal_audit.py.
+    _bundle_stats: dict = {}
     try:
-        existing_posts_context = _fetch_all_ordinal_hooks(company_keyword)
+        from backend.src.services.post_bundle import build_post_bundle_with_stats
+        # Per-FOC scoping: DATABASE_USER_UUID is set by stelle_runner
+        # when the ghostwriter endpoint resolved a target FOC. Passing
+        # it here prevents the bundle from loading every sibling FOC's
+        # drafts (2026-04-23 Virio ARG_MAX incident).
+        _bundle_user_uuid = (os.environ.get("DATABASE_USER_UUID") or "").strip() or None
+        existing_posts_context, _bundle_stats = build_post_bundle_with_stats(
+            company_keyword, user_id=_bundle_user_uuid,
+        )
     except Exception as _e:
-        logger.debug("[Stelle] Ordinal post dedup fetch skipped: %s", _e)
+        logger.debug("[Stelle] post bundle build skipped: %s", _e)
 
-    # Series Engine: inject series context if a series post is due (operational).
+    # Series Engine retired 2026-04-22 (BL cleanup) — the hand-designed
+    # "content works as scheduled narrative arcs" theory was prescribing
+    # content sequencing in code. Removed from the generation path; the
+    # module still exists as dead code for future reference but is no
+    # longer invoked from any agent.
     series_context = ""
-    try:
-        from backend.src.services.series_engine import get_stelle_series_context as _series_ctx
-        series_context = _series_ctx(company_keyword)
-    except Exception as _e:
-        logger.debug("[Stelle] Series context skipped: %s", _e)
 
     # Temporal Orchestrator: scheduling intelligence (operational).
     scheduling_context = ""

@@ -326,18 +326,16 @@ def sync_all_companies() -> None:
                                 if ingested:
                                     logger.info("RuanMei ingested %d new posts for %s", ingested, company)
 
-                                # 2-pre. Observation compaction: prune old observations to
-                                #        bound storage and prompt budget. Runs before all
-                                #        substeps so they operate on a bounded list.
-                                try:
-                                    _compacted = rm.compact_observations()
-                                    if _compacted:
-                                        logger.info(
-                                            "[ordinal_sync] Compacted %d old observations for %s",
-                                            _compacted, company,
-                                        )
-                                except Exception:
-                                    logger.warning("Observation compaction skipped for %s", company, exc_info=True)
+                                # 2-pre. Observation compaction retired 2026-04-22
+                                #        (BL cleanup). The hand-designed retention
+                                #        rule (keep recent + top/bottom quartile +
+                                #        30% random middle, discard the rest) was
+                                #        silently destroying training data per its
+                                #        own policy. If storage / prompt-budget
+                                #        pressure returns, summarize at read time
+                                #        with an LLM pass — don't discard.
+                                #        ``rm.compact_observations`` still exists
+                                #        as dead code in agents/ruan_mei.py.
 
                                 # 2a. Edit similarity backfill: fix observations where
                                 #     post_body was set to live text by the old
@@ -400,95 +398,32 @@ def sync_all_companies() -> None:
                                 #   observation_tagger.py is preserved for ad-hoc
                                 #   backfill if ever needed.
 
-                                # 2k2a. Prediction backfill: score historical posts that
-                                #       don't have predicted_engagement yet. This bootstraps
-                                #       the validation loop so we get accuracy data from
-                                #       existing posts (not just newly generated ones).
-                                #       Capped at 10 per cycle to bound embedding cost.
-                                if _has_new_data:
-                                    try:
-                                        from backend.src.utils.draft_scorer import score_drafts as _score_drafts_bf
-                                        _pred_backfilled = 0
-                                        _pred_limit = 10
-                                        for _obs in rm._state.get("observations", []):
-                                            if _pred_backfilled >= _pred_limit:
-                                                break
-                                            if _obs.get("predicted_engagement") is not None:
-                                                continue
-                                            if _obs.get("status") not in ("scored", "finalized"):
-                                                continue
-                                            _body = (_obs.get("posted_body") or _obs.get("post_body") or "").strip()
-                                            if not _body or len(_body) < 100:
-                                                continue
-                                            try:
-                                                _scores = _score_drafts_bf(company, [{"text": _body}])
-                                                if _scores and _scores[0].model_source != "no_model":
-                                                    _obs["predicted_engagement"] = _scores[0].predicted_score
-                                                    _pred_backfilled += 1
-                                            except Exception:
-                                                pass
-                                        if _pred_backfilled:
-                                            rm._save()
-                                            logger.info(
-                                                "[ordinal_sync] Backfilled predicted_engagement on %d observations for %s",
-                                                _pred_backfilled, company,
-                                            )
-                                    except Exception:
-                                        logger.warning("Prediction backfill skipped for %s", company, exc_info=True)
-
-                                # 2k2. Prediction accuracy: compare draft scorer predictions
-                                #      against actual engagement outcomes for posts that have
-                                #      both predicted_engagement and scored reward.
-                                try:
-                                    from backend.src.utils.prediction_tracker import update_prediction_accuracy
-                                    _pred_acc = update_prediction_accuracy(company)
-                                    if _pred_acc and _pred_acc.get("n_predictions", 0) > 0:
-                                        logger.info(
-                                            "[ordinal_sync] Prediction accuracy for %s: "
-                                            "Spearman=%.3f, MAE=%.3f, n=%d (%s)",
-                                            company,
-                                            _pred_acc.get("spearman", 0),
-                                            _pred_acc.get("mean_abs_error", 0),
-                                            _pred_acc.get("n_predictions", 0),
-                                            _pred_acc.get("trend", "?"),
-                                        )
-                                except Exception:
-                                    logger.warning("Prediction accuracy skipped for %s", company, exc_info=True)
-
-                                # 2k3. Irontomb Phase 3 calibration — join logged simulator
-                                #      predictions against real T+7d engagement outcomes by
-                                #      draft_hash. Measures whether Irontomb's
-                                #      engagement_prediction scalar tracks reality over time.
-                                #      Cheap (no LLM calls, pure data join); always safe to
-                                #      run. Persists memory/{company}/calibration_report.json
-                                #      and logs headline metrics when pairs exist.
-                                try:
-                                    from backend.src.agents.irontomb import calibration_report
-                                    _cal = calibration_report(company)
-                                    _n_pairs = _cal.get("n_pairs_joined", 0) or 0
-                                    if _n_pairs > 0:
-                                        _metrics = _cal.get("metrics") or {}
-                                        _spearman = _metrics.get("spearman_engagement_prediction")
-                                        _mae = _metrics.get("mean_abs_error_per_1k")
-                                        _acc = _metrics.get("binary_accuracy_would_react")
-                                        logger.info(
-                                            "[ordinal_sync] Irontomb calibration for %s: "
-                                            "n_pairs=%d, spearman=%s, mae_per_1k=%s, "
-                                            "would_react_accuracy=%s%s",
-                                            company,
-                                            _n_pairs,
-                                            f"{_spearman:.3f}" if isinstance(_spearman, (int, float)) else "N/A",
-                                            f"{_mae:.2f}" if isinstance(_mae, (int, float)) else "N/A",
-                                            f"{_acc:.2f}" if isinstance(_acc, (int, float)) else "N/A",
-                                            " (insufficient_data)" if _cal.get("insufficient_data") else "",
-                                        )
-                                    elif _cal.get("error"):
-                                        logger.debug(
-                                            "[ordinal_sync] Irontomb calibration for %s: %s",
-                                            company, _cal["error"],
-                                        )
-                                except Exception:
-                                    logger.warning("Irontomb calibration skipped for %s", company, exc_info=True)
+                                # 2k2a / 2k2 / 2k3 — Retired 2026-04-23 as a Bitter
+                                # Lesson cleanup, paired with the removal of the
+                                # draft_scorer call at the end of Stelle's per-post
+                                # block. The three retired blocks were:
+                                #
+                                #   * Prediction backfill — score historical posts with
+                                #     draft_scorer to stamp predicted_engagement on
+                                #     observations.
+                                #   * Prediction accuracy — join those stamped
+                                #     predictions against real rewards, persist to
+                                #     memory/{company}/prediction_accuracy.json.
+                                #   * Irontomb calibration — join irontomb_predictions
+                                #     .jsonl against real T+7d outcomes, persist to
+                                #     memory/{company}/calibration_report.json.
+                                #
+                                # All three existed to measure a trained engagement
+                                # predictor. We explicitly don't want that predictor:
+                                # the analyst regression was killed on 2026-04-11,
+                                # draft_scorer._load_model had been returning
+                                # 'no_model' since, Irontomb's engagement_prediction
+                                # scalar was deprecated in favour of pure LLM
+                                # reader-simulation, and these loops were the only
+                                # remaining consumers feeding that measurement arm.
+                                # ENABLE_SYNC_LOOPS is also off in prod so these
+                                # weren't actually firing — the deletion is primarily
+                                # about removing resurrection hazards.
 
                                 # 2l-2m-3. Retired 2026-04-11.
                                 #   Analyst agent, content brief generator, and ICP
@@ -541,28 +476,10 @@ def sync_all_companies() -> None:
                                 #    observation state, reward computation, and embeddings
                                 #    but no longer synthesizes landscapes. See NEXT_STEPS.md.
 
-                                # 8. Series Engine: update series post scores from RuanMei,
-                                #    then check series health for wrap/extend signals.
-                                try:
-                                    from backend.src.services.series_engine import (
-                                        update_series_from_ruan_mei as _series_update,
-                                        check_series_health as _series_health,
-                                    )
-                                    _series_scored = _series_update(company)
-                                    if _series_scored:
-                                        logger.info(
-                                            "[ordinal_sync] Series engine updated %d posts for %s",
-                                            _series_scored, company,
-                                        )
-                                    _series_changes = _series_health(company)
-                                    for sc in _series_changes:
-                                        logger.info(
-                                            "[ordinal_sync] Series '%s' %s → %s (trend: %s) for %s",
-                                            sc["theme"], sc["old_status"], sc["new_status"],
-                                            sc["trend"], company,
-                                        )
-                                except Exception:
-                                    logger.warning("Series engine update skipped for %s", company, exc_info=True)
+                                # 8. Series Engine retired 2026-04-22 (BL cleanup). The
+                                #    hand-designed "scheduled narrative arcs" theory was
+                                #    prescribing content sequencing in code. Dead code in
+                                #    services/series_engine.py.
                             except Exception:
                                 logger.exception("RuanMei sync failed for %s", company)
     except Exception:

@@ -5,14 +5,51 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from backend.src.core.config import get_settings
+from backend.src.lib.company_resolver import (
+    resolve_to_company_and_user,
+    resolve_with_fallback,
+)
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/posts", tags=["posts"])
+
+
+def _canonical_company(identifier: str | None) -> str | None:
+    """Normalize a caller-supplied company identifier to its canonical UUID.
+
+    Accepts either a Jacquard ``user_companies.id`` UUID or an Amphoreus
+    slug; returns the UUID whenever resolvable, or the raw identifier as a
+    fallback (for legacy rows that still carry slug identifiers during the
+    migration window). ``None``/empty in → ``None`` out.
+    """
+    if not identifier:
+        return None
+    return resolve_with_fallback(identifier) or identifier
+
+
+def _canonical_scope(
+    identifier: str | None,
+) -> tuple[str | None, str | None]:
+    """Return ``(company_uuid, user_id)`` for a caller-supplied identifier.
+
+    Slugs like ``trimble-heather`` resolve to the Trimble company + Heather's
+    user_id so per-FOC-user views filter correctly. Plain company slugs
+    (``innovocommerce``) return ``(company_uuid, None)`` for a company-wide
+    view. Falls back to the raw identifier when the resolver can't match —
+    preserves legacy-row behavior during the migration window.
+    """
+    if not identifier:
+        return None, None
+    cu, uu = resolve_to_company_and_user(identifier)
+    if cu is None:
+        # Legacy fallback: use the raw identifier as the company filter.
+        return identifier, None
+    return cu, uu
 
 
 def _parse_publish_at_iso(raw: str | None) -> datetime | None:
@@ -152,20 +189,50 @@ class PushAllRequest(BaseModel):
 
 @router.get("")
 async def list_posts(company: str | None = None, limit: int = 50):
-    """List local draft posts for a client."""
+    """List local draft posts for a client.
+
+    The ``company`` param accepts either a company slug
+    (``innovocommerce``), a per-FOC-user pseudo-slug (``trimble-heather``),
+    or a UUID. For per-user slugs the response is filtered to that user's
+    drafts only (so Heather's Posts tab doesn't show Mark's Trimble
+    drafts). For company slugs it returns all company drafts.
+    """
     from backend.src.db.local import list_local_posts
-    posts = list_local_posts(company=company, limit=limit)
+    company_uuid, user_id = _canonical_scope(company)
+    if user_id:
+        # Per-FOC-user view — pass BOTH so list_local_posts widens to
+        # also include company-wide rows with no user_id stamped
+        # (legacy drafts pre-user-disambiguation, or drafts where
+        # submit_draft's user resolution came back None). Without this
+        # the Posts tab silently hid drafts that exist in the DB.
+        posts = list_local_posts(company=company_uuid, user_id=user_id, limit=limit)
+    else:
+        posts = list_local_posts(company=company_uuid, limit=limit)
+
+    # (Semantic-match verdict enrichment removed 2026-04-23. The v1
+    # ``draft_publish_matches`` table is frozen; pair state is now
+    # carried directly on ``local_posts`` via ``matched_provider_urn``
+    # / ``match_method`` / ``matched_at`` / ``match_similarity``, which
+    # ``_LOCAL_POSTS_COLS`` already selects. The frontend Posts tab
+    # reads those columns off ``post.*`` directly — no separate join.)
     return {"posts": posts}
 
 
 @router.post("")
 async def create_post(req: CreatePostRequest):
-    """Create a new local draft post."""
+    """Create a new local draft post.
+
+    Resolves ``req.company`` to ``(company_uuid, user_id)`` so
+    per-FOC-user slugs like ``trimble-heather`` stamp both columns and
+    the draft is attributable to the right person.
+    """
     from backend.src.db.local import create_local_post
     post_id = str(uuid.uuid4())
+    company_uuid, user_id = _canonical_scope(req.company)
     post = create_local_post(
         post_id=post_id,
-        company=req.company,
+        company=company_uuid or req.company,
+        user_id=user_id,
         content=req.content,
         title=req.title,
         status=req.status,
@@ -191,23 +258,368 @@ async def update_post(post_id: str, req: PatchPostRequest):
 
 
 @router.delete("/{post_id}")
-async def delete_post(post_id: str):
+async def delete_post(post_id: str, request: Request):
+    """Delete a draft from the Posts tab.
+
+    Wraps ``db.local.delete_local_post`` and surfaces any Supabase-
+    side failure as a real HTTP 500 with the underlying error message
+    instead of lying with ``{"deleted": true}``. Silent-success was
+    the previous behaviour and produced "delete button does nothing"
+    symptoms that masked real RLS / FK / permission failures.
+    """
     from backend.src.db.local import delete_local_post
-    delete_local_post(post_id)
+    user = getattr(request.state, "user", None)
+    deleted_by = user.email if user and getattr(user, "email", None) else "anonymous"
+    try:
+        delete_local_post(post_id, deleted_by=deleted_by, reason="operator_ui")
+    except Exception as exc:
+        # Log at WARNING so the Fly log shows the full stack via FastAPI's
+        # default exception handler; the HTTPException body shows a
+        # compact version to the browser's Network tab.
+        logger.warning(
+            "[posts.delete_post] delete failed for %s: %s",
+            post_id, exc, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"delete failed: {exc}"[:400],
+        )
     return {"deleted": True}
+
+
+class RejectRequest(BaseModel):
+    reason: str | None = Field(None, max_length=500)
+
+
+@router.post("/{post_id}/reject")
+async def reject_post(post_id: str, request: Request, body: RejectRequest | None = None):
+    """State transition: mark a post as rejected by the client.
+
+    Distinct from ``DELETE /{post_id}`` — preserves the ``local_posts``
+    row and every paired ``draft_feedback`` row so the post stays a
+    negative learning signal. Intended flow: operator sees client
+    rejection on Ordinal, deletes the Ordinal draft manually, then
+    hits this endpoint to preserve the draft locally with its paired
+    comments. The post will surface in Stelle's / Aglaea's post bundle
+    under the ``Rejected`` class (not as dedup signal — rejection
+    means "this execution of this topic was wrong", not "never write
+    on this topic again").
+    """
+    from backend.src.db.local import update_local_post_fields, get_local_post
+    from backend.src.db.amphoreus_supabase import log_deletion
+
+    existing = get_local_post(post_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    user = getattr(request.state, "user", None)
+    rejected_by = user.email if user and getattr(user, "email", None) else "anonymous"
+    reason = (body.reason if body else None) or "client rejection"
+
+    update_local_post_fields(
+        post_id,
+        {"status": "rejected"},
+        revision_source="reject",
+        revision_author=rejected_by,
+    )
+
+    # Audit trail. Reusing deletion_log for state-transition history —
+    # the entity_type discriminator makes this searchable distinct
+    # from true deletions. Row is NOT deleted; the snapshot captures
+    # state at the moment of rejection.
+    try:
+        log_deletion(
+            entity_type="local_post_rejected",
+            entity_id=post_id,
+            entity_snapshot=existing,
+            deleted_by=rejected_by,
+            reason=reason,
+        )
+    except Exception:
+        logger.debug("[posts.reject] deletion_log write failed", exc_info=True)
+
+    return {"rejected": True, "post_id": post_id}
+
+
+# ---------------------------------------------------------------------------
+# Manual draft ↔ published pairing
+# ---------------------------------------------------------------------------
+
+class SetPublishDateRequest(BaseModel):
+    """Operator tells Amphoreus when (in PST) a draft was published on
+    LinkedIn. We use that calendar day to find the corresponding
+    ``linkedin_posts`` row from the same creator and stamp
+    ``matched_provider_urn`` on the draft — exactly the same column set
+    the semantic match-back worker writes to, just with
+    ``match_method='manual_date'``. The post bundle then renders a
+    ``DELTA (draft → published)`` block inline with the draft, which
+    is the signal Stelle/Cyrene/Aglaea actually need to see what the
+    client changed between our draft and their published version.
+    """
+    publish_date: str = Field(
+        ...,
+        description=(
+            "Calendar date in America/Los_Angeles local time (PST or PDT "
+            "as applicable), formatted YYYY-MM-DD. The server converts "
+            "to a UTC instant-range covering the whole LA day."
+        ),
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    )
+
+
+@router.post("/{post_id}/set-publish-date")
+async def set_publish_date(post_id: str, req: SetPublishDateRequest):
+    """Pair a Stelle draft to its published LinkedIn post by date.
+
+    Operator flow: client ships a post → operator opens the Amphoreus
+    Posts tab → clicks "Set publish date" on the Stelle draft → picks
+    the calendar day (LA local) → server finds the matching LinkedIn
+    post from this FOC's mirror and links them.
+
+    Once paired, ``post_bundle._render_block`` emits a
+    ``DELTA (draft → published)`` block showing the diff between what
+    we wrote and what went live. This was an intended feature of the
+    observation pipeline from the beginning and stopped working when
+    Ordinal churned; the manual-date path brings it back without
+    depending on semantic match confidence.
+
+    Failure modes (all return 409 with a diagnostic):
+      * No linkedin_post row from this creator on the given LA day —
+        usually means Amphoreus hasn't scraped the post yet. Retry
+        after the next mirror sync / Amphoreus scrape.
+      * Multiple linkedin_post rows — creator posted twice the same
+        LA day. Caller needs to narrow (future: add an optional
+        time-of-day refinement in the request body).
+    """
+    from backend.src.db.local import get_local_post, update_local_post_fields
+    from backend.src.db.amphoreus_supabase import _get_client, is_configured
+    from backend.src.agents.stelle import _resolve_linkedin_username
+    try:
+        from zoneinfo import ZoneInfo
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"zoneinfo unavailable on this runtime: {exc}",
+        )
+
+    draft = get_local_post(post_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Post not found")
+    company = (draft.get("company") or "").strip()
+    if not company:
+        raise HTTPException(
+            status_code=400,
+            detail="Draft has no company — cannot resolve creator username",
+        )
+
+    # Resolve the creator's LinkedIn username from the draft's company.
+    # Uses the same helper post_bundle uses to fetch engagement, so
+    # shared-Ordinal-workspace edge cases stay consistent.
+    username = _resolve_linkedin_username(company)
+    if not username:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Could not resolve LinkedIn username for this draft's "
+                "company. Check users.linkedin_url upstream."
+            ),
+        )
+
+    # PST/PDT day → UTC instant range. We treat the input as a calendar
+    # day in America/Los_Angeles and match any linkedin_post with
+    # posted_at inside [00:00 LA, next 00:00 LA). zoneinfo handles DST
+    # transitions so March/November posts still work correctly.
+    try:
+        y, m, d = (int(x) for x in req.publish_date.split("-"))
+        tz = ZoneInfo("America/Los_Angeles")
+        day_start_local = datetime(y, m, d, 0, 0, 0, tzinfo=tz)
+        day_end_local = datetime(y, m, d, 23, 59, 59, 999999, tzinfo=tz)
+        day_start_utc = day_start_local.astimezone(timezone.utc)
+        day_end_utc = day_end_local.astimezone(timezone.utc)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid publish_date: {exc}",
+        )
+
+    if not is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Amphoreus Supabase not configured",
+        )
+    sb = _get_client()
+    if sb is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Amphoreus Supabase client unavailable",
+        )
+
+    try:
+        rows = (
+            sb.table("linkedin_posts")
+              .select("provider_urn, post_text, posted_at, total_reactions, "
+                      "total_comments, total_reposts, _source")
+              .eq("creator_username", username)
+              .gte("posted_at", day_start_utc.isoformat())
+              .lte("posted_at", day_end_utc.isoformat())
+              .order("posted_at", desc=False)
+              .execute()
+              .data
+            or []
+        )
+    except Exception as exc:
+        logger.exception("[posts.set_publish_date] linkedin_posts fetch failed")
+        raise HTTPException(status_code=502, detail=f"linkedin_posts query failed: {exc}")
+
+    if not rows:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"No LinkedIn post from @{username} on {req.publish_date} "
+                f"(PT). The mirror may not have scraped it yet — try again "
+                f"after the next sync, or confirm the date."
+            ),
+        )
+    if len(rows) > 1:
+        # Multiple posts same LA day — tell the caller so they can narrow.
+        previews = [
+            {
+                "provider_urn": r.get("provider_urn"),
+                "posted_at":    r.get("posted_at"),
+                "hook":         ((r.get("post_text") or "").split("\n", 1)[0])[:120],
+                "reactions":    r.get("total_reactions") or 0,
+            }
+            for r in rows
+        ]
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "ambiguous_date",
+                "message": (
+                    f"@{username} published {len(rows)} posts on "
+                    f"{req.publish_date} (PT). Need to disambiguate."
+                ),
+                "candidates": previews,
+            },
+        )
+
+    matched = rows[0]
+    matched_urn = matched.get("provider_urn")
+    if not matched_urn:
+        raise HTTPException(
+            status_code=502,
+            detail="Matched row has no provider_urn (mirror data corrupt?)",
+        )
+
+    # Stamp the pairing onto the local_posts row. Uses the same columns
+    # the semantic matcher writes, distinguished by ``match_method``.
+    # Similarity is NULL for manual pairings (not applicable).
+    update_local_post_fields(
+        post_id,
+        {
+            "matched_provider_urn": matched_urn,
+            "matched_at":           datetime.now(timezone.utc).isoformat(),
+            "match_similarity":     None,
+            "match_method":         "manual_date",
+        },
+    )
+
+    return {
+        "paired":              True,
+        "post_id":             post_id,
+        "matched_provider_urn": matched_urn,
+        "matched_posted_at":    matched.get("posted_at"),
+        "matched_hook":         (matched.get("post_text") or "").split("\n", 1)[0][:120],
+        "matched_reactions":    matched.get("total_reactions") or 0,
+    }
+
+
+@router.delete("/{post_id}/set-publish-date")
+async def unset_publish_date(post_id: str):
+    """Undo a manual pairing. Clears matched_provider_urn and friends
+    on the draft — useful when the operator picked the wrong date.
+    Semantic-matcher-set pairings can also be cleared here; if the
+    worker runs again, it may re-pair from the semantic path.
+    """
+    from backend.src.db.local import get_local_post, update_local_post_fields
+    if get_local_post(post_id) is None:
+        raise HTTPException(status_code=404, detail="Post not found")
+    update_local_post_fields(
+        post_id,
+        {
+            "matched_provider_urn": None,
+            "matched_at":           None,
+            "match_similarity":     None,
+            "match_method":         None,
+        },
+    )
+    return {"unpaired": True, "post_id": post_id}
 
 
 @router.post("/{post_id}/rewrite")
 async def rewrite_post(post_id: str, req: RewriteRequest):
-    """Rewrite a post via Cyrene."""
+    """Rewrite a post via Cyrene.
+
+    Pulls unresolved feedback from ``draft_feedback`` and hands it to
+    :meth:`Cyrene.rewrite_single_post` so the rewrite actually addresses
+    what operators flagged — the highest-leverage consumption point for
+    the comments system. If the feedback fetch fails (pre-migration,
+    mirror unreachable, etc.) the rewrite still runs without prior
+    feedback — degraded but functional.
+
+    When the rewrite succeeds AND we have a post in ``local_posts`` for
+    this id, we also persist the new content back through
+    ``update_local_post`` with ``revision_source='rewrite_with_feedback'``
+    so the revision history slices cleanly in eval.
+    """
+    prior_feedback: list[dict] = []
+    try:
+        from backend.src.db.amphoreus_supabase import _get_client, is_configured
+        if is_configured():
+            sb = _get_client()
+            if sb is not None:
+                prior_feedback = (
+                    sb.table("draft_feedback")
+                      .select("body, author_email, author_name, selected_text, source")
+                      .eq("draft_id", post_id)
+                      .eq("resolved", False)
+                      .order("created_at", desc=False)
+                      .limit(50)
+                      .execute()
+                      .data
+                    or []
+                )
+    except Exception as exc:
+        logger.debug("[posts/rewrite] feedback fetch failed (non-fatal): %s", exc)
+
     from backend.src.agents.demiurge import Cyrene
     cyrene = Cyrene()
     result = cyrene.rewrite_single_post(
         post_text=req.post_text,
         style_instruction=req.style_instruction,
         client_context=req.client_context,
+        prior_feedback=prior_feedback,
     )
-    return {"result": result}
+
+    # If Cyrene produced a rewrite AND this post exists in local_posts,
+    # persist it so the operator's next "Rewrite" doesn't see stale
+    # text, and the revision history captures the rewrite provenance.
+    # The frontend may additionally PATCH the post after showing the
+    # diff to the user — that's fine, the extra revision row is harmless.
+    try:
+        rewritten = (result or {}).get("final_post") or ""
+        if rewritten.strip():
+            from backend.src.db.local import get_local_post, update_local_post
+            if get_local_post(post_id):
+                update_local_post(
+                    post_id,
+                    content=rewritten,
+                    revision_source="rewrite_with_feedback" if prior_feedback else "operator_edit",
+                )
+    except Exception:
+        logger.debug("[posts/rewrite] post-update skipped", exc_info=True)
+
+    return {"result": result, "prior_feedback_count": len(prior_feedback)}
 
 
 @router.post("/{post_id}/fact-check")
@@ -215,12 +627,16 @@ async def fact_check_post(post_id: str, req: FactCheckRequest):
     """Fact-check and annotate a post via Castorice. Saves annotated version locally."""
     from backend.src.agents.castorice import Castorice
     from backend.src.db.vortex import castorice_annotated_path
-    result = Castorice().fact_check_post(req.company, req.post_text)
+    # Canonicalize so Castorice's company-keyed reads (published posts,
+    # tone references, etc.) and the on-disk annotated-post mirror file
+    # all use the same UUID the rest of the stack agrees on.
+    company_canonical = _canonical_company(req.company) or req.company
+    result = Castorice().fact_check_post(company_canonical, req.post_text)
 
     # Persist the annotated version for CE review
     annotated = result.get("annotated_post", "")
     if annotated:
-        ann_path = castorice_annotated_path(req.company)
+        ann_path = castorice_annotated_path(company_canonical)
         ann_path.parent.mkdir(parents=True, exist_ok=True)
         ann_path.write_text(annotated, encoding="utf-8")
         logger.info("[posts] Annotated post saved to %s", ann_path)
@@ -233,203 +649,266 @@ async def fact_check_post(post_id: str, req: FactCheckRequest):
     }
 
 
+# ---------------------------------------------------------------------------
+# DEPRECATED: Ordinal outbound endpoints (2026-04-23 churn begin)
+# ---------------------------------------------------------------------------
+#
+# Virio is churning off Ordinal. Outbound endpoints (push single + push
+# all + asset upload + approvals + system-comment post) are the first
+# to go — they return HTTP 410 Gone with a deprecation message rather
+# than executing. Everything INBOUND (analytics pulls, comment sync,
+# dedup drafts query, profile resolution, key mirror) stays alive for
+# now so historical engagement data keeps flowing and Stelle's dedup
+# reads still see Ordinal-queued drafts during the transition.
+#
+# Hyacinthia's outbound functions (``push_drafts``, ``push_single_post``,
+# ``upload_image_from_url``, ``create_approvals``, post-comment poster)
+# still exist but are no longer reachable from the API. They can be
+# deleted once the churn completes — kept for now in case an incident
+# requires an emergency one-off push and we re-enable a single endpoint
+# behind an env flag.
+#
+# Any frontend still calling these will see 410 and surface the message
+# to the operator so they know push routing is gone, not broken.
+
+_ORDINAL_OUTBOUND_DEPRECATION_MSG = (
+    "Ordinal outbound is deprecated (2026-04-23). Virio is churning off "
+    "Ordinal; all draft-push endpoints are disabled. Drafts continue to "
+    "land in Amphoreus local_posts as usual — they just no longer route "
+    "to Ordinal. Publishing will happen via the replacement pipeline "
+    "once it's online. Ordinal inbound data (analytics, comments) is "
+    "still mirrored into Amphoreus for historical continuity."
+)
+
+
 @router.post("/push")
-async def push_to_ordinal(req: PushRequest):
-    """Push posts to Ordinal via Hyacinthia. Citation comments and why-post blurb
-    come from the local draft when post_id is set; otherwise citation_comments
-    in the request body are used (legacy)."""
-    from backend.src.agents.hyacinthia import Hyacinthia
-    from backend.src.db.local import get_local_post, set_local_post_ordinal_post_id
-
-    en = Hyacinthia()
-    start = datetime.fromisoformat(req.start_date) if req.start_date else None
-    sched = _parse_publish_at_iso(req.publish_at)
-    approval_dicts = [a.model_dump(exclude_none=True) for a in req.approvals]
-
-    push_content = req.content
-    castorice_results = None
-    inline_single = False
-    single_title: str | None = None
-    local_row: dict | None = None
-
-    pid = (req.post_id or "").strip() if req.post_id else ""
-    if pid:
-        local_row = get_local_post(pid)
-        if not local_row:
-            raise HTTPException(status_code=404, detail="Post not found")
-        row_company = (local_row.get("company") or "").strip().lower()
-        if row_company != req.company.strip().lower():
-            raise HTTPException(status_code=403, detail="Post does not belong to this company")
-        push_content = local_row.get("content") or ""
-        if not (local_row.get("why_post") or "").strip() and push_content.strip():
-            try:
-                from backend.src.agents.stelle import _generate_why_post
-                why = _generate_why_post(push_content, "draft", req.company, req.company)
-                if why:
-                    local_row["why_post"] = why
-                    from backend.src.db.local import get_connection
-                    with get_connection() as conn:
-                        conn.execute(
-                            "UPDATE local_posts SET why_post = ? WHERE id = ?",
-                            (why, pid),
-                        )
-                    logger.info("[posts] Lazy-generated why_post for %s", pid[:12])
-            except Exception as e:
-                logger.debug("[posts] Lazy why_post generation failed: %s", e)
-        entry = _castorice_entry_from_row(local_row)
-        if entry:
-            castorice_results = [entry]
-        inline_single = True
-        single_title = local_row.get("title")
-    elif req.citation_comments:
-        castorice_results = [{"citation_comments": req.citation_comments}]
-
-    if not (push_content or "").strip():
-        raise HTTPException(
-            status_code=400,
-            detail="No post content to push (provide content or a valid post_id with saved body).",
-        )
-
-    company_key = req.company.strip()
-    per_post_opt: list | None = None
-    if inline_single and local_row:
-        li_assets = _linkedin_asset_ids_for_row(en, company_key, local_row)
-        if li_assets:
-            per_post_opt = [{"linkedin_asset_ids": li_assets}]
-
-    success, result, ordinal_ids = en.push_drafts(
-        company_keyword=req.company,
-        model_name=req.model_name,
-        content=push_content,
-        posts_per_month=req.posts_per_month,
-        start_date=start,
-        castorice_results=castorice_results,
-        schedule_publish_at=sched,
-        default_approvals=approval_dicts if approval_dicts else None,
-        prefer_rewritten_file=not inline_single,
-        inline_single_post=inline_single,
-        single_post_title=single_title,
-        per_post=per_post_opt,
-    )
-    if pid and success and ordinal_ids and local_row:
-        new_oid = (ordinal_ids[0] or "").strip()
-        if new_oid:
-            old_oid = (local_row.get("ordinal_post_id") or "").strip()
-            if old_oid and old_oid != new_oid:
-                en.remove_draft_map_entry(company_key, old_oid)
-            set_local_post_ordinal_post_id(pid, new_oid)
-            try:
-                from backend.src.agents.ruan_mei import RuanMei
-
-                RuanMei(company_key).link_ordinal_post_id(pid, new_oid)
-            except Exception:
-                logger.debug("[posts] RuanMei link_ordinal_post_id skipped", exc_info=True)
-
-    return {
-        "success": success,
-        "result": result,
-        "ordinal_post_ids": ordinal_ids,
-    }
+async def push_to_ordinal(req: PushRequest):  # noqa: ARG001 — kept to preserve the 410 surface
+    """Deprecated. Outbound to Ordinal was disabled 2026-04-23."""
+    raise HTTPException(status_code=410, detail=_ORDINAL_OUTBOUND_DEPRECATION_MSG)
 
 
 @router.post("/push-all")
-async def push_all_drafts_to_ordinal(req: PushAllRequest):
-    """Push each local draft to Ordinal on the next available cadence days (UTC, 09:00)."""
-    from backend.src.agents.hyacinthia import Hyacinthia
-    from backend.src.agents.ruan_mei import RuanMei
-    from backend.src.db.local import list_local_posts, set_local_post_ordinal_post_id
+async def push_all_drafts_to_ordinal(req: PushAllRequest):  # noqa: ARG001
+    """Deprecated. Outbound to Ordinal was disabled 2026-04-23."""
+    raise HTTPException(status_code=410, detail=_ORDINAL_OUTBOUND_DEPRECATION_MSG)
 
-    en = Hyacinthia()
-    rm_link = RuanMei(req.company.strip())
-    approval_dicts = [a.model_dump(exclude_none=True) for a in req.approvals]
 
-    rows = list_local_posts(company=req.company.strip(), limit=500)
-    drafts = [r for r in rows if (r.get("status") or "draft") == "draft" and (r.get("content") or "").strip()]
-    drafts.sort(key=lambda r: float(r.get("created_at") or 0))
+# ---------------------------------------------------------------------------
+# Feedback (draft_feedback) + revisions (local_post_revisions)
+#
+# Content engineers reviewing Stelle's output leave notes on drafts here.
+# Feedback rows are consumed at rewrite-time by Cyrene so the rewrite
+# actually addresses what operators flagged. Revisions are an audit
+# trail of every content change — needed for the revert button and for
+# future diff views. See
+# backend/scripts/amphoreus_supabase_feedback_schema.sql for the table
+# shape, and db/local.py::_record_content_revision for the write hook.
+# ---------------------------------------------------------------------------
 
-    if not drafts:
-        raise HTTPException(status_code=400, detail="No draft posts with content to push for this company.")
 
-    start0 = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+class CommentRequest(BaseModel):
+    """Create a feedback row on a draft.
 
-    # Use Temporal Orchestrator when available (data-driven day+hour),
-    # fall back to fixed cadence + 09:00 UTC otherwise.
-    _orchestrated = False
-    publish_days = []
-    co = req.company.strip()
+    ``selection_*`` are either all present (inline comment on a
+    highlighted range) or all absent (post-wide comment). The frontend
+    enforces this; the backend accepts both shapes.
+    """
+    body: str = Field(..., min_length=1, max_length=5000)
+    source: str = Field(
+        default="operator_postwide",
+        pattern=r"^(operator_postwide|operator_inline)$",
+    )
+    author_email: str | None = None
+    author_name: str | None = None
+    selection_start: int | None = None
+    selection_end: int | None = None
+    selected_text: str | None = None
+
+
+def _feedback_sb():
+    """Return the Amphoreus Supabase client, or raise 503.
+
+    Central so all feedback endpoints fail the same way when the
+    mirror isn't configured — avoids partial-outcome surprises where
+    one endpoint works and another silently does nothing.
+    """
+    from backend.src.db.amphoreus_supabase import _get_client, is_configured
+    if not is_configured():
+        raise HTTPException(status_code=503, detail="Amphoreus Supabase not configured")
+    sb = _get_client()
+    if sb is None:
+        raise HTTPException(status_code=503, detail="Amphoreus Supabase client unavailable")
+    return sb
+
+
+@router.get("/{post_id}/comments")
+async def list_comments(post_id: str, include_resolved: bool = True):
+    """List feedback on a draft, newest first.
+
+    Set ``include_resolved=false`` to show only open comments — useful
+    when rendering a compact "things to address" indicator next to the
+    post.
+    """
+    sb = _feedback_sb()
     try:
-        from backend.src.services.temporal_orchestrator import compute_publish_dates_optimized
-        publish_days = compute_publish_dates_optimized(co, len(drafts), start0)
-        if publish_days:
-            _orchestrated = True
-    except Exception:
-        pass
-    if not publish_days:
-        publish_days = en._compute_publish_dates(start0, len(drafts), req.posts_per_month)
+        q = sb.table("draft_feedback").select("*").eq("draft_id", post_id)
+        if not include_resolved:
+            q = q.eq("resolved", False)
+        rows = q.order("created_at", desc=True).limit(500).execute().data or []
+    except Exception as exc:
+        # Missing table (pre-migration) → empty list, don't 500.
+        logger.debug("[posts/comments] list failed: %s", exc)
+        rows = []
+    return {"comments": rows}
 
-    cadence = "Temporal Orchestrator" if _orchestrated else ("Mon/Wed/Thu" if req.posts_per_month == 12 else "Tue/Thu")
 
-    pushed = 0
-    errors: list[str] = []
-    first_url: str | None = None
+@router.post("/{post_id}/comments")
+async def add_comment(post_id: str, req: CommentRequest):
+    """Add a feedback row. Returns the persisted row."""
+    # Inline comments need all three selection fields or none — otherwise
+    # rendering can't anchor the comment. Fail fast rather than store
+    # junk.
+    has_start = req.selection_start is not None
+    has_end = req.selection_end is not None
+    has_text = bool(req.selected_text)
+    if req.source == "operator_inline":
+        if not (has_start and has_end and has_text):
+            raise HTTPException(
+                status_code=400,
+                detail="operator_inline comments require selection_start, selection_end, and selected_text",
+            )
+        if req.selection_end <= req.selection_start:
+            raise HTTPException(
+                status_code=400,
+                detail="selection_end must be > selection_start",
+            )
+    else:
+        # Post-wide: normalise to null so the resolved schema constraints
+        # stay clean regardless of what the UI posted.
+        if has_start or has_end or has_text:
+            logger.debug("[posts/comments] ignoring selection fields on post-wide comment")
 
-    for i, row in enumerate(drafts):
-        pub = publish_days[i] if _orchestrated else _utc_publish_at_nine(publish_days[i])
-        if not (row.get("why_post") or "").strip() and (row.get("content") or "").strip():
-            try:
-                from backend.src.agents.stelle import _generate_why_post
-                why = _generate_why_post(row["content"], "draft", co, co)
-                if why:
-                    row["why_post"] = why
-                    from backend.src.db.local import get_connection
-                    with get_connection() as conn:
-                        conn.execute("UPDATE local_posts SET why_post = ? WHERE id = ?", (why, row["id"]))
-            except Exception:
-                pass
-        cr = _castorice_entry_from_row(row)
-        li_assets = _linkedin_asset_ids_for_row(en, co, row)
-        # Parse generation metadata from local_post for draft_map persistence
-        _gen_meta = None
-        _gen_meta_raw = row.get("generation_metadata")
-        if _gen_meta_raw:
-            try:
-                _gen_meta = json.loads(_gen_meta_raw) if isinstance(_gen_meta_raw, str) else _gen_meta_raw
-            except Exception:
-                pass
-        res = en.push_single_post(
-            company_keyword=co,
-            content=(row.get("content") or "").strip(),
-            publish_date=pub,
-            title=(row.get("title") or None),
-            approvals=approval_dicts if approval_dicts else None,
-            castorice_result=cr,
-            linkedin_asset_ids=li_assets if li_assets else None,
-            generation_metadata=_gen_meta,
-        )
-        if res.get("success"):
-            pushed += 1
-            if not first_url:
-                first_url = res.get("url")
-            new_oid = (res.get("post_id") or "").strip()
-            local_id = row.get("id")
-            if new_oid and local_id:
-                old_oid = (row.get("ordinal_post_id") or "").strip()
-                if old_oid and old_oid != new_oid:
-                    en.remove_draft_map_entry(req.company.strip(), old_oid)
-                set_local_post_ordinal_post_id(local_id, new_oid)
-                try:
-                    rm_link.link_ordinal_post_id(local_id, new_oid)
-                except Exception:
-                    logger.debug("[posts] RuanMei link (push-all) skipped", exc_info=True)
-        else:
-            errors.append(f"{row.get('id', '?')}: {res.get('error', 'unknown error')}")
-
-    return {
-        "success": pushed > 0,
-        "pushed": pushed,
-        "total": len(drafts),
-        "failed": len(drafts) - pushed,
-        "cadence": cadence,
-        "first_url": first_url,
-        "errors": errors,
+    sb = _feedback_sb()
+    payload = {
+        "draft_id": post_id,
+        "source": req.source,
+        "body": req.body.strip(),
+        "author_email": req.author_email,
+        "author_name": req.author_name,
+        "selection_start": req.selection_start if req.source == "operator_inline" else None,
+        "selection_end":   req.selection_end   if req.source == "operator_inline" else None,
+        "selected_text":   req.selected_text   if req.source == "operator_inline" else None,
     }
+    try:
+        resp = sb.table("draft_feedback").insert(payload).execute()
+    except Exception as exc:
+        logger.exception("[posts/comments] insert failed")
+        raise HTTPException(status_code=500, detail=f"insert failed: {exc}")
+    row = (resp.data or [{}])[0]
+    return {"comment": row}
+
+
+class EditCommentRequest(BaseModel):
+    """Edit the body of an existing comment in place."""
+    body: str = Field(..., min_length=1, max_length=5000)
+
+
+@router.patch("/{post_id}/comments/{comment_id}")
+async def edit_comment(post_id: str, comment_id: str, req: EditCommentRequest):
+    """Edit a comment's body. Selection anchors and source stay
+    immutable — if you wanted to anchor differently, delete + recreate.
+
+    Editing an Ordinal-sourced comment is allowed but a little weird —
+    the upstream Ordinal row stays unchanged, and the next sync pass
+    won't overwrite us (we only insert *new* external_ids). Treat edits
+    on ordinal-sourced rows as local annotations.
+    """
+    sb = _feedback_sb()
+    try:
+        sb.table("draft_feedback").update({
+            "body": req.body.strip(),
+        }).eq("id", comment_id).eq("draft_id", post_id).execute()
+    except Exception as exc:
+        logger.exception("[posts/comments] edit failed")
+        raise HTTPException(status_code=500, detail=f"edit failed: {exc}")
+    return {"updated": True, "id": comment_id}
+
+
+@router.post("/{post_id}/comments/{comment_id}/resolve")
+async def resolve_comment(post_id: str, comment_id: str, resolved_by: str | None = None):
+    """Mark a comment resolved. Idempotent — resolving an already-resolved
+    row is a no-op and returns the existing state."""
+    sb = _feedback_sb()
+    try:
+        sb.table("draft_feedback").update({
+            "resolved": True,
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+            "resolved_by": resolved_by,
+        }).eq("id", comment_id).eq("draft_id", post_id).execute()
+    except Exception as exc:
+        logger.exception("[posts/comments] resolve failed")
+        raise HTTPException(status_code=500, detail=f"resolve failed: {exc}")
+    return {"resolved": True, "id": comment_id}
+
+
+@router.delete("/{post_id}/comments/{comment_id}")
+async def delete_comment(post_id: str, comment_id: str):
+    """Hard-delete a comment. Used for accidental posts — prefer
+    ``resolve`` for the normal 'handled, keep audit trail' case."""
+    sb = _feedback_sb()
+    try:
+        sb.table("draft_feedback").delete().eq("id", comment_id).eq("draft_id", post_id).execute()
+    except Exception as exc:
+        logger.exception("[posts/comments] delete failed")
+        raise HTTPException(status_code=500, detail=f"delete failed: {exc}")
+    return {"deleted": True, "id": comment_id}
+
+
+@router.post("/{post_id}/revert")
+async def revert_to_original(post_id: str):
+    """Restore ``local_posts.content`` to the Stelle-initial / pre-Castorice
+    version stored in ``pre_revision_content``.
+
+    No-op (with a 409) if the draft has no pre-revision content on file —
+    that means it was written before we started capturing originals and
+    we'd be reverting to nothing.
+    """
+    from backend.src.db.local import get_local_post, update_local_post
+    row = get_local_post(post_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Post not found")
+    original = (row.get("pre_revision_content") or "").strip()
+    if not original:
+        raise HTTPException(
+            status_code=409,
+            detail="no pre-revision content on file — this draft has no captured original to revert to.",
+        )
+    updated = update_local_post(
+        post_id,
+        content=original,
+        revision_source="revert_to_original",
+    )
+    return {"reverted": True, "post": updated}
+
+
+@router.get("/{post_id}/revisions")
+async def list_revisions(post_id: str, limit: int = 50):
+    """Return the content-revision history for a draft, newest first.
+    The MVP UI only surfaces this for the revert use-case; a diff
+    viewer can come later without another schema change."""
+    sb = _feedback_sb()
+    try:
+        rows = (
+            sb.table("local_post_revisions")
+              .select("id, draft_id, source, author_email, created_at, content")
+              .eq("draft_id", post_id)
+              .order("created_at", desc=True)
+              .limit(max(1, min(limit, 500)))
+              .execute()
+              .data
+            or []
+        )
+    except Exception as exc:
+        logger.debug("[posts/revisions] list failed: %s", exc)
+        rows = []
+    return {"revisions": rows}

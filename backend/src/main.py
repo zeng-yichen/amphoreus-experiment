@@ -12,8 +12,10 @@ from backend.src.auth.cf_access import CfAccessVerifier
 from backend.src.auth.middleware import (
     AuditLogMiddleware,
     CfAccessAuthMiddleware,
+    SupabaseAuthMiddleware,
     require_client_from_path,
 )
+from backend.src.auth.supabase_auth import build_verifier_from_env as _build_supabase_verifier
 from backend.src.core.config import get_settings
 from backend.src.db.local import initialize_db, mark_stale_runs_failed
 
@@ -23,10 +25,18 @@ logger = logging.getLogger("amphoreus")
 # so the middleware (which is registered before lifespan runs) and the app
 # state (populated during lifespan) reference the same objects.
 _settings_singleton = get_settings()
+
+# Auth-mode selector. ``AMPHOREUS_AUTH``:
+#   - "cf_access" (default)        — legacy Cloudflare Access gate
+#   - "supabase"                   — Google sign-in via Supabase Auth
+# The two modes are mutually exclusive; both use the same ACL file so
+# we can cut over without touching user entitlements.
+AUTH_MODE = os.environ.get("AMPHOREUS_AUTH", "cf_access").strip().lower() or "cf_access"
 CF_VERIFIER = CfAccessVerifier(
     team_domain=_settings_singleton.cf_access_team_domain,
     audience=_settings_singleton.cf_access_aud,
 )
+SUPABASE_VERIFIER = _build_supabase_verifier()
 ACL = Acl(path=_settings_singleton.acl_path)
 
 
@@ -62,6 +72,17 @@ async def lifespan(app: FastAPI):
         install_instrumentation()
     except Exception:
         logger.exception("Failed to install usage instrumentation (non-fatal).")
+
+    # CLI-mode leak guard — log-only tripwire that flags any direct
+    # Anthropic API call while AMPHOREUS_USE_CLI=true. See
+    # backend/src/mcp_bridge/cli_leak_guard.py. No effect when CLI mode
+    # is off. Installed AFTER the usage instrumentation so both wrap
+    # the same methods without stomping each other.
+    try:
+        from backend.src.mcp_bridge.cli_leak_guard import install_leak_guard
+        install_leak_guard()
+    except Exception:
+        logger.exception("Failed to install CLI leak guard (non-fatal).")
     stale = mark_stale_runs_failed()
     if stale:
         logger.info("Marked %d stale 'running' job(s) as failed (server restart).", stale)
@@ -71,6 +92,7 @@ async def lifespan(app: FastAPI):
     # middleware (registered below) and the FastAPI deps (which read
     # ``request.app.state.acl``) see the same objects.
     app.state.cf_verifier = CF_VERIFIER
+    app.state.supabase_verifier = SUPABASE_VERIFIER
     app.state.acl = ACL
     if CF_VERIFIER.enabled:
         logger.info(
@@ -95,7 +117,7 @@ async def lifespan(app: FastAPI):
         logger.exception("Startup catch-up failed (non-fatal).")
 
     # Ordinal sync loops — DISABLED BY DEFAULT as of 2026-04-18.
-    # Stelle now runs primarily in Lineage mode (invoked from Jacquard's
+    # Stelle now runs primarily in database mode (invoked from Jacquard's
     # virio-api) where engagement data is sourced via Jacquard's Supabase
     # through ``POST /api/workspace/observations``. The local memory/ mirror
     # is no longer the primary data path.
@@ -117,6 +139,68 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Ordinal sync loops SKIPPED (default — set ENABLE_SYNC_LOOPS=true to enable).")
 
+    # post_embeddings nightly refresh — opt-in via ENABLE_POST_EMBEDDINGS_CRON.
+    # Keeps the ~390k-post pgvector mirror fresh against Jacquard's
+    # linkedin_posts by running scripts/embed_linkedin_posts.py --incremental
+    # once a day. Cheap (<$0.05/day typically). No-op if env flag is off.
+    try:
+        from backend.src.services.post_embeddings_cron import (
+            start_post_embeddings_cron,
+        )
+        start_post_embeddings_cron()
+    except Exception:
+        logger.exception("Failed to start post_embeddings cron (non-fatal).")
+
+    # Jacquard → Amphoreus mirror sync — opt-in via
+    # ENABLE_JACQUARD_MIRROR_SYNC. Pulls the agent-ingested tables from
+    # Jacquard's Supabase (+ transcript bodies from GCS to Supabase
+    # Storage) every 8h. Reads aren't yet wired to the mirror; this just
+    # keeps it populated so the cutover is a no-op when we want it.
+    try:
+        from backend.src.services.jacquard_mirror_cron import (
+            start_jacquard_mirror_cron,
+        )
+        start_jacquard_mirror_cron()
+    except Exception:
+        logger.exception("Failed to start jacquard_mirror cron (non-fatal).")
+
+    # (draft_publish_matcher v1 cron removed 2026-04-23 — superseded
+    # by (a) the semantic ``draft_match_worker`` that runs after the
+    # Amphoreus + Jacquard scrapes and (b) the manual-date pairing
+    # endpoint ``POST /api/posts/{id}/set-publish-date``. Both write
+    # to ``local_posts.matched_provider_urn`` which is what the bundle
+    # reads; v1 wrote to a separate ``draft_publish_matches`` table
+    # that had no downstream consumer.)
+
+    # Ordinal-reviewer-comment ingestor — opt-in via
+    # ENABLE_ORDINAL_COMMENT_SYNC. Transitional: polls Ordinal's
+    # per-post /comments + /inline-comments endpoints and writes
+    # reviewer feedback into draft_feedback so Cyrene rewrites see
+    # Ordinal-sourced comments. Delete this wiring once Ordinal is
+    # retired. See services/ordinal_comment_sync.py.
+    try:
+        from backend.src.services.ordinal_comment_sync_cron import (
+            start_ordinal_comment_sync_cron,
+        )
+        start_ordinal_comment_sync_cron()
+    except Exception:
+        logger.exception("Failed to start ordinal_comment_sync cron (non-fatal).")
+
+    # Amphoreus-owned LinkedIn scrape — opt-in via
+    # ENABLE_AMPHOREUS_LINKEDIN_SCRAPE. Hits Apify's
+    # apimaestro/linkedin-profile-posts actor at 00:00 every weekday
+    # for each Virio-serviced FOC, upserting engagement counts into
+    # linkedin_posts (coexists with the Jacquard mirror via the
+    # _source column). See services/amphoreus_linkedin_scrape.py for
+    # the write contract.
+    try:
+        from backend.src.services.amphoreus_linkedin_scrape_cron import (
+            start_amphoreus_linkedin_scrape_cron,
+        )
+        start_amphoreus_linkedin_scrape_cron()
+    except Exception:
+        logger.exception("Failed to start amphoreus_linkedin_scrape cron (non-fatal).")
+
     yield
 
     # Graceful shutdown. Only call stop_sync_loop if the module was
@@ -125,6 +209,34 @@ async def lifespan(app: FastAPI):
     try:
         from backend.src.services.ordinal_sync import stop_sync_loop as _stop
         _stop()
+    except Exception:
+        pass
+    try:
+        from backend.src.services.post_embeddings_cron import (
+            stop_post_embeddings_cron,
+        )
+        stop_post_embeddings_cron()
+    except Exception:
+        pass
+    try:
+        from backend.src.services.jacquard_mirror_cron import (
+            stop_jacquard_mirror_cron,
+        )
+        stop_jacquard_mirror_cron()
+    except Exception:
+        pass
+    try:
+        from backend.src.services.amphoreus_linkedin_scrape_cron import (
+            stop_amphoreus_linkedin_scrape_cron,
+        )
+        stop_amphoreus_linkedin_scrape_cron()
+    except Exception:
+        pass
+    try:
+        from backend.src.services.ordinal_comment_sync_cron import (
+            stop_ordinal_comment_sync_cron,
+        )
+        stop_ordinal_comment_sync_cron()
     except Exception:
         pass
     logger.info("Shutting down Amphoreus backend.")
@@ -146,11 +258,16 @@ app = FastAPI(
 # first on the way out. Starlette applies them in REVERSE order of add_middleware
 # calls — so the LAST add is the OUTERMOST wrapper. We want:
 #   outermost: CORS (so 401 responses still get CORS headers)
-#   middle:    CfAccessAuth (gates everything)
+#   middle:    Auth (gates everything — CF Access OR Supabase depending on AUTH_MODE)
 #   innermost: AuditLog (sees the final status code, knows which user)
-# Therefore add order is: AuditLog → CfAccessAuth → CORS.
+# Therefore add order is: AuditLog → Auth → CORS.
 app.add_middleware(AuditLogMiddleware, log_path=settings.audit_log_path)
-app.add_middleware(CfAccessAuthMiddleware, verifier=CF_VERIFIER, acl=ACL)
+if AUTH_MODE == "supabase":
+    logger.info("Auth mode: SUPABASE (Google sign-in via %s)", _settings_singleton.amphoreus_supabase_url if hasattr(_settings_singleton, 'amphoreus_supabase_url') else os.environ.get("AMPHOREUS_SUPABASE_URL", "<unset>"))
+    app.add_middleware(SupabaseAuthMiddleware, verifier=SUPABASE_VERIFIER, acl=ACL)
+else:
+    logger.info("Auth mode: CF_ACCESS (legacy — set AMPHOREUS_AUTH=supabase to swap)")
+    app.add_middleware(CfAccessAuthMiddleware, verifier=CF_VERIFIER, acl=ACL)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins.split(","),
@@ -171,6 +288,7 @@ from backend.src.api.routers import (
     images,
     interview,
     learning,
+    mirror,
     posts,
     report,
     strategy,
@@ -190,6 +308,7 @@ app.include_router(posts.router)
 app.include_router(images.router)
 app.include_router(cs.router)
 app.include_router(learning.router)
+app.include_router(mirror.router)
 app.include_router(report.router)
 app.include_router(transcripts.router)
 app.include_router(usage.router)
@@ -207,18 +326,25 @@ async def me(request: Request):
     Frontend calls this on page load to populate the auth context and decide
     which client tabs to render in the sidebar. Returns ``allowed_clients: "*"``
     for admins, or an explicit list of slugs for scoped users.
+
+    ``auth_enabled`` reflects whichever verifier is active for the current
+    ``AMPHOREUS_AUTH`` mode — the frontend uses it to decide whether to
+    hide dev-only UI (Push Code → Fly, etc.) and to know whether a 401
+    means "go to /login" (Supabase mode) vs the CF Access redirect.
     """
     user = getattr(request.state, "user", None)
     if user is None:
-        # Should never happen — middleware sets this on every non-exempt request.
         return {"email": "", "is_admin": False, "allowed_clients": []}
     is_admin = bool(getattr(request.state, "user_is_admin", False))
-    # Admins always see everything, including the dev-bypass user which isn't
-    # in the ACL file. Non-admins get their explicit allowlist from the ACL.
     allowed: object = "*" if is_admin else ACL.allowed_clients(user.email)
+    if AUTH_MODE == "supabase":
+        auth_enabled = SUPABASE_VERIFIER.enabled
+    else:
+        auth_enabled = CF_VERIFIER.enabled
     return {
         "email": user.email,
         "is_admin": is_admin,
-        "allowed_clients": allowed,  # "*" (admin) or list[str]
-        "auth_enabled": CF_VERIFIER.enabled,
+        "allowed_clients": allowed,
+        "auth_enabled": auth_enabled,
+        "auth_mode": AUTH_MODE,
     }
