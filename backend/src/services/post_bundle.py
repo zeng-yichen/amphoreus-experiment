@@ -73,7 +73,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _WINDOW_DAYS                = 90     # comment/delta lookback window
-_JACQUARD_WINDOW_DAYS       = 180    # LinkedIn post lookback (matches Stelle)
+# LinkedIn post lookback windows. 21 days is the primary filter — tight
+# enough to keep the creator's CURRENT voice-era (post-Virio-onboarding)
+# in the bundle without dragging in pre-Virio promotional shorts or
+# older content-eras that bias voice calibration. If 21d leaves <5
+# originals (under the neighbor-compute minimum), we widen to 60d as a
+# backoff so low-frequency creators still get semantic neighbors.
+# 2026-04-23: was a single 180-day window, which pulled each FOC's
+# pre-Virio content into every bundle build and bimodal-averaged the
+# voice target — e.g. Mark Schwartz's Nov 2025 was 75% promotional
+# shorts <500 chars, directly biasing Stelle toward shorter drafts.
+_LINKEDIN_WINDOW_DAYS          = 21
+_LINKEDIN_WINDOW_FALLBACK_DAYS = 60
+_MIN_POSTS_BEFORE_FALLBACK     = 5   # matches _NEIGHBOR_MIN_POSTS
 _MAX_COMMENT_BODY           = 600    # char cap per comment
 _MAX_SELECTED_TEXT          = 200    # char cap per inline anchor
 _MAX_POST_BODY_CHARS        = 4000   # char cap per post body in bundle
@@ -210,7 +222,12 @@ def build_post_bundle_with_stats(
             )
         local_posts_by_oid, local_posts_by_id, rejected_local_posts = \
             _fetch_local_posts(company, user_id=user_id)
-        linkedin_posts_by_urn = _fetch_linkedin_engagement(company)
+        # user_id threaded through so multi-FOC companies (Trimble/
+        # Commenda/Virio) resolve their LinkedIn handle correctly.
+        # Without it, _resolve_linkedin_username bails when a company
+        # has >1 FOC, returning empty engagement → no neighbors → no
+        # NEAREST CREATOR POSTS block on any rendered post. 2026-04-23.
+        linkedin_posts_by_urn = _fetch_linkedin_engagement(company, user_id=user_id)
         feedback_by_draft     = _fetch_feedback(local_posts_by_id.keys())
         trajectories_by_urn   = _fetch_recent_trajectories(linkedin_posts_by_urn)
     except Exception:
@@ -425,7 +442,7 @@ def build_post_bundle_with_stats(
         try:
             if posted_at and datetime.fromisoformat(
                 posted_at.replace("Z", "+00:00")
-            ) < since - timedelta(days=_JACQUARD_WINDOW_DAYS - window_days):
+            ) < since - timedelta(days=_LINKEDIN_WINDOW_DAYS - window_days):
                 # Jacquard window is wider; still accept.
                 pass
         except Exception:
@@ -488,6 +505,18 @@ def build_post_bundle_with_stats(
         parts.extend(rejected_blocks)
     parts.append("")
     parts.append("=== END POSTS ===")
+
+    # Phainon exemplars (2026-04-25 prototype). Reads the latest batch
+    # from ``creator_exemplars`` for this FOC and renders a section
+    # visible to Stelle. Three modes appear distinctly so Stelle can
+    # weight them: ``full`` (reward-ranked, high confidence),
+    # ``diverse`` (no ranking — Phainon explored these directions),
+    # ``warm_start`` (voice may include pre-Virio tone — too early
+    # to calibrate). Best-effort; failures don't block the bundle.
+    phainon_section = _render_phainon_exemplars(company, user_id)
+    if phainon_section:
+        parts.append("")
+        parts.append(phainon_section)
 
     # Structured stats log — grep-friendly so a downstream audit
     # script (``neighbor_signal_audit``) can aggregate bundle builds
@@ -717,10 +746,19 @@ def _filter_ordinal_posts_to_foc(
     return out
 
 
-def _fetch_linkedin_engagement(company: str) -> dict[str, dict]:
+def _fetch_linkedin_engagement(
+    company: str, user_id: Optional[str] = None,
+) -> dict[str, dict]:
     """Return ``{provider_urn: linkedin_post_row}`` for this creator's
     recent posts. Provides engagement numbers + fallback body text for
     posts that went live via a non-Ordinal path.
+
+    ``user_id`` is threaded through to ``_resolve_linkedin_username``.
+    **Load-bearing for multi-FOC companies** (Trimble/Commenda/Virio):
+    without it, the resolver bails on bare-UUID company inputs with
+    >1 FOC and returns None, so the bundle renders with empty
+    engagement data and zero semantic neighbors. See the 2026-04-23
+    fix in ``stelle.py::_resolve_linkedin_username``.
 
     **Source cutover (2026-04-23):** reads from the Amphoreus mirror
     (``AMPHOREUS_SUPABASE_URL``), not Jacquard upstream
@@ -740,7 +778,7 @@ def _fetch_linkedin_engagement(company: str) -> dict[str, dict]:
     other's identity fields).
     """
     from backend.src.agents.stelle import _resolve_linkedin_username
-    username = _resolve_linkedin_username(company)
+    username = _resolve_linkedin_username(company, user_id=user_id)
     if not username:
         return {}
     import os
@@ -748,43 +786,73 @@ def _fetch_linkedin_engagement(company: str) -> dict[str, dict]:
     key = os.environ.get("AMPHOREUS_SUPABASE_KEY", "").strip()
     if not url or not key:
         return {}
-    since_iso = (
-        datetime.now(timezone.utc) - timedelta(days=_JACQUARD_WINDOW_DAYS)
-    ).isoformat()
-    try:
-        resp = httpx.get(
-            f"{url}/rest/v1/linkedin_posts",
-            params={
-                "select": (
-                    "provider_urn,post_text,hook,posted_at,total_reactions,"
-                    "total_comments,total_reposts,engagement_score,is_outlier"
-                ),
-                "creator_username":  f"eq.{username}",
-                # Exclude explicit company-post rows but keep NULLs.
-                # Jacquard sets ``is_company_post`` reliably, the
-                # Amphoreus Apify scrape leaves it unset. PostgREST's
-                # ``eq.false`` and ``not.eq.true`` BOTH reject NULL
-                # (SQL tri-valued logic), so an Amphoreus-scraped row
-                # vanishes from the bundle if we use either. The
-                # explicit ``or=`` clause is the only way to say
-                # "false or null" in PostgREST query params.
-                "or":                "(is_company_post.is.null,is_company_post.eq.false)",
-                "post_text":         "not.is.null",
-                "posted_at":         f"gte.{since_iso}",
-                "order":             "posted_at.desc",
-                "limit":             "200",
-            },
-            headers={
-                "apikey":        key,
-                "Authorization": f"Bearer {key}",
-            },
-            timeout=30.0,
+
+    def _fetch(days: int) -> list[dict]:
+        since_iso = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).isoformat()
+        try:
+            resp = httpx.get(
+                f"{url}/rest/v1/linkedin_posts",
+                params={
+                    "select": (
+                        "provider_urn,post_text,hook,posted_at,total_reactions,"
+                        "total_comments,total_reposts,engagement_score,is_outlier"
+                    ),
+                    "creator_username":  f"eq.{username}",
+                    # Exclude explicit company-post rows but keep NULLs.
+                    # Jacquard sets ``is_company_post`` reliably, the
+                    # Amphoreus Apify scrape leaves it unset. PostgREST's
+                    # ``eq.false`` and ``not.eq.true`` BOTH reject NULL
+                    # (SQL tri-valued logic), so an Amphoreus-scraped row
+                    # vanishes from the bundle if we use either. The
+                    # explicit ``or=`` clause is the only way to say
+                    # "false or null" in PostgREST query params.
+                    "or":                "(is_company_post.is.null,is_company_post.eq.false)",
+                    # Exclude reshares — they're someone else's content
+                    # the creator chose to repost, voice-neutral signal.
+                    # 2026-04-23: previously slipped through and
+                    # polluted the bundle + neighbor compute.
+                    "reshared_post_urn": "is.null",
+                    "post_text":         "not.is.null",
+                    "posted_at":         f"gte.{since_iso}",
+                    "order":             "posted_at.desc",
+                    "limit":             "200",
+                },
+                headers={
+                    "apikey":        key,
+                    "Authorization": f"Bearer {key}",
+                },
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+            return resp.json() or []
+        except Exception as exc:
+            logger.warning(
+                "[post_bundle] linkedin_posts fetch failed for %s (window=%dd): %s",
+                company, days, exc,
+            )
+            return []
+
+    # Primary: tight 21-day window → clean current-voice-era calibration.
+    # Rationale: a creator's voice shifts over time, and for a newly-
+    # onboarded client the pre-Virio content is usually much shorter /
+    # more promotional. Tight window keeps Stelle's voice target
+    # aligned with the posting style of the last ~3 weeks.
+    rows = _fetch(_LINKEDIN_WINDOW_DAYS)
+    if len(rows) < _MIN_POSTS_BEFORE_FALLBACK:
+        # Fallback: widen to 60d so low-frequency creators still get
+        # enough posts to compute semantic neighbors (which require
+        # _NEIGHBOR_MIN_POSTS=5). Logged so we can spot the FOCs
+        # that never reach the 21d threshold.
+        logger.info(
+            "[post_bundle] only %d post(s) in last %dd for %s — "
+            "widening to %dd fallback window",
+            len(rows), _LINKEDIN_WINDOW_DAYS, username,
+            _LINKEDIN_WINDOW_FALLBACK_DAYS,
         )
-        resp.raise_for_status()
-        rows = resp.json() or []
-    except Exception as exc:
-        logger.warning("[post_bundle] linkedin_posts fetch failed for %s: %s", company, exc)
-        return {}
+        rows = _fetch(_LINKEDIN_WINDOW_FALLBACK_DAYS)
+
     out: dict[str, dict] = {}
     for r in rows:
         urn = (r.get("provider_urn") or "").strip()
@@ -1040,6 +1108,133 @@ def _neighbors_for_query_embedding(
             "hook": hook,
         })
     return out
+
+
+def _render_phainon_exemplars(company: str, user_id: Optional[str]) -> str:
+    """Latest Phainon exemplar batch for this FOC, rendered as a markdown
+    block. Returns empty string when:
+      * Amphoreus Supabase isn't configured
+      * No exemplar rows exist for this creator (Phainon hasn't run yet,
+        or this creator is outside the prototype roster)
+      * Any read error — best-effort only.
+
+    Mode signals are surfaced explicitly in the section header so Stelle
+    knows whether the candidates are reward-ranked, exploratory, or
+    warm-start. See ``services/phainon.py`` for the full mode contract.
+    """
+    try:
+        from backend.src.agents.stelle import _resolve_linkedin_username
+        from backend.src.db.amphoreus_supabase import _get_client, is_configured
+    except Exception:
+        return ""
+    if not is_configured():
+        return ""
+
+    handle = _resolve_linkedin_username(company)
+    if not handle:
+        return ""
+
+    sb = _get_client()
+    if sb is None:
+        return ""
+
+    # Pull the most recent batch only — Phainon writes one batch per
+    # weekly run, identified by ``batch_id``. We get all rows for the
+    # latest ``generated_at`` and filter to that batch's id.
+    try:
+        rows = (
+            sb.table("creator_exemplars")
+              .select("id, generated_at, batch_id, mode, angle, exemplar_text, "
+                      "predicted_band, reasoning, rank_within_batch, onboarding_date")
+              .eq("creator_handle", handle)
+              .order("generated_at", desc=True)
+              .limit(50)
+              .execute()
+              .data
+            or []
+        )
+    except Exception as exc:
+        logger.debug("[post_bundle] phainon exemplars fetch failed: %s", exc)
+        return ""
+    if not rows:
+        return ""
+
+    latest_batch = rows[0].get("batch_id")
+    batch_rows = [r for r in rows if r.get("batch_id") == latest_batch]
+    if not batch_rows:
+        return ""
+
+    mode = (batch_rows[0].get("mode") or "").strip()
+    generated_at = (batch_rows[0].get("generated_at") or "")[:10]
+    onboarding   = batch_rows[0].get("onboarding_date") or ""
+
+    # Sort within mode
+    if mode == "full":
+        # Rank ascending — 1 is best
+        batch_rows.sort(
+            key=lambda r: (r.get("rank_within_batch") or 99,)
+        )
+    else:
+        # Diverse / warm_start: keep original order (chronological insertion)
+        pass
+
+    lines: list[str] = []
+    lines.append(f"=== PHAINON EXEMPLARS for @{handle} (generated {generated_at}) ===")
+    lines.append("")
+    if mode == "full":
+        lines.append(
+            f"Mode: FULL — reward-ranked (V2a Spearman ≥ 0.4 calibrated). "
+            f"These are the top-{len(batch_rows)} candidates Phainon scored "
+            f"highest for this creator. Use as concrete inspiration for "
+            f"directions Phainon predicts will land. Treat band 5 as "
+            f"\"highest predicted relative engagement\" within this "
+            f"creator's distribution."
+        )
+    elif mode == "diverse":
+        lines.append(
+            f"Mode: DIVERSE EXPLORATION — Phainon's reward model isn't "
+            f"reliably calibrated for this creator (Spearman near zero or "
+            f"anti-predictive on V2a). The {len(batch_rows)} candidates "
+            f"below were generated with angle/structure variation but NOT "
+            f"reward-ranked. Read as \"directions Phainon explored,\" not "
+            f"\"directions Phainon endorses.\" Pick whatever resonates."
+        )
+    elif mode == "warm_start":
+        lines.append(
+            f"Mode: WARM START — Phainon doesn't have enough Virio-era data "
+            f"yet for this creator (onboarded {onboarding}). The "
+            f"{len(batch_rows)} candidates were generated using their FULL "
+            f"history (pre + post Virio); voice may include pre-Virio tone. "
+            f"Treat as voice-prototyping seed, not as ranked exemplars."
+        )
+    else:
+        lines.append(f"Mode: {mode or 'unknown'} ({len(batch_rows)} candidates)")
+    lines.append("")
+
+    for i, r in enumerate(batch_rows, 1):
+        # Header line per exemplar
+        head_bits: list[str] = []
+        if mode == "full":
+            band = r.get("predicted_band")
+            if band is not None:
+                head_bits.append(f"predicted band {band}/5")
+            rank = r.get("rank_within_batch")
+            if rank:
+                head_bits.append(f"rank {rank}")
+        angle = (r.get("angle") or "").strip()
+        if angle:
+            head_bits.append(f"angle: {angle}")
+        head = " · ".join(head_bits) if head_bits else "candidate"
+        lines.append(f"--- Exemplar {i} ({head}) ---")
+        lines.append((r.get("exemplar_text") or "").strip())
+        if mode == "full":
+            reasoning = (r.get("reasoning") or "").strip()
+            if reasoning:
+                lines.append(f"  Phainon reasoning: {reasoning}")
+        lines.append("")
+
+    lines.append("=== END PHAINON EXEMPLARS ===")
+    return "\n".join(lines)
 
 
 def _fetch_feedback(draft_ids) -> dict[str, list[dict]]:
