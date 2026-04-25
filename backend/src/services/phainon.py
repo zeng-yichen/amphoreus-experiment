@@ -54,8 +54,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-import anthropic
-
 logger = logging.getLogger(__name__)
 
 
@@ -115,13 +113,19 @@ PHAINON_PROTOTYPE_CREATORS: list[_CreatorConfig] = [
 ]
 
 
-# Generation knobs
-_GEN_MODEL              = "claude-opus-4-6"
+# Generation knobs.
+#
+# Phainon routes generation + scoring through the Claude CLI subprocess
+# (``mcp_bridge.claude_cli.cli_single_shot``), same path Stelle / Cyrene
+# / Castorice use. That means generation runs on the operator's Claude
+# Pro/Team subscription, NOT on metered Anthropic API credits.
+# Direct-API ``anthropic.Anthropic()`` was the original wiring; switched
+# 2026-04-25 after the API credit balance ran out partway through the
+# first prototype batch.
+_GEN_MODEL              = "opus"   # CLI accepts "sonnet" | "opus"
 _GEN_MAX_TOKENS         = 1200
-_INPUT_COST_PER_MTOK    = 15.0
-_OUTPUT_COST_PER_MTOK   = 75.0
+_GEN_TIMEOUT_S          = 180
 _GEN_HISTORY_FOR_VOICE  = 12       # how many prior posts to show as voice context
-_GEN_TEMP               = 1.0       # diversity over candidates
 
 # The angle pool — cycle through these so candidates are varied.
 # Each angle is structural / framing-level, not topical.
@@ -170,11 +174,6 @@ def run_phainon(creators: Optional[list[_CreatorConfig]] = None) -> PhainonRunRe
     result = PhainonRunResult()
     if creators is None:
         creators = PHAINON_PROTOTYPE_CREATORS
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not api_key:
-        result.errors.append("ANTHROPIC_API_KEY not set")
-        return result
 
     from backend.src.db.amphoreus_supabase import _get_client, is_configured
     if not is_configured():
@@ -358,7 +357,11 @@ def _generate_candidate(
     voice_ctx: list[dict],
     angle: str,
 ) -> tuple[str, float]:
-    """One Opus call producing one draft candidate. Returns (draft_text, cost)."""
+    """One Opus generation via Claude CLI subprocess. Returns
+    ``(draft_text, cost_usd)``. Cost is always 0.0 — the CLI runs on
+    the operator's Claude subscription, not metered API credits;
+    detailed token usage is recorded by ``cli_single_shot`` itself
+    via ``_record_cli_usage``."""
     # System prompt — voice instructions + output contract
     sys_prompt = (
         f"You are drafting a LinkedIn post for {cfg.company_label}. "
@@ -395,47 +398,36 @@ def _generate_candidate(
 
     usr_prompt = "\n".join(lines)
 
-    client = _client()
-    resp = client.messages.create(
+    from backend.src.mcp_bridge.claude_cli import cli_single_shot
+
+    text = cli_single_shot(
+        prompt=usr_prompt,
+        system_prompt=sys_prompt,
         model=_GEN_MODEL,
         max_tokens=_GEN_MAX_TOKENS,
-        temperature=_GEN_TEMP,
-        system=sys_prompt,
-        messages=[{"role": "user", "content": usr_prompt}],
+        timeout=_GEN_TIMEOUT_S,
     )
-    text = resp.content[0].text if resp.content else ""
-    cost = (
-        (resp.usage.input_tokens  / 1e6) * _INPUT_COST_PER_MTOK
-        + (resp.usage.output_tokens / 1e6) * _OUTPUT_COST_PER_MTOK
-    )
+    if text is None:
+        raise RuntimeError("cli_single_shot returned None (CLI subprocess failed)")
 
-    # Tolerant JSON extraction
+    # Tolerant JSON extraction — same as before
     m = re.search(r"\{[^{}]*\"draft\"[^{}]*\}", text, flags=re.DOTALL)
     if not m:
-        # Fall back: maybe Opus wrote markdown-wrapped or with extra fields
         m = re.search(r"\{.*?\"draft\".*?\}", text, flags=re.DOTALL)
     if m:
         try:
             payload = json.loads(m.group(0))
-            return str(payload.get("draft", "")), cost
+            return str(payload.get("draft", "")), 0.0
         except Exception:
             pass
     # Fallback: treat the full text as the draft (model went off-format)
-    return text.strip()[:5000], cost
+    return text.strip()[:5000], 0.0
 
 
 # ---------------------------------------------------------------------------
 # Helpers (lightweight; we deliberately avoid importing more from post_bundle
 # than necessary to keep this module self-contained for tests)
 # ---------------------------------------------------------------------------
-
-_CLIENT = None
-def _client():
-    global _CLIENT
-    if _CLIENT is None:
-        _CLIENT = anthropic.Anthropic()
-    return _CLIENT
-
 
 def _parse_ts(iso):
     if not iso: return None

@@ -29,20 +29,23 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-import anthropic
-
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+#
+# Reward calls route through the Claude CLI subprocess
+# (``mcp_bridge.claude_cli.cli_single_shot``), same as Stelle / Cyrene
+# / phainon.py — runs on the operator's Claude subscription, not on
+# metered Anthropic API credits. Token usage is recorded internally
+# by ``_record_cli_usage`` so the admin dashboard still tracks spend
+# even though it's $0 against the API balance.
 
-_REWARD_MODEL          = "claude-opus-4-6"
+_REWARD_MODEL          = "opus"     # CLI accepts "sonnet" | "opus"
 _REWARD_MAX_TOKENS     = 400
-# Opus 4.6 pricing per million tokens (matches irontomb.py + the calibration scripts).
-_INPUT_COST_PER_MTOK   = 15.0
-_OUTPUT_COST_PER_MTOK  = 75.0
+_REWARD_TIMEOUT_S      = 120
 
-# Body caps applied before sending to Opus — bound the input token budget.
+# Body caps applied before sending — bounds the input prompt size.
 _MAX_BODY_CHARS_CTX    = 1800
 _MAX_BODY_CHARS_TGT    = 4000
 
@@ -152,18 +155,6 @@ def _user_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Anthropic client (lazy)
-# ---------------------------------------------------------------------------
-
-_CLIENT = None
-def _client():
-    global _CLIENT
-    if _CLIENT is None:
-        _CLIENT = anthropic.Anthropic()
-    return _CLIENT
-
-
-# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -179,8 +170,11 @@ def score_candidate(
     """Predict the engagement band for ``candidate_text`` given the creator's
     history. Returns ``(band, reasoning, cost_usd)``.
 
-    Failure handling: returns ``(None, None, cost_so_far)`` on any error.
-    Caller should treat None-band as "score unavailable, don't rank."
+    Routes through the Claude CLI subprocess (operator's subscription).
+    ``cost_usd`` is always 0.0 — token usage is recorded internally
+    by ``cli_single_shot`` for ops dashboards, but no API credits are
+    consumed. Caller should treat None-band as "score unavailable,
+    don't rank."
     """
     if not candidate_text or not (candidate_text or "").strip():
         return None, None, 0.0
@@ -194,37 +188,26 @@ def score_candidate(
         cadence_7d           = cadence_7d,
         neighbors            = neighbors,
     )
-    try:
-        resp = _client().messages.create(
-            model=_REWARD_MODEL,
-            max_tokens=_REWARD_MAX_TOKENS,
-            system=sys_prompt,
-            messages=[{"role": "user", "content": usr_prompt}],
-        )
-    except Exception:
-        # Network blips, rate limits — let caller retry/skip
+
+    from backend.src.mcp_bridge.claude_cli import cli_single_shot
+    text = cli_single_shot(
+        prompt=usr_prompt,
+        system_prompt=sys_prompt,
+        model=_REWARD_MODEL,
+        max_tokens=_REWARD_MAX_TOKENS,
+        timeout=_REWARD_TIMEOUT_S,
+    )
+    if text is None:
         return None, None, 0.0
 
-    text = resp.content[0].text if resp.content else ""
     m = re.search(r"\{[^{}]*\"band\"[^{}]*\}", text, flags=re.DOTALL)
     if not m:
-        return None, text[:200], _cost_of(resp)
+        return None, text[:200], 0.0
     try:
         payload = json.loads(m.group(0))
         band = int(payload["band"])
         reasoning = str(payload.get("reasoning", ""))[:400]
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return None, text[:200], _cost_of(resp)
+        return None, text[:200], 0.0
 
-    return band, reasoning, _cost_of(resp)
-
-
-def _cost_of(resp) -> float:
-    """Dollar cost of one Anthropic call from the usage block."""
-    u = getattr(resp, "usage", None)
-    if u is None:
-        return 0.0
-    return (
-        (u.input_tokens  / 1e6) * _INPUT_COST_PER_MTOK
-        + (u.output_tokens / 1e6) * _OUTPUT_COST_PER_MTOK
-    )
+    return band, reasoning, 0.0
