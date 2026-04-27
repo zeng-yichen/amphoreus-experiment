@@ -276,11 +276,21 @@ def _handle_get_reader_reaction(args: dict) -> str:
     for prior in _simulate_results[-5:]:
         pr_result = prior.get("result", {}) or {}
         pr_draft = prior.get("draft", "") or ""
+        # Show the gestalt + every anchor (quote + reaction) so Stelle
+        # sees WHICH spans got which feedback, not just a single
+        # collapsed pointer. Lets her track localized signal across
+        # iterations: e.g. "the closer was anchored negative on iter 1,
+        # I rewrote it, anchor disappeared on iter 2 — closer is now
+        # fine, leave it; the middle just acquired a negative anchor,
+        # focus there next."
+        pr_anchors = pr_result.get("anchors")
+        if not isinstance(pr_anchors, list):
+            pr_anchors = []
         trajectory.append({
             "draft_first_line": pr_draft.split("\n")[0][:80] if pr_draft else "",
             "draft_len": len(pr_draft),
             "reaction": pr_result.get("reaction", ""),
-            "anchor": pr_result.get("anchor", ""),
+            "anchors":  pr_anchors,
         })
 
     # Persist THIS call so future invocations can see it as prior history.
@@ -292,6 +302,16 @@ def _handle_get_reader_reaction(args: dict) -> str:
     enriched = dict(result)
     if trajectory:
         enriched["_prior_reactions"] = trajectory
+
+    # Fire-and-forget convergence log. See services/convergence_log.py
+    # for the dataset-building rationale. Never raises; the critic's
+    # return value is unchanged regardless of whether this succeeds.
+    try:
+        from backend.src.services.convergence_log import log_irontomb_call
+        log_irontomb_call(_COMPANY, draft, enriched)
+    except Exception:
+        pass
+
     return json.dumps(enriched, default=str)
 
 
@@ -299,9 +319,20 @@ server.register(
     name="get_reader_reaction",
     description=(
         "Send a draft to Irontomb, a rough-reader simulator. Returns "
-        "{reaction, anchor} — a short visceral reader-voice reaction and "
-        "a pointer to where in the post the reader reacted. Not a critique. "
-        "Stelle interprets and revises."
+        "a gestalt reader-voice reaction PLUS a list of inline anchors "
+        "(zero, one, or many) showing where the reader's felt-state "
+        "changed as they read.\n\n"
+        "Response shape:\n"
+        "  reaction — under-15-word GESTALT reaction (net effect after "
+        "the whole draft).\n"
+        "  anchors  — list of {quote, reaction} for each reader-state-"
+        "change moment. quote = verbatim 3-15 words from the draft "
+        "that triggered the shift; reaction = short reader-voice "
+        "response to that span. Empty list = uniformly fine, only the "
+        "gestalt matters.\n\n"
+        "Use anchors as a localized gradient: revise spans the reader "
+        "anchored negatively, leave spans they didn't anchor or "
+        "anchored positively. Don't rewrite what's working."
     ),
     input_schema={
         "type": "object",
@@ -367,6 +398,258 @@ server.register(
         "required": ["result_json"],
     },
     handler=_handle_write_result,
+)
+
+
+# ---------------------------------------------------------------------------
+# Tool: submit_draft (per-draft persistence to local_posts → Posts tab)
+# ---------------------------------------------------------------------------
+# CLI-mode Stelle needs parity with native-mode Stelle's submit_draft tool.
+# Without this, posts generated under AMPHOREUS_USE_CLI never land in the
+# local_posts table and the Posts tab on amphoreus.app stays empty.
+# Thin wrapper over the shared _dispatch_submit_draft handler so the CLI and
+# native paths use identical persistence logic (Castorice fact-check still
+# runs in native-mode via the per-run wrapper; in CLI mode the raw handler
+# persists without Castorice to keep this addition strictly additive —
+# Castorice wiring for CLI is a follow-up).
+def _handle_submit_draft(args: dict) -> str:
+    if not _COMPANY:
+        return "Error: STELLE_COMPANY env var not set"
+    from pathlib import Path as _Path
+    from backend.src.agents.stelle import _dispatch_submit_draft
+    # The native dispatcher pulls company from env (STELLE_COMPANY_KEYWORD /
+    # DATABASE_COMPANY_ID), so we just forward args + a workspace root.
+    # Root is only used for the markdown mirror path; CWD-relative is fine.
+    try:
+        return _dispatch_submit_draft(_Path("."), args or {})
+    except Exception as e:
+        return f"Error: submit_draft failed: {e}"
+
+
+server.register(
+    name="submit_draft",
+    description=(
+        "Persist one final draft to the Posts tab (local_posts table, "
+        "reviewable at amphoreus.app/ghostwriter/{company}). Call this once "
+        "per finished post. Returns a confirmation + draft_id.\n\n"
+        "Args:\n"
+        "  user_slug (required): which FOC user this post is for\n"
+        "  content (required): the final markdown post text\n"
+        "  scheduled_date (optional): YYYY-MM-DD slot (tomorrow or later)\n"
+        "  publication_order (optional): 1, 2, 3… for multi-post runs\n"
+        "  why_post (optional): rationale shown alongside the draft"
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "user_slug": {"type": "string"},
+            "content": {"type": "string"},
+            "scheduled_date": {"type": "string"},
+            "publication_order": {"type": "integer"},
+            "why_post": {"type": "string"},
+        },
+        "required": ["user_slug", "content"],
+    },
+    handler=_handle_submit_draft,
+)
+
+
+# ---------------------------------------------------------------------------
+# check_client_comfort — Aglaea gate (brand-safety + voice fit)
+# ---------------------------------------------------------------------------
+# In API mode this tool lives as a Python tool_handlers entry in
+# stelle.py:3913. In CLI mode Stelle can't reach that handler, so the
+# tool was invisible — she couldn't call Aglaea at all. Register it
+# here as an MCP tool so CLI-mode Stelle has the same draft-gating
+# affordance. Handler just delegates to the same Python function the
+# API path uses, keeping the semantics identical across modes.
+
+def _handle_check_client_comfort(args: dict) -> str:
+    import json as _json
+    import os as _os
+    draft = (args.get("draft_text") or args.get("draft") or "").strip()
+    if not draft:
+        return _json.dumps({"_error": "draft_text is required"})
+    user_slug = (_os.environ.get("DATABASE_USER_SLUG") or "").strip() or None
+    company = _COMPANY
+    try:
+        from backend.src.agents.aglaea import evaluate_client_comfort
+        result = evaluate_client_comfort(
+            draft,
+            user_slug=user_slug,
+            company_slug=company,
+        )
+        # Fire-and-forget convergence log. See services/convergence_log.py
+        # for the dataset-building rationale. Never raises; the critic's
+        # return value is unchanged regardless of whether this succeeds.
+        try:
+            from backend.src.services.convergence_log import log_aglaea_call
+            log_aglaea_call(company, draft, result)
+        except Exception:
+            pass
+        return _json.dumps(result, default=str)
+    except Exception as e:
+        return _json.dumps({"_error": f"aglaea failed: {str(e)[:200]}"})
+
+
+# ---------------------------------------------------------------------------
+# retrieve_similar_posts — cross-creator corpus precedence search
+# ---------------------------------------------------------------------------
+# Registered in both CLI mode (here) and API mode (stelle.py::_TOOL_HANDLERS).
+# Backed by the ~390k-post Jacquard mirror + post_embeddings pgvector index;
+# lets Stelle escape the FOC's local posting basin by querying cross-creator
+# patterns grounded in real engagement numbers.
+
+def _handle_retrieve_similar_posts(args: dict) -> str:
+    import json as _json
+    try:
+        from backend.src.services.post_retrieval import retrieve_similar_posts
+    except Exception as exc:
+        return _json.dumps({"count": 0, "posts": [], "error": f"import failed: {exc}"})
+    query = (args.get("query") or "").strip()
+    if not query:
+        return _json.dumps({"count": 0, "posts": [], "error": "query is required"})
+    k = int(args.get("k") or 10)
+    k = max(1, min(k, 50))
+    min_reactions = int(args.get("min_reactions") or 0)
+    exclude_creator = args.get("exclude_creator") or None
+    try:
+        rows = retrieve_similar_posts(
+            query=query, k=k, min_reactions=min_reactions,
+            exclude_creator=exclude_creator,
+        )
+    except Exception as exc:
+        return _json.dumps({"count": 0, "posts": [], "error": str(exc)[:400]})
+    return _json.dumps({"count": len(rows), "posts": rows}, default=str)
+
+
+server.register(
+    name="retrieve_similar_posts",
+    description=(
+        "Semantic search over the 390k-post LinkedIn corpus (Jacquard mirror "
+        "+ OpenAI text-embedding-3-small vectors). Returns real posts with "
+        "engagement numbers — use it to ground new angles in proven structures "
+        "from other creators, escape a single FOC's local basin, or find "
+        "precedent for a risky take.\n\n"
+        "Express any content-type filtering directly in the natural-language "
+        "query (e.g. 'first-person narrative about failure, NOT a product "
+        "announcement'). No hand-labeled archetype filter.\n\n"
+        "Args:\n"
+        "  query (required): natural-language description of what to search for\n"
+        "  k (optional, default 10, max 50): number of posts to return\n"
+        "  min_reactions (optional): only return posts at or above this count\n"
+        "  exclude_creator (optional): LinkedIn username to omit (e.g. the current client)"
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query":              {"type": "string"},
+            "k":                  {"type": "integer"},
+            "min_reactions":      {"type": "integer"},
+            "exclude_creator":    {"type": "string"},
+        },
+        "required": ["query"],
+    },
+    handler=_handle_retrieve_similar_posts,
+)
+
+
+# ---------------------------------------------------------------------------
+# retrieve_recent_peer_bangers — temporal + engagement-ranked retrieval
+# ---------------------------------------------------------------------------
+# Same corpus as retrieve_similar_posts, but filtered to posts from the last
+# N days and re-ranked by engagement within that window. Grounds Stelle in
+# what's landing with the audience RIGHT NOW rather than all-time-great
+# reference posts that may use stale hook patterns. See
+# services/post_retrieval.py::retrieve_recent_peer_bangers for mechanics.
+
+def _handle_retrieve_recent_peer_bangers(args: dict) -> str:
+    import json as _json
+    try:
+        from backend.src.services.post_retrieval import retrieve_recent_peer_bangers
+    except Exception as exc:
+        return _json.dumps({"count": 0, "posts": [], "error": f"import failed: {exc}"})
+    query = (args.get("query") or "").strip()
+    if not query:
+        return _json.dumps({"count": 0, "posts": [], "error": "query is required"})
+    k = int(args.get("k") or 5)
+    k = max(1, min(k, 20))
+    lookback_days = int(args.get("lookback_days") or 14)
+    lookback_days = max(1, min(lookback_days, 90))
+    min_reactions = int(args.get("min_reactions") or 50)
+    exclude_creator = args.get("exclude_creator") or None
+    try:
+        rows = retrieve_recent_peer_bangers(
+            query=query,
+            lookback_days=lookback_days,
+            min_reactions=min_reactions,
+            k=k,
+            exclude_creator=exclude_creator,
+        )
+    except Exception as exc:
+        return _json.dumps({"count": 0, "posts": [], "error": str(exc)[:400]})
+    return _json.dumps(
+        {"count": len(rows), "lookback_days": lookback_days, "posts": rows},
+        default=str,
+    )
+
+
+server.register(
+    name="retrieve_recent_peer_bangers",
+    description=(
+        "Like retrieve_similar_posts, but filtered to posts from the last "
+        "N days (default 14) and re-ranked by engagement_score within that "
+        "window rather than by similarity. Use this to ground a draft in "
+        "what's landing with the audience RIGHT NOW — hook patterns, "
+        "topical framings, structural moves that worked this week. "
+        "LinkedIn's feed has no memory at multi-year timescales, so "
+        "all-time bangers are often poor current reference.\n\n"
+        "Express any content-type filtering directly in the query "
+        "(e.g. 'first-person narrative, NOT product promo').\n\n"
+        "Args:\n"
+        "  query (required): natural-language description of the kind of "
+        "reference post you're looking for\n"
+        "  lookback_days (optional, default 14, max 90): temporal window\n"
+        "  min_reactions (optional, default 50): absolute engagement floor\n"
+        "  k (optional, default 5, max 20): number of results\n"
+        "  exclude_creator (optional): always pass the current client here"
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query":              {"type": "string"},
+            "lookback_days":      {"type": "integer"},
+            "min_reactions":      {"type": "integer"},
+            "k":                  {"type": "integer"},
+            "exclude_creator":    {"type": "string"},
+        },
+        "required": ["query"],
+    },
+    handler=_handle_retrieve_recent_peer_bangers,
+)
+
+
+server.register(
+    name="check_client_comfort",
+    description=(
+        "Policy / brand-safety / voice-fit gate (Aglaea). Evaluates whether "
+        "the target FOC user would be comfortable publishing the draft AS-IS. "
+        "Returns a structured verdict {pass|soften|rewrite, concerns[], "
+        "suggested_edits?, summary}. Use this BEFORE submit_draft on any "
+        "post that touches sensitive territory (first-person claims, numbers, "
+        "political/legal ground, comparisons to named competitors). Cheap — "
+        "single Claude call, no tool loop.\n\n"
+        "Args:\n"
+        "  draft_text (required): the draft content to evaluate"
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "draft_text": {"type": "string"},
+        },
+        "required": ["draft_text"],
+    },
+    handler=_handle_check_client_comfort,
 )
 
 

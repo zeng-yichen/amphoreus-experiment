@@ -29,6 +29,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -36,6 +37,93 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+# ---------------------------------------------------------------------------
+# Concurrency cap
+# ---------------------------------------------------------------------------
+# Claude Max's rate limits are per-account and shared across every CLI
+# subprocess that auths with the same OAuth session. Running Stelle +
+# Cyrene + an Irontomb critique in parallel against the same Max
+# account burns through the 5h window way faster than running them
+# serially — same messages, much tighter pack. Worse: two subprocesses
+# that write to the same ``~/.claude/`` session dir can corrupt each
+# other's state (rare but observed).
+#
+# AMPHOREUS_CLI_MAX_CONCURRENCY caps how many CLI subprocesses we'll
+# have in flight at once. Default is unlimited (0) for local dev where
+# a single human is the only caller anyway. Production Fly should set
+# it to 1 or 2 — see DEPLOY.md "Claude CLI on Fly" for the full trade.
+# Counter is process-local; multi-machine fly deploys would bypass it,
+# but we currently run a single machine.
+
+def _max_concurrency() -> int:
+    raw = os.environ.get("AMPHOREUS_CLI_MAX_CONCURRENCY", "").strip()
+    try:
+        n = int(raw) if raw else 0
+    except ValueError:
+        n = 0
+    return max(0, n)
+
+
+_cli_semaphore: Optional[threading.Semaphore] = None
+_cli_semaphore_lock = threading.Lock()
+
+
+def _get_cli_semaphore() -> Optional[threading.Semaphore]:
+    """Lazily create the semaphore on first access. None = unlimited."""
+    global _cli_semaphore
+    cap = _max_concurrency()
+    if cap <= 0:
+        return None
+    with _cli_semaphore_lock:
+        if _cli_semaphore is None:
+            _cli_semaphore = threading.Semaphore(cap)
+    return _cli_semaphore
+
+
+class _cli_concurrency_guard:
+    """Context manager that blocks when the configured CLI concurrency
+    ceiling is hit. No-op when unlimited. Timeouts raise so one stuck
+    subprocess can't stall every future CLI call forever."""
+
+    TIMEOUT_SECONDS = 30 * 60  # 30 min — longer than a typical Stelle run
+
+    def __enter__(self):
+        sem = _get_cli_semaphore()
+        self._sem = sem
+        if sem is None:
+            return self
+        t0 = time.time()
+        got = sem.acquire(timeout=self.TIMEOUT_SECONDS)
+        if not got:
+            raise RuntimeError(
+                "[claude_cli] concurrency semaphore timeout — another CLI "
+                "subprocess held the slot for >30m"
+            )
+        waited = time.time() - t0
+        if waited > 1:
+            logger.info("[claude_cli] waited %.1fs for concurrency slot", waited)
+        return self
+
+    def __exit__(self, *args):
+        if self._sem is not None:
+            self._sem.release()
+
+
+def _gated_cli_call(fn):
+    """Decorator: wrap the decorated entry point so it acquires the
+    concurrency semaphore for its whole duration. Applied to the four
+    public CLI entry points (``run_stelle_cli``, ``run_cyrene_cli``,
+    ``simulate_flame_chase_journey_cli``, ``cli_single_shot``) so every
+    path that calls ``claude -p`` goes through the same cap."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _cli_concurrency_guard():
+            return fn(*args, **kwargs)
+    return wrapper
 
 
 def _cli_env() -> dict:
@@ -61,9 +149,21 @@ def _cli_env() -> dict:
     # own direct Anthropic SDK calls, but CLI subprocesses must authenticate
     # via the Max plan's OAuth token in the keychain / CLAUDE_CONFIG_DIR.
     env.pop("ANTHROPIC_API_KEY", None)
+    # Also strip the billing helper that the SDK sometimes reads.
+    env.pop("ANTHROPIC_AUTH_TOKEN", None)
     override = os.environ.get("AMPHOREUS_CLAUDE_CONFIG_DIR", "").strip()
     if override:
         env["CLAUDE_CONFIG_DIR"] = os.path.expanduser(override)
+    # The Fly image runs as root (docker-entrypoint.sh needs root to
+    # symlink the persistent volume into /app/* paths). Claude Code
+    # refuses ``--dangerously-skip-permissions`` / ``--permission-mode
+    # bypassPermissions`` for root unless IS_SANDBOX=1 is set — it's
+    # the standard container-escape-hatch the CLI recognises. Without
+    # this, every CLI subprocess dies with
+    # "--dangerously-skip-permissions cannot be used with root/sudo
+    # privileges for security reasons". Safe to set unconditionally;
+    # no effect outside the CLI's own permission check.
+    env.setdefault("IS_SANDBOX", "1")
     return env
 
 
@@ -182,6 +282,7 @@ def _record_cli_usage(
 # Irontomb via CLI
 # ---------------------------------------------------------------------------
 
+@_gated_cli_call
 def simulate_flame_chase_journey_cli(
     company: str,
     draft_text: str,
@@ -331,10 +432,21 @@ def simulate_flame_chase_journey_cli(
                 "_raw_stdout_tail": proc.stdout[-500:] if proc.stdout else "",
             }
 
-        # Build the same return shape as the API path (2-field schema).
+        # Build the same return shape as the API path. ``anchors`` is
+        # the new first-class list (zero, one, or many inline anchors);
+        # ``anchor`` (singular) is synthesized from the first anchor's
+        # quote for back-compat with the convergence_log column and
+        # trajectory snapshots.
+        anchors = reaction.get("anchors")
+        if not isinstance(anchors, list):
+            anchors = []
+        legacy_anchor = reaction.get("anchor")
+        if not legacy_anchor:
+            legacy_anchor = (anchors[0].get("quote", "") if anchors else "")
         result = {
             "reaction": reaction.get("reaction", ""),
-            "anchor": reaction.get("anchor", ""),
+            "anchors": anchors,
+            "anchor":  legacy_anchor,
             "_draft_hash": dh,
             "_via": "cli",
             "_elapsed_s": round(elapsed, 1),
@@ -423,12 +535,57 @@ def _extract_reaction_from_json(stdout: str) -> Optional[dict]:
 
     result_text = cli_result.get("result", "")
 
-    # Look for a JSON block containing the new 2-field schema
+    # The new schema has nested objects under ``anchors`` (a list of
+    # {quote, reaction}), so the old ``\{[^{}]*\}`` matcher would
+    # truncate on the inner braces. Use a depth-aware brace walker
+    # instead. Look for the first JSON object that contains the
+    # ``"reaction"`` key.
     import re
-    for match in re.finditer(r'\{[^{}]*"reaction"[^{}]*\}', result_text):
+    for m in re.finditer(r'"reaction"\s*:', result_text):
+        # Walk backward from the match to the opening brace, then
+        # forward through balanced braces to find the closing one.
+        i = m.start()
+        # Find the enclosing '{' (scan back over balanced braces)
+        depth = 0
+        start = -1
+        for j in range(i, -1, -1):
+            ch = result_text[j]
+            if ch == '}':
+                depth += 1
+            elif ch == '{':
+                if depth == 0:
+                    start = j
+                    break
+                depth -= 1
+        if start < 0:
+            continue
+        # Forward-scan for the matching close '}'
+        depth = 0
+        end = -1
+        in_str = False
+        esc = False
+        for k in range(start, len(result_text)):
+            ch = result_text[k]
+            if esc:
+                esc = False; continue
+            if ch == '\\' and in_str:
+                esc = True; continue
+            if ch == '"':
+                in_str = not in_str; continue
+            if in_str:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end = k
+                    break
+        if end < 0:
+            continue
         try:
-            data = json.loads(match.group())
-            if "reaction" in data:
+            data = json.loads(result_text[start:end+1])
+            if isinstance(data, dict) and "reaction" in data:
                 return data
         except json.JSONDecodeError:
             continue
@@ -451,6 +608,7 @@ def _extract_reaction_from_json(stdout: str) -> Optional[dict]:
 # Single-shot CLI call (for compaction, why-post, image suggestion, etc.)
 # ---------------------------------------------------------------------------
 
+@_gated_cli_call
 def cli_single_shot(
     prompt: str,
     system_prompt: str | None = None,
@@ -530,6 +688,7 @@ def cli_single_shot(
 # Stelle via CLI
 # ---------------------------------------------------------------------------
 
+@_gated_cli_call
 def run_stelle_cli(
     client_name: str,
     company_keyword: str,
@@ -554,7 +713,6 @@ def run_stelle_cli(
     from backend.src.agents.stelle import (
         _build_dynamic_directives,
         _DIRECT_SYSTEM_TEMPLATE,
-        _fetch_all_ordinal_hooks,
         _process_result,
         _resolve_supabase_ids,
         _setup_workspace,
@@ -563,83 +721,102 @@ def run_stelle_cli(
         P,
     )
 
-    # Resolve display name
-    username_path = P.linkedin_username_path(company_keyword)
-    if not username_path.exists():
-        raise FileNotFoundError(
-            f"Missing memory/{company_keyword}/linkedin_username.txt"
-        )
-    username = username_path.read_text().strip()
+    # Resolve LinkedIn handle via the shared resolver — Jacquard
+    # ``users.linkedin_url`` first (works for every FOC slug + bare
+    # company UUID in the current dropdown), legacy
+    # ``memory/<slug>/linkedin_username.txt`` as fallback.
+    #
+    # DATABASE_USER_UUID is set by stelle_runner when the ghostwriter
+    # endpoint resolved a specific FOC target. Passing it here lets
+    # _resolve_linkedin_username short-circuit past the multi-FOC
+    # ambiguity check — Trimble / Commenda / Virio runs used to hit
+    # that check and return None (the resolver refused to auto-pick
+    # one FOC out of many), leaving Stelle running without voice
+    # calibration for every run at shared-account companies. 2026-04-23.
+    import os as _os
+    _target_user_uuid = (_os.environ.get("DATABASE_USER_UUID") or "").strip() or None
+    from backend.src.agents.stelle import _resolve_linkedin_username
+    username = _resolve_linkedin_username(
+        company_keyword, user_id=_target_user_uuid,
+    ) or ""
     if username:
         _, _, display_name = _resolve_supabase_ids(username)
         if display_name:
             client_name = display_name
+    else:
+        logger.warning(
+            "[CLI] no LinkedIn handle resolved for %s (user_id=%s) — "
+            "Stelle will run without voice-calibration input from published posts",
+            company_keyword, _target_user_uuid,
+        )
 
     logger.info("[CLI-Stelle] Starting CLI-based generation for %s...", client_name)
 
     # --- Setup (same as generate_one_shot) ---
     P.ensure_dirs(company_keyword)
 
-    try:
-        from backend.src.db.local import purge_unpushed_drafts as _purge_drafts
-        _purged = _purge_drafts(company_keyword)
-        if _purged:
-            logger.info("[CLI-Stelle] Purged %d unpushed draft(s)", _purged)
-    except Exception as _e:
-        logger.warning("[CLI-Stelle] Purge skipped: %s", _e)
+    # 2026-04-23: DISABLED. Unpushed drafts are now retained across runs
+    # and flow into Stelle's dedup via the post_bundle UNPUSHED section
+    # (with any operator-added comments attached). See the twin note in
+    # ``agents/stelle.py`` for the full rationale.
 
-    # Lineage mode: pre-populate a workspace with Jacquard's data (Supabase
+    # database mode: pre-populate a workspace with Jacquard's data (Supabase
     # + GCS) so Claude CLI's native filesystem tools read the same files
     # Stelle would see on the direct-API path. Skip the old Ordinal-fed
     # local-mode setup entirely — no Ordinal API calls, no memory/<company>/
     # building, no Amphoreus-side Supabase queries. Purely Jacquard data.
-    from backend.src.agents.lineage_fs_client import is_lineage_mode as _lm
+    from backend.src.agents.database_client import is_database_mode as _lm
     if _lm():
         from backend.src.agents.jacquard_direct import populate_lineage_workspace
         import shutil as _shutil
-        workspace_root = _PROJECT_ROOT / "scratch" / f"lineage-{company_keyword}"
+        workspace_root = _PROJECT_ROOT / "scratch" / f"database-{company_keyword}"
         # Fresh workspace per run — Jacquard data is authoritative, no
         # incremental merge semantics to preserve across runs.
         if workspace_root.exists():
             _shutil.rmtree(workspace_root)
         workspace_root.mkdir(parents=True, exist_ok=True)
-        company_id = os.environ.get("LINEAGE_COMPANY_ID", "").strip()
-        target_slug = os.environ.get("LINEAGE_USER_SLUG", "").strip() or None
+        company_id = os.environ.get("DATABASE_COMPANY_ID", "").strip()
+        target_slug = os.environ.get("DATABASE_USER_SLUG", "").strip() or None
         try:
             counts = populate_lineage_workspace(workspace_root, company_id, target_slug)
             total = sum(counts.values())
             logger.info(
-                "[CLI-Stelle] Populated Lineage workspace %s (%d files across %d mounts)",
+                "[CLI-Stelle] Populated database workspace %s (%d files across %d mounts)",
                 workspace_root, total, len(counts),
             )
             if event_callback:
                 event_callback("status", {
-                    "message": f"Loaded {total} files from Jacquard (Supabase + GCS) for company_id={company_id[:8]}…",
+                    "message": f"Loaded {total} files from Amphoreus (mirror + Storage) for company_id={company_id[:8]}…",
                 })
         except Exception as exc:
-            logger.exception("[CLI-Stelle] FATAL: failed to populate Lineage workspace")
+            logger.exception("[CLI-Stelle] FATAL: failed to populate database workspace")
             raise RuntimeError(
-                f"Lineage workspace population failed: {exc}"
+                f"database workspace population failed: {exc}"
             ) from exc
     else:
         # Legacy local-mode workspace (Ordinal-fed). Shouldn't normally
-        # fire given the Lineage-mode guard in generate_one_shot.
+        # fire given the database-mode guard in generate_one_shot.
         workspace_root = _setup_workspace(company_keyword)
 
-    # --- Existing posts context (dedup) ---
+    # --- Unified post bundle (body + engagement + comments + delta) ---
+    # See backend/src/services/post_bundle.py for the contract.
     existing_posts_context = ""
     try:
-        existing_posts_context = _fetch_all_ordinal_hooks(company_keyword)
+        from backend.src.services.post_bundle import build_post_bundle
+        # Per-FOC scoping: DATABASE_USER_UUID is set by stelle_runner.
+        # Without this, at shared-company clients the bundle pulled
+        # every FOC's drafts and the prompt argv hit Linux ARG_MAX
+        # (2026-04-23 Virio incident — 758 posts, 1.2 MB argv).
+        import os as _os
+        _bundle_user_uuid = (_os.environ.get("DATABASE_USER_UUID") or "").strip() or None
+        existing_posts_context = build_post_bundle(company_keyword, user_id=_bundle_user_uuid)
     except Exception:
         pass
 
-    # Series + scheduling context
+    # Series Engine retired 2026-04-22 (BL cleanup). Scheduling context
+    # from temporal_orchestrator stays — it's operational (timing), not
+    # prescriptive (narrative arc theory).
     series_context = ""
-    try:
-        from backend.src.services.series_engine import get_stelle_series_context as _series_ctx
-        series_context = _series_ctx(company_keyword)
-    except Exception:
-        pass
 
     scheduling_context = ""
     try:
@@ -693,13 +870,13 @@ def run_stelle_cli(
         "PINECONE_API_KEY": os.environ.get("PINECONE_API_KEY", ""),
         "SERPER_API_KEY": os.environ.get("SERPER_API_KEY", ""),
         "ORDINAL_API_KEY": os.environ.get("ORDINAL_API_KEY", ""),
-        # GCS + Lineage — irontomb/castorice/jacquard_direct all need these
+        # GCS + database — irontomb/castorice/jacquard_direct all need these
         # so the MCP server's in-process Irontomb calls can read transcripts
         # from GCS and observations from Jacquard's Supabase.
         "GCS_CREDENTIALS_B64": os.environ.get("GCS_CREDENTIALS_B64", ""),
         "GCS_BUCKET": os.environ.get("GCS_BUCKET", ""),
-        "LINEAGE_COMPANY_ID": os.environ.get("LINEAGE_COMPANY_ID", ""),
-        "LINEAGE_USER_SLUG": os.environ.get("LINEAGE_USER_SLUG", ""),
+        "DATABASE_COMPANY_ID": os.environ.get("DATABASE_COMPANY_ID", ""),
+        "DATABASE_USER_SLUG": os.environ.get("DATABASE_USER_SLUG", ""),
     }
     # Filter out empty values
     env_vars = {k: v for k, v in env_vars.items() if v}
@@ -739,6 +916,13 @@ def run_stelle_cli(
         result_file.unlink()
 
     try:
+        # Keep the prompt on argv. A very large prompt here (e.g. from
+        # multi-user workspace scoping escaping and populating 19 FOC
+        # users' worth of context) will fail fast with ARG_MAX — that
+        # is a correctness canary, not a problem to paper over with a
+        # stdin pipe. If this trips, the right fix is upstream:
+        # scope the workspace to the targeted user and filter internal
+        # users to Amphoreus-only sources.
         cmd = [
             "claude",
             "-p", user_prompt,
@@ -881,13 +1065,24 @@ def run_stelle_cli(
 # Cyrene via CLI
 # ---------------------------------------------------------------------------
 
-def run_cyrene_cli(company: str) -> dict[str, Any]:
+@_gated_cli_call
+def run_cyrene_cli(
+    company: str,
+    user_id: str | None = None,
+) -> dict[str, Any]:
     """Run Cyrene's strategic review through Claude CLI.
 
     Drop-in replacement for cyrene.run_strategic_review(). Launches
     `claude -p` with the cyrene-tools MCP server, lets it run the full
     tool-use loop, then reads the brief from .cyrene_cli_result.json
-    and persists it to memory/{company}/cyrene_brief.json.
+    and persists it.
+
+    ``user_id`` (optional) scopes the review to a specific FOC user at
+    a multi-FOC company — the saved brief is keyed by (company, user_id)
+    and the user prompt is prefixed with that user's identity so Cyrene
+    can tailor recommendations to their role/voice rather than averaging
+    across the whole company. When None the run is company-wide
+    (legacy path for single-FOC clients).
 
     Returns the brief dict on success; returns {"_error": ...} on
     failure (same shape as the API version's error path).
@@ -901,7 +1096,24 @@ def run_cyrene_cli(company: str) -> dict[str, Any]:
     from backend.src.agents.irontomb import _load_icp_context
     from backend.src.db import vortex as P
 
-    logger.info("[CLI-Cyrene] Starting CLI-based strategic review for %s...", company)
+    logger.info(
+        "[CLI-Cyrene] Starting CLI-based strategic review for %s (user_id=%s)...",
+        company, user_id or "<company-wide>",
+    )
+
+    # Resolve target user info if user_id provided — used to inject a
+    # user-specific context block into the prompt so Cyrene tailors the
+    # brief to this individual rather than averaging across the company.
+    target_user_info: dict | None = None
+    if user_id:
+        try:
+            from backend.src.agents.jacquard_direct import list_foc_users
+            for u in list_foc_users(company) or []:
+                if u.get("id") == user_id:
+                    target_user_info = u
+                    break
+        except Exception as _exc:
+            logger.debug("[CLI-Cyrene] user_id lookup failed (non-fatal): %s", _exc)
 
     # --- Gather context, same as the API version ---
     try:
@@ -909,24 +1121,28 @@ def run_cyrene_cli(company: str) -> dict[str, Any]:
     except Exception:
         client_context = "(no client context found)"
 
+    # Count scored observations via the rebuilt ledger (pulls from
+    # linkedin_posts + matched local_posts). Replaces ruan_mei_load
+    # which always returned 0 for multi-FOC companies after the
+    # ruan_mei_state wipe. 2026-04-24.
     try:
-        from backend.src.db.local import ruan_mei_load
-        state = ruan_mei_load(company) or {}
-        n_scored = sum(
-            1 for o in state.get("observations", [])
-            if o.get("status") in ("scored", "finalized")
-        )
+        from backend.src.agents.cyrene import _load_cyrene_observations
+        n_scored = len(_load_cyrene_observations(company))
     except Exception:
         n_scored = 0
 
+    # Previous brief — Amphoreus Supabase (cyrene_briefs) is the canonical
+    # source. Fly-local memory/{company}/cyrene_brief.json is deprecated;
+    # those files still exist on the volume but are stale and mislead
+    # Cyrene into treating active clients as cold-start.
     previous_brief = "No previous brief exists. This is the first Cyrene run for this client."
     try:
-        prev_path = P.memory_dir(company) / _BRIEF_FILENAME
-        if prev_path.exists():
-            prev_data = json.loads(prev_path.read_text(encoding="utf-8"))
+        from backend.src.db.amphoreus_supabase import get_latest_cyrene_brief
+        prev_data = get_latest_cyrene_brief(company, user_id=user_id)
+        if prev_data:
             previous_brief = json.dumps(prev_data, indent=2, ensure_ascii=False, default=str)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[CLI-Cyrene] previous_brief load failed (non-fatal): %s", exc)
 
     system_prompt = _SYSTEM_PROMPT.format(
         client_context=client_context,
@@ -935,9 +1151,34 @@ def run_cyrene_cli(company: str) -> dict[str, Any]:
         previous_brief=previous_brief,
     )
 
+    # Build the user prompt. When we have a target user, prefix the
+    # task with identity context so Cyrene's tool-calls + brief focus
+    # on THIS person's voice/role/ICP rather than a company average.
+    if target_user_info:
+        _name = " ".join(filter(None, [
+            (target_user_info.get("first_name") or "").strip(),
+            (target_user_info.get("last_name") or "").strip(),
+        ])) or target_user_info.get("email") or user_id
+        _role_hint = (target_user_info.get("linkedin_url") or "").strip()
+        _target_block = (
+            f"TARGET FOC USER: {_name} (user_id={user_id}).\n"
+            f"LinkedIn: {_role_hint or '(none on file)'}.\n"
+            f"This brief is scoped to THIS individual's content at "
+            f"{company} — not a company-wide strategy. Their role, voice, "
+            f"network, and ICP are distinct from other FOCs at the same "
+            f"company; average-the-whole-company recommendations will be "
+            f"strategically useless for them. Use the transcript/observation "
+            f"tools to ground the brief in what this specific person has "
+            f"said, posted, and what's landed for them.\n\n"
+        )
+    else:
+        _target_block = ""
+
     user_prompt = (
-        f"Run a strategic review for {company}. Study the data "
-        f"across your tools, form your strategy from evidence, "
+        f"{_target_block}"
+        f"Run a strategic review for {company}"
+        f"{' (scoped to ' + (target_user_info.get('first_name') or '').strip() + ')' if target_user_info else ''}. "
+        f"Study the data across your tools, form your strategy from evidence, "
         f"and produce a comprehensive brief via submit_brief."
     )
 
@@ -949,13 +1190,24 @@ def run_cyrene_cli(company: str) -> dict[str, Any]:
         system_prompt_file = f.name
 
     env_vars = {
-        "CYRENE_COMPANY": company,
-        "SUPABASE_URL": os.environ.get("SUPABASE_URL", ""),
-        "SUPABASE_KEY": os.environ.get("SUPABASE_KEY", ""),
-        "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
-        "PINECONE_API_KEY": os.environ.get("PINECONE_API_KEY", ""),
-        "PARALLEL_API_KEY": os.environ.get("PARALLEL_API_KEY", ""),
-        "ORDINAL_API_KEY": os.environ.get("ORDINAL_API_KEY", ""),
+        "CYRENE_COMPANY":         company,
+        # Amphoreus-owned Supabase (cyrene_briefs, local_posts,
+        # linkedin_posts, meetings) — primary data path for all of
+        # Cyrene's rewired tools. Without these the MCP subprocess
+        # can't reach the mirror and every tool returns empty.
+        "AMPHOREUS_SUPABASE_URL": os.environ.get("AMPHOREUS_SUPABASE_URL", ""),
+        "AMPHOREUS_SUPABASE_KEY": os.environ.get("AMPHOREUS_SUPABASE_KEY", ""),
+        # Jacquard mirror creds — still used by a few helpers
+        # (get_client_transcripts joins meeting_participants).
+        "SUPABASE_URL":           os.environ.get("SUPABASE_URL", ""),
+        "SUPABASE_KEY":           os.environ.get("SUPABASE_KEY", ""),
+        # FOC scoping — _resolve_linkedin_username reads this when no
+        # explicit user_id kwarg is passed, which is how the query
+        # tools pick the right creator at a multi-FOC company.
+        "DATABASE_USER_UUID":     (user_id or ""),
+        # External APIs used by a few tools.
+        "OPENAI_API_KEY":         os.environ.get("OPENAI_API_KEY", ""),
+        "PARALLEL_API_KEY":       os.environ.get("PARALLEL_API_KEY", ""),
     }
     env_vars = {k: v for k, v in env_vars.items() if v}
 
@@ -1085,8 +1337,36 @@ def run_cyrene_cli(company: str) -> dict[str, Any]:
             datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         )
         brief["_duration_sec"] = round(elapsed, 1)
+        if user_id:
+            brief["_user_id"] = user_id
 
-        # Persist
+        # --- Persist to Amphoreus Supabase (primary) ---
+        # The non-CLI path in cyrene.py saves here; the CLI path
+        # historically only wrote to fly-local. That meant CLI-run
+        # briefs (our default) never reached the Supabase store, so
+        # Stelle/Tribbie/report couldn't read them. Mirror the API
+        # path: save to Supabase with user_id scoping, then fall back
+        # to fly-local if Supabase fails.
+        try:
+            from backend.src.db.amphoreus_supabase import save_cyrene_brief
+            saved = save_cyrene_brief(
+                company=company,
+                brief=brief,
+                created_by=None,
+                user_id=user_id,
+            )
+            if saved:
+                logger.info(
+                    "[CLI-Cyrene] %s (user=%s): brief saved to Supabase (id=%s)",
+                    company, user_id or "<company-wide>", saved.get("id"),
+                )
+        except Exception as _exc:
+            logger.warning(
+                "[CLI-Cyrene] Supabase save failed (%s, user=%s): %s",
+                company, user_id, _exc,
+            )
+
+        # --- Persist fly-local (legacy / fallback) ---
         try:
             brief_path = P.memory_dir(company) / _BRIEF_FILENAME
             brief_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1130,6 +1410,9 @@ def use_cli() -> bool:
 # Stream-json event translation
 # ---------------------------------------------------------------------------
 
+_CYCLE_COUNTERS: dict[int, int] = {}
+
+
 def _translate_cli_event(event: dict, event_callback: Any) -> None:
     """Map a single CLI stream-json event to the existing event_callback.
 
@@ -1137,6 +1420,15 @@ def _translate_cli_event(event: dict, event_callback: Any) -> None:
     "tool_result", payload_dict). The CLI emits coarser chunks than the
     Anthropic SDK's per-token stream — you'll see one text_delta per
     assistant message, not per token — but it's enough for live progress.
+
+    Emits a synthetic ``CLI cycle N`` status message on every new
+    ``assistant`` turn so the web UI has the same "Stelle is thinking"
+    cadence it gets in API mode (API-mode logs "Amphoreus cycle N done
+    in Xs"). Each assistant message under stream-json corresponds to
+    exactly one agent-loop iteration — receive messages, emit text +
+    tool calls — so counting them gives the cycle count. Counter is
+    keyed by id(event_callback) so multiple concurrent runs don't
+    share the tally.
     """
     if not event_callback or not isinstance(event, dict):
         return
@@ -1144,7 +1436,42 @@ def _translate_cli_event(event: dict, event_callback: Any) -> None:
     try:
         if etype == "assistant":
             msg = event.get("message") or {}
-            for block in msg.get("content") or []:
+            blocks = msg.get("content") or []
+            # Bump the cycle counter and emit it BEFORE processing the
+            # blocks, so the UI sees "cycle N started" above its
+            # text/tool events and can group visually.
+            key = id(event_callback)
+            n = _CYCLE_COUNTERS.get(key, 0) + 1
+            _CYCLE_COUNTERS[key] = n
+            # Count what's in this assistant message for a useful summary.
+            n_text = sum(1 for b in blocks if b.get("type") == "text")
+            n_tools = sum(1 for b in blocks if b.get("type") == "tool_use")
+            tool_names = ", ".join(
+                (b.get("name") or "?") for b in blocks if b.get("type") == "tool_use"
+            )
+            # Pull token usage if the event carries it.
+            usage_bits: list[str] = []
+            try:
+                u = (event.get("message") or {}).get("usage") or {}
+                if u:
+                    inp = u.get("input_tokens", 0)
+                    outp = u.get("output_tokens", 0)
+                    cread = u.get("cache_read_input_tokens", 0)
+                    cwrite = u.get("cache_creation_input_tokens", 0)
+                    pct = int(100 * cread / (cread + cwrite + inp)) if (cread + cwrite + inp) else 0
+                    usage_bits.append(
+                        f"in={inp} out={outp} cache_read={cread} cache_write={cwrite} ({pct}% cached)"
+                    )
+            except Exception:
+                pass
+            summary = f"Amphoreus cycle {n} — text={n_text} tools={n_tools}"
+            if tool_names:
+                summary += f" [{tool_names}]"
+            if usage_bits:
+                summary += " — " + " ".join(usage_bits)
+            event_callback("status", {"message": summary})
+
+            for block in blocks:
                 btype = block.get("type")
                 if btype == "text":
                     txt = block.get("text") or ""
@@ -1153,12 +1480,12 @@ def _translate_cli_event(event: dict, event_callback: Any) -> None:
                 elif btype == "tool_use":
                     inp = block.get("input") or {}
                     try:
-                        summary = json.dumps(inp, default=str)[:300]
+                        input_summary = json.dumps(inp, default=str)[:300]
                     except Exception:
-                        summary = str(inp)[:300]
+                        input_summary = str(inp)[:300]
                     event_callback("tool_call", {
                         "name": block.get("name", "") or "",
-                        "arguments": summary,
+                        "arguments": input_summary,
                     })
         elif etype == "user":
             msg = event.get("message") or {}

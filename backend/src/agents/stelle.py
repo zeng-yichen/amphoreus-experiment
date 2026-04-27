@@ -208,25 +208,35 @@ source material (transcript file + timestamps) you'll draw from.
 3. Draft in-context or in `scratch/post-N.md`. After each paragraph \
 with a factual claim, add a citation comment: \
 `<!-- [filename, timestamp] "quote" -->`. Read it back aloud.
-4. Call `get_reader_reaction` on the draft. You are looking for REAL \
-positive engagement, not tolerance. Ship ONLY if the reaction contains \
-felt engagement — phrases like `"felt real"`, `"line stays"`, \
+4. Call `get_reader_reaction` on the draft. The response is a gestalt \
+`reaction` plus a list of inline `anchors`, each of the shape \
+`{quote, reaction}`. You are looking for REAL positive engagement, \
+not tolerance. Ship ONLY if the gestalt reaction AND the anchors all \
+land on felt engagement — phrases like `"felt real"`, `"line stays"`, \
 `"been here"`, `"oh that's a good one"`, `"gonna forward this"`. \
 Passive tolerance or rejection (`"nodding along"`, `"fine"`, \
 `"reasonable take"`, `"pitch deck slide"`, `"read this fifty times"`, \
 `"flex disguised as X"`, anything starting with "cool" or "interesting \
-but") means the post failed. **The ship gate is absolute: if the \
-reaction isn't felt engagement, you do NOT ship that post. No \
-exceptions.** Two options: (a) one surgical edit on the anchored span, \
-then re-simulate. (b) If the reaction is about the angle itself, line \
-edits won't save it — kill the post and pick a different angle from \
-the plan. Shipping fewer posts beats shipping one Irontomb rejected.
+but", or any anchor reading `"fuck off"` / `"scrolled"` / \
+`"eyeroll"` / `"reeks of GPT"`) means the post failed. **The ship \
+gate is absolute: any negative anchor or negative gestalt = do NOT \
+ship. No exceptions.**
+
+Use anchors as a LOCALIZED GRADIENT. Two options when feedback is \
+mixed: (a) surgical edit ONLY the spans the reader anchored \
+negatively — leave spans they anchored positively or didn't anchor \
+on, then re-simulate. This is the typical revision path. (b) If the \
+gestalt reaction is about the angle itself (not a localized span), \
+line edits won't save it — kill the post and pick a different angle \
+from the plan. Shipping fewer posts beats shipping one Irontomb \
+rejected.
 
 The response includes `_prior_reactions` — the last few reactions \
-from this session with each draft's first line + length so you can \
-track trajectory. If prior reactions went "lecture" → "sermon" → \
-"sermon", your edits aren't helping — make a bigger change or kill \
-the angle. Cap at 12 cycles per post.
+from this session with each draft's first line + length + every \
+prior anchor, so you can track trajectory across iterations. If \
+the SAME anchor span keeps reading negative across two cycles, your \
+edit on that span isn't working — escalate (rewrite the section \
+larger, or kill the angle). Cap at 12 cycles per post.
 5. Call `submit_draft` with the finished post. `submit_draft` persists \
 the draft to Amphoreus's `local_posts` for operator review and runs \
 Castorice fact-check; fact-check output lands on `why_post` where the \
@@ -436,18 +446,22 @@ _TOOLS = [
         "name": "get_reader_reaction",
         "description": (
             "Send a draft to Irontomb, a rough-reader simulator. "
-            "Irontomb returns ONE short visceral reaction from a "
-            "LinkedIn reader (a working professional, not a writing "
-            "teacher) plus an anchor pointing to where they reacted. "
-            "Not a critique, not a prescription — just what they "
-            "felt and where. Use this to stress-test drafts before "
-            "shipping.\n\n"
+            "Irontomb returns a gestalt reader-voice reaction (the net "
+            "effect after the whole draft) PLUS a list of inline "
+            "anchors flagging the specific phrases where the reader's "
+            "felt-state shifted. Not a critique, not a prescription — "
+            "what they felt and where.\n\n"
             "Response shape:\n"
-            "  reaction — under-15-word reader-voice reaction\n"
-            "  anchor   — where in the post they reacted (quoted "
-            "phrase, \"paragraph N\", \"at the end\", \"hook\")\n\n"
-            "You interpret the reaction and decide whether/how to "
-            "revise. Irontomb does not know craft. You do."
+            "  reaction — under-15-word GESTALT reader-voice reaction\n"
+            "  anchors  — list of {quote, reaction} for each reader-"
+            "state-change moment. quote = verbatim 3-15 words from "
+            "the draft that triggered the shift; reaction = short "
+            "reader-voice response to that span. Zero anchors = "
+            "uniformly read, only the gestalt matters.\n\n"
+            "Use anchors as a LOCALIZED GRADIENT: revise spans the "
+            "reader anchored negatively, leave spans they didn't "
+            "anchor or anchored positively. Don't rewrite what's "
+            "working. Irontomb does not know craft. You do."
         ),
         "input_schema": {
             "type": "object",
@@ -1509,25 +1523,44 @@ def _validate_draft_with_llm(post_text: str, company_keyword: str) -> dict:
 # Workspace setup
 # ---------------------------------------------------------------------------
 
-def _resolve_linkedin_username(company_keyword: str) -> str | None:
+def _resolve_linkedin_username(
+    company_keyword: str, user_id: str | None = None,
+) -> str | None:
     """Return the creator's LinkedIn handle for ``company_keyword``.
 
     Resolution order:
-      1. Jacquard ``users.linkedin_url`` — canonical source. Works for
-         every FOC-scoped slug in the current dropdown (e.g.
-         ``crescendo-matt``, ``hume-ai-andrew``, ``virio-melissa``,
-         ``trimble-heather``, ``innovocommerce-sachil``). Extracts the
-         ``/in/<handle>`` segment and lowercases.
+      0. If ``user_id`` is supplied (caller already knows the FOC) or
+         the ``DATABASE_USER_UUID`` env var is set (stelle_runner
+         populates this when the ghostwriter endpoint resolved a
+         target FOC), look up ``users.linkedin_url WHERE id=<id>``
+         directly. This short-circuits past the multi-FOC ambiguity
+         problem that used to bite Trimble / Commenda / Virio runs:
+         with N > 1 FOCs per company, path 1b below refused to
+         auto-pick, returning None even when the caller had the right
+         user UUID in hand (or in env).
+      1. Jacquard ``users.linkedin_url`` via slug / UUID resolution —
+         works for every FOC-scoped slug (e.g. ``hume-ai-andrew``,
+         ``trimble-heather``, ``innovocommerce-sachil``) via
+         ``resolve_to_company_and_user``.
+      1b. Bare company identifier + single-FOC company — auto-pick
+         that user's handle. Skipped silently for multi-FOC companies.
       2. Legacy ``memory/<slug>/linkedin_username.txt`` file — kept as
-         a fallback for slugs that predate per-FOC resolution and still
-         have a memory dir on disk. This is the only reason the file
-         still reads here; writes have been retired.
-      3. None — caller decides what to do (most callers short-circuit
-         gracefully).
+         a last-resort fallback for slugs that predate per-FOC
+         resolution and still have a memory dir on disk.
+      3. None — caller decides what to do.
 
-    Side effect: none. Safe to call freely; each call is one PostgREST
-    round-trip if the resolver hits Jacquard.
+    Env fallback rationale: many legacy internal callers in stelle.py
+    pass only ``company_keyword``. When Stelle runs in FOC-targeted
+    mode, ``DATABASE_USER_UUID`` is set by ``stelle_runner`` and is
+    the authoritative FOC identifier for the run. Reading it here
+    unbreaks every unmigrated caller without requiring a wholesale
+    refactor. When the env var is unset (company-wide runs), we fall
+    through to the original slug/UUID resolution, unchanged.
+
+    Side effect: none. Safe to call freely; each call is at most one
+    PostgREST round-trip.
     """
+    import os as _os
     import re as _re
 
     def _extract_handle(url: str | None) -> str | None:
@@ -1535,6 +1568,38 @@ def _resolve_linkedin_username(company_keyword: str) -> str | None:
             return None
         m = _re.search(r"linkedin\.com/in/([^/?#]+)", url.strip())
         return m.group(1).strip().lower().rstrip("/") if m else None
+
+    # 0) Explicit user_id short-circuit — the caller already resolved
+    #    which FOC they want. Skip the slug/UUID dance entirely.
+    #    Falls back to DATABASE_USER_UUID env var (set by stelle_runner
+    #    in FOC-targeted mode) so unmigrated callers benefit too.
+    if not user_id:
+        _env_uid = (_os.environ.get("DATABASE_USER_UUID") or "").strip()
+        if _env_uid:
+            user_id = _env_uid
+
+    if user_id:
+        try:
+            from backend.src.db.supabase_client import get_amphoreus_supabase
+            jcq = get_amphoreus_supabase()
+            rows = (
+                jcq.table("users")
+                   .select("linkedin_url")
+                   .eq("id", user_id)
+                   .limit(1)
+                   .execute()
+                   .data
+                or []
+            )
+            if rows:
+                h = _extract_handle(rows[0].get("linkedin_url"))
+                if h:
+                    return h
+        except Exception as exc:
+            logger.debug(
+                "[Stelle] username lookup by user_id=%s failed: %s",
+                user_id, exc,
+            )
 
     # 1) Jacquard: prefer exact user resolution (FOC-scoped slugs like
     #    ``hume-ai-andrew`` → Andrew's linkedin_url).
@@ -1562,7 +1627,7 @@ def _resolve_linkedin_username(company_keyword: str) -> str | None:
         # user's handle — covers single-FOC clients like Hensley
         # Biostats that the UI sometimes hands us as a raw UUID. Skip
         # if multiple FOCs (ambiguous; caller needs to pass the
-        # FOC-scoped slug).
+        # FOC-scoped slug OR the user_id kwarg).
         if _company_uuid:
             from backend.src.agents.jacquard_direct import list_foc_users
             foc_users = list_foc_users(_company_uuid) or []
@@ -3936,9 +4001,12 @@ def _run_agent_loop(
             """Dispatch a draft to Irontomb for a rough-reader reaction.
 
             Irontomb runs a short retrieval+react loop internally and
-            returns {reaction, anchor}. The reaction is reader-voice
-            (not critique, not prescription). Stelle interprets what
-            caused the reaction and decides how to revise.
+            returns {reaction, anchors[]} — a gestalt reader-voice
+            reaction plus zero, one, or many inline anchors flagging
+            specific reader-state-change spans. Stelle uses the
+            anchors as a localized gradient: revise spans the reader
+            anchored negatively, leave spans they didn't anchor or
+            anchored positively. Don't rewrite what's working.
             """
             if not company_keyword:
                 return json.dumps({"_error": "company not set"})
@@ -3959,8 +4027,8 @@ def _run_agent_loop(
                     "result": result,
                 })
 
-                # Irontomb now outputs {reaction, anchor}. No
-                # scalar prediction, so no gradient block.
+                # Irontomb outputs {reaction, anchors[]}. No scalar
+                # prediction, so no gradient block.
                 return json.dumps(result, default=str)
             except Exception as _e:
                 logger.warning("[Stelle] Irontomb reader-reaction call failed: %s", _e)

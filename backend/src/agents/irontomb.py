@@ -822,25 +822,45 @@ def _build_system_prompt(
 
         "Call `submit_reaction` with two fields:\n\n"
 
-        "- `reaction` — your under-15-word reader-voice reaction. Not "
-        "a critique. Not writing-teacher vocabulary. The thing that "
-        "actually flashes through your head while scrolling. Examples "
-        "of the register:\n"
+        "- `reaction` — your under-15-word GESTALT reader-voice reaction. "
+        "The thing that flashes through your head AFTER reading the "
+        "last line — the post's net effect on you as a scroller. Not "
+        "a critique. Not writing-teacher vocabulary. Same register as "
+        "always:\n"
         "    \"got it by paragraph 3, scrolling\"\n"
         "    \"wait what\"\n"
         "    \"yeah I've been here\"\n"
+        "    \"story was real until that closer killed it, scrolled\"\n"
+        "    \"oh god yes, that meeting. felt that.\"\n"
         "    \"reads like an ad\"\n"
         "    \"who gives a shit\"\n"
-        "    \"this is the part where she tells me the lesson, bye\"\n"
-        "    \"kid calls during the meeting — funny\"\n"
-        "    \"felt real actually\"\n"
-        "- `anchor` — quote 3-5 words from the post where you "
-        "reacted, OR \"paragraph N\", OR \"at the end\", OR \"hook\", "
-        "OR \"never got past the first line\".\n\n"
+        "    \"felt real actually\"\n\n"
+
+        "- `anchors` — a list of zero, one, or many "
+        "READER-STATE-CHANGE moments. As you read, surface the specific "
+        "phrases where your felt-state actually shifted (positive OR "
+        "negative). For each shift:\n"
+        "    quote    — 3-15 words verbatim from the draft (the trigger)\n"
+        "    reaction — your under-15-word reaction to that moment\n\n"
+
+        "  Examples of an anchor:\n"
+        "    {\"quote\": \"two hundred Fridays\", \"reaction\": \"oof, that math actually got me\"}\n"
+        "    {\"quote\": \"isn't a software problem\", \"reaction\": \"ugh, didactic, scrolled\"}\n"
+        "    {\"quote\": \"He never asked us for an agent\", \"reaction\": \"okay that line stays\"}\n"
+        "    {\"quote\": \"Not predicting the future\", \"reaction\": \"Not X. Not Y. — eyeroll\"}\n\n"
+
+        "  Emit AS MANY OR AS FEW anchors as match how you actually "
+        "read. A draft that's uniformly fine: zero anchors, just the "
+        "gestalt. A draft with one strong hook + a GPT closer: two "
+        "anchors. A long draft with multiple texture shifts: more. "
+        "Don't fabricate reactions you didn't have. Don't paragraph-"
+        "segment — anchor where state ACTUALLY changed. Order anchors "
+        "by reading order so Stelle can see the trajectory.\n\n"
 
         "That's the whole output. No scalar. No booleans. Your "
-        "reaction IS the prediction — if it's negative, the post "
-        "won't perform; if it's positive, it might.\n\n"
+        "reactions ARE the prediction — gestalt-negative or anchored-"
+        "negativity = post won't perform; gestalt-positive with "
+        "felt-anchored praise = it might.\n\n"
 
         "Your reaction must be consistent with the calibration data "
         "you saw. If the draft pattern-matches a past post that got "
@@ -967,8 +987,10 @@ _SUBMIT_REACTION_TOOL: dict[str, Any] = {
     "name": "submit_reaction",
     "description": (
         "Submit your reader reaction. Ends the session.\n"
-        "  reaction — under-15-word reader-voice reaction\n"
-        "  anchor   — where in the post you reacted"
+        "  reaction — under-15-word GESTALT reader-voice reaction "
+        "(net effect after reading the whole draft)\n"
+        "  anchors  — list of {quote, reaction} for each reader-state-"
+        "change moment. Zero, one, or many — match how you read."
     ),
     "input_schema": {
         "type": "object",
@@ -976,23 +998,50 @@ _SUBMIT_REACTION_TOOL: dict[str, Any] = {
             "reaction": {
                 "type": "string",
                 "description": (
-                    "Your raw, visceral, under-15-word reaction as a "
-                    "LinkedIn reader. Not a critique. Not a writing-"
-                    "teacher vocabulary. The thing that actually "
-                    "flashes through your head while scrolling."
+                    "Your raw, visceral, under-15-word GESTALT reaction "
+                    "as a LinkedIn reader — the thing that flashes "
+                    "through your head AFTER reading the last line. "
+                    "Captures the post's net effect (accumulated "
+                    "irritation, lingering felt-ness, the moment it "
+                    "died). Not a critique. Not writing-teacher "
+                    "vocabulary."
                 ),
             },
-            "anchor": {
-                "type": "string",
+            "anchors": {
+                "type": "array",
                 "description": (
-                    "Where in the post you reacted. Quote 3-5 words "
-                    "from the post, OR \"paragraph N\", OR \"at the "
-                    "end\", OR \"hook\", OR \"never got past the first "
-                    "line\"."
+                    "Reader-state-change moments as you read. Surface "
+                    "the specific phrases where your felt-state shifted "
+                    "(positive OR negative). Emit zero, one, or many — "
+                    "match how you actually read it. Order by reading "
+                    "order. Don't fabricate reactions you didn't have. "
+                    "Don't paragraph-segment — anchor where state "
+                    "ACTUALLY changed."
                 ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "quote": {
+                            "type": "string",
+                            "description": (
+                                "3-15 words verbatim from the draft — "
+                                "the phrase that triggered the shift."
+                            ),
+                        },
+                        "reaction": {
+                            "type": "string",
+                            "description": (
+                                "Your under-15-word reader-voice "
+                                "reaction to that specific moment. "
+                                "Same register as the gestalt reaction."
+                            ),
+                        },
+                    },
+                    "required": ["quote", "reaction"],
+                },
             },
         },
-        "required": ["reaction", "anchor"],
+        "required": ["reaction"],
     },
 }
 
@@ -1189,6 +1238,18 @@ def simulate_flame_chase_journey(company: str, draft_text: str) -> dict[str, Any
         + (total_cache_write / 1e6) * _CACHE_WRITE_COST_PER_MTOK
     )
 
+    # Normalize the response shape. ``anchors`` is the new first-class
+    # field (list of {quote, reaction}); default to [] when the model
+    # emitted only a gestalt reaction. We also synthesize a legacy
+    # ``anchor`` (singular) — the first anchor's quote, or empty —
+    # so older readers (convergence_log column, trajectory snapshots,
+    # any out-of-tree consumers) keep working without a migration.
+    if not isinstance(reaction.get("anchors"), list):
+        reaction["anchors"] = []
+    first_anchor = reaction["anchors"][0] if reaction["anchors"] else None
+    if "anchor" not in reaction:
+        reaction["anchor"] = (first_anchor or {}).get("quote", "") if first_anchor else ""
+
     reaction["_cost_usd"] = round(cost, 5)
     reaction["_draft_hash"] = _draft_hash(draft_text)
     reaction["_turns_used"] = turns_used
@@ -1196,10 +1257,10 @@ def simulate_flame_chase_journey(company: str, draft_text: str) -> dict[str, Any
     reaction["_n_scored_obs_available"] = len(observations)
 
     logger.info(
-        "[Irontomb] %s: reaction=%r anchor=%r turns=%d retrievals=%d cost=$%.4f",
+        "[Irontomb] %s: reaction=%r anchors=%d turns=%d retrievals=%d cost=$%.4f",
         company,
         (reaction.get("reaction") or "")[:100],
-        (reaction.get("anchor") or "")[:60],
+        len(reaction["anchors"]),
         turns_used,
         len(retrieval_calls),
         cost,
