@@ -506,17 +506,17 @@ def build_post_bundle_with_stats(
     parts.append("")
     parts.append("=== END POSTS ===")
 
-    # Phainon exemplars (2026-04-25 prototype). Reads the latest batch
-    # from ``creator_exemplars`` for this FOC and renders a section
-    # visible to Stelle. Three modes appear distinctly so Stelle can
-    # weight them: ``full`` (reward-ranked, high confidence),
-    # ``diverse`` (no ranking — Phainon explored these directions),
-    # ``warm_start`` (voice may include pre-Virio tone — too early
-    # to calibrate). Best-effort; failures don't block the bundle.
-    phainon_section = _render_phainon_exemplars(company, user_id)
-    if phainon_section:
-        parts.append("")
-        parts.append(phainon_section)
+    # NOTE (2026-04-25): Phainon exemplar injection has been excised
+    # from the Stelle pipeline. The predictor (V2a reward) calibrates
+    # to +Spearman on only 1 of 3 measured creators, and the generator
+    # samples from a hand-curated ``_ANGLES`` list (BL-violating). Until
+    # we (a) clean promotional pollution from the corpus, (b) build a
+    # held-out predictor harness with per-creator + cohort Spearman,
+    # and (c) drop the angle taxonomy for model-derived diversity,
+    # consuming Phainon's output here is theater. The cron + table are
+    # preserved upstream for the calibration work; this consumer is
+    # disabled. See ``services/phainon_reward.py`` for the predictor
+    # research target.
 
     # Structured stats log — grep-friendly so a downstream audit
     # script (``neighbor_signal_audit``) can aggregate bundle builds
@@ -1108,133 +1108,6 @@ def _neighbors_for_query_embedding(
             "hook": hook,
         })
     return out
-
-
-def _render_phainon_exemplars(company: str, user_id: Optional[str]) -> str:
-    """Latest Phainon exemplar batch for this FOC, rendered as a markdown
-    block. Returns empty string when:
-      * Amphoreus Supabase isn't configured
-      * No exemplar rows exist for this creator (Phainon hasn't run yet,
-        or this creator is outside the prototype roster)
-      * Any read error — best-effort only.
-
-    Mode signals are surfaced explicitly in the section header so Stelle
-    knows whether the candidates are reward-ranked, exploratory, or
-    warm-start. See ``services/phainon.py`` for the full mode contract.
-    """
-    try:
-        from backend.src.agents.stelle import _resolve_linkedin_username
-        from backend.src.db.amphoreus_supabase import _get_client, is_configured
-    except Exception:
-        return ""
-    if not is_configured():
-        return ""
-
-    handle = _resolve_linkedin_username(company)
-    if not handle:
-        return ""
-
-    sb = _get_client()
-    if sb is None:
-        return ""
-
-    # Pull the most recent batch only — Phainon writes one batch per
-    # weekly run, identified by ``batch_id``. We get all rows for the
-    # latest ``generated_at`` and filter to that batch's id.
-    try:
-        rows = (
-            sb.table("creator_exemplars")
-              .select("id, generated_at, batch_id, mode, angle, exemplar_text, "
-                      "predicted_band, reasoning, rank_within_batch, onboarding_date")
-              .eq("creator_handle", handle)
-              .order("generated_at", desc=True)
-              .limit(50)
-              .execute()
-              .data
-            or []
-        )
-    except Exception as exc:
-        logger.debug("[post_bundle] phainon exemplars fetch failed: %s", exc)
-        return ""
-    if not rows:
-        return ""
-
-    latest_batch = rows[0].get("batch_id")
-    batch_rows = [r for r in rows if r.get("batch_id") == latest_batch]
-    if not batch_rows:
-        return ""
-
-    mode = (batch_rows[0].get("mode") or "").strip()
-    generated_at = (batch_rows[0].get("generated_at") or "")[:10]
-    onboarding   = batch_rows[0].get("onboarding_date") or ""
-
-    # Sort within mode
-    if mode == "full":
-        # Rank ascending — 1 is best
-        batch_rows.sort(
-            key=lambda r: (r.get("rank_within_batch") or 99,)
-        )
-    else:
-        # Diverse / warm_start: keep original order (chronological insertion)
-        pass
-
-    lines: list[str] = []
-    lines.append(f"=== PHAINON EXEMPLARS for @{handle} (generated {generated_at}) ===")
-    lines.append("")
-    if mode == "full":
-        lines.append(
-            f"Mode: FULL — reward-ranked (V2a Spearman ≥ 0.4 calibrated). "
-            f"These are the top-{len(batch_rows)} candidates Phainon scored "
-            f"highest for this creator. Use as concrete inspiration for "
-            f"directions Phainon predicts will land. Treat band 5 as "
-            f"\"highest predicted relative engagement\" within this "
-            f"creator's distribution."
-        )
-    elif mode == "diverse":
-        lines.append(
-            f"Mode: DIVERSE EXPLORATION — Phainon's reward model isn't "
-            f"reliably calibrated for this creator (Spearman near zero or "
-            f"anti-predictive on V2a). The {len(batch_rows)} candidates "
-            f"below were generated with angle/structure variation but NOT "
-            f"reward-ranked. Read as \"directions Phainon explored,\" not "
-            f"\"directions Phainon endorses.\" Pick whatever resonates."
-        )
-    elif mode == "warm_start":
-        lines.append(
-            f"Mode: WARM START — Phainon doesn't have enough Virio-era data "
-            f"yet for this creator (onboarded {onboarding}). The "
-            f"{len(batch_rows)} candidates were generated using their FULL "
-            f"history (pre + post Virio); voice may include pre-Virio tone. "
-            f"Treat as voice-prototyping seed, not as ranked exemplars."
-        )
-    else:
-        lines.append(f"Mode: {mode or 'unknown'} ({len(batch_rows)} candidates)")
-    lines.append("")
-
-    for i, r in enumerate(batch_rows, 1):
-        # Header line per exemplar
-        head_bits: list[str] = []
-        if mode == "full":
-            band = r.get("predicted_band")
-            if band is not None:
-                head_bits.append(f"predicted band {band}/5")
-            rank = r.get("rank_within_batch")
-            if rank:
-                head_bits.append(f"rank {rank}")
-        angle = (r.get("angle") or "").strip()
-        if angle:
-            head_bits.append(f"angle: {angle}")
-        head = " · ".join(head_bits) if head_bits else "candidate"
-        lines.append(f"--- Exemplar {i} ({head}) ---")
-        lines.append((r.get("exemplar_text") or "").strip())
-        if mode == "full":
-            reasoning = (r.get("reasoning") or "").strip()
-            if reasoning:
-                lines.append(f"  Phainon reasoning: {reasoning}")
-        lines.append("")
-
-    lines.append("=== END PHAINON EXEMPLARS ===")
-    return "\n".join(lines)
 
 
 def _fetch_feedback(draft_ids) -> dict[str, list[dict]]:
