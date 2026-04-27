@@ -874,10 +874,13 @@ def _build_system_prompt(
         "      {\"quote\": \"the push has become a pull\",   \"reaction\": \"GPT-parallel closer, scrolled\"}\n"
         "    ]\n\n"
 
-        "**ALSO RIGHT** (uniformly meh; nothing was specifically "
-        "anchorable):\n"
+        "**ALSO RIGHT** (uniformly meh — anchor on the line that "
+        "represents the meh-ness, a generic phrase or low-energy "
+        "closer):\n"
         "    reaction: \"nodding along, scrolling\"\n"
-        "    anchors:  []\n\n"
+        "    anchors:  [\n"
+        "      {\"quote\": \"helps you scale your team\", \"reaction\": \"every B2B post says this\"}\n"
+        "    ]\n\n"
 
         "**ALSO RIGHT** (one strong moment, otherwise quiet):\n"
         "    reaction: \"hung on by one line, otherwise drifted\"\n"
@@ -890,6 +893,15 @@ def _build_system_prompt(
         "that phrase MUST be in `anchors` and your gestalt must be "
         "rewritten to remove the citation. Gestalt = post-as-an-event. "
         "Anchors = the events.\n\n"
+
+        "**Anchors is required (minItems: 1).** Empty anchors is no "
+        "longer allowed by the schema. Even on uniformly-meh drafts, "
+        "anchor on the line that best represents the texture — a "
+        "generic phrase, a low-energy closer, the section that "
+        "embodies the overall feeling. If you find yourself wanting "
+        "to emit zero anchors, that means you haven't read closely "
+        "enough — re-read and find the line that captures the "
+        "post's character.\n\n"
 
         "Don't fabricate reactions you didn't have. Don't paragraph-"
         "segment — anchor where state ACTUALLY changed. Order anchors "
@@ -1047,14 +1059,21 @@ _SUBMIT_REACTION_TOOL: dict[str, Any] = {
             },
             "anchors": {
                 "type": "array",
+                "minItems": 1,
                 "description": (
-                    "Reader-state-change moments as you read. Surface "
-                    "the specific phrases where your felt-state shifted "
-                    "(positive OR negative). Emit zero, one, or many — "
-                    "match how you actually read it. Order by reading "
-                    "order. Don't fabricate reactions you didn't have. "
+                    "Reader-state-change moments as you read. At least "
+                    "one anchor required — surface the specific phrase "
+                    "where your felt-state shifted (positive OR "
+                    "negative). For drafts with multiple shifts, emit "
+                    "one anchor per shift in reading order. For drafts "
+                    "that read uniformly without specific moments "
+                    "standing out, anchor on the line that best "
+                    "represents the overall texture (a low-energy "
+                    "phrase, a generic line, the closer that didn't "
+                    "land). Don't fabricate reactions you didn't have. "
                     "Don't paragraph-segment — anchor where state "
-                    "ACTUALLY changed."
+                    "ACTUALLY changed or where the post's character "
+                    "lives."
                 ),
                 "items": {
                     "type": "object",
@@ -1063,7 +1082,9 @@ _SUBMIT_REACTION_TOOL: dict[str, Any] = {
                             "type": "string",
                             "description": (
                                 "3-15 words verbatim from the draft — "
-                                "the phrase that triggered the shift."
+                                "the phrase that triggered the shift "
+                                "(or, for uniformly-meh drafts, the "
+                                "line that best represents the texture)."
                             ),
                         },
                         "reaction": {
@@ -1079,7 +1100,7 @@ _SUBMIT_REACTION_TOOL: dict[str, Any] = {
                 },
             },
         },
-        "required": ["reaction"],
+        "required": ["reaction", "anchors"],
     },
 }
 
