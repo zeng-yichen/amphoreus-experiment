@@ -86,6 +86,58 @@ _WINDOW_DAYS                = 90     # comment/delta lookback window
 _LINKEDIN_WINDOW_DAYS          = 21
 _LINKEDIN_WINDOW_FALLBACK_DAYS = 60
 _MIN_POSTS_BEFORE_FALLBACK     = 5   # matches _NEIGHBOR_MIN_POSTS
+
+# Per-FOC agency-start dates. When a Stelle/bundle call resolves to a
+# user_id in this map, the LinkedIn-post lookback extends back to the
+# start date instead of capping at the 21-day window — Stelle and
+# Cyrene see the FULL Virio-era voice, not just the most recent 3
+# weeks. Set per the operator's onboarding records, with one override
+# (Andrew Ettinger) where Jacquard's first_post_date didn't match the
+# operator's actual start.
+#
+# To add a new client to this map: pull their first_post_date from
+# Jacquard ``user_companies.first_post_date`` (or ask the operator).
+# ISO YYYY-MM-DD. Users not in the map fall through to the default
+# 21-day window + 60-day fallback.
+#
+# Future-proofing: this is hardcoded today because the dataset is 6
+# clients and adding a Supabase column would be more plumbing than
+# the value justifies. When the prototype set grows past ~12 clients,
+# migrate to a ``users.agency_start_date`` column read here.
+_AGENCY_START_DATE_BY_USER_ID: dict[str, str] = {
+    "b417e1d4-b765-455c-957a-9eaa0f2ad1a2": "2026-02-11",  # Mark Hensley (Hensley Biostats)
+    "e1acef72-33d7-423e-afb2-dabfcb1d1204": "2026-02-13",  # Andrew Ettinger (Hume) — operator override
+    "984aba78-c761-42b8-a05c-22efae4d0a57": "2026-03-30",  # Mark Schwartz (Trimble)
+    "1f863e78-c439-4eee-bab9-f63ec3670d1e": "2026-03-30",  # Heather Adkins (Trimble)
+    "d759e806-0755-449e-bd61-197c73715e09": "2026-01-20",  # Sachil Verma (Innovo)
+    # Grady Joseph: company first_post_date wasn't set in Jacquard at
+    # diagnose time. Falls through to the 21-day default until set.
+}
+
+
+def _effective_lookback_days(user_id: Optional[str]) -> int:
+    """Days of LinkedIn-post lookback for a given FOC.
+
+    Returns the days-since-agency-start when this FOC has a known
+    start date in ``_AGENCY_START_DATE_BY_USER_ID``; otherwise returns
+    the 21-day default. Used by the LinkedIn-post fetch to widen the
+    window for prototype clients so Stelle sees their full Virio-era
+    voice, not just the trailing 3 weeks.
+    """
+    if not user_id:
+        return _LINKEDIN_WINDOW_DAYS
+    start_iso = _AGENCY_START_DATE_BY_USER_ID.get(user_id)
+    if not start_iso:
+        return _LINKEDIN_WINDOW_DAYS
+    try:
+        start_dt = datetime.fromisoformat(start_iso).replace(tzinfo=timezone.utc)
+        days = (datetime.now(timezone.utc) - start_dt).days
+        # Guard rails: never shorter than the default, never absurdly
+        # long (cap at 1 year so a stale config can't blow up the
+        # bundle if someone leaves a date set after a client churns).
+        return max(_LINKEDIN_WINDOW_DAYS, min(days, 365))
+    except Exception:
+        return _LINKEDIN_WINDOW_DAYS
 _MAX_COMMENT_BODY           = 600    # char cap per comment
 _MAX_SELECTED_TEXT          = 200    # char cap per inline anchor
 _MAX_POST_BODY_CHARS        = 4000   # char cap per post body in bundle
@@ -822,21 +874,30 @@ def _fetch_linkedin_engagement(
             )
             return []
 
-    # Primary: tight 21-day window → clean current-voice-era calibration.
-    # Rationale: a creator's voice shifts over time, and for a newly-
-    # onboarded client the pre-Virio content is usually much shorter /
-    # more promotional. Tight window keeps Stelle's voice target
-    # aligned with the posting style of the last ~3 weeks.
-    rows = _fetch(_LINKEDIN_WINDOW_DAYS)
-    if len(rows) < _MIN_POSTS_BEFORE_FALLBACK:
+    # Primary window: per-FOC agency-start when known, else default 21d.
+    # Rationale: a creator's voice shifts over time, but the relevant
+    # voice is the Virio-era voice — every post since they started with
+    # the agency. For prototype clients we have the start date; the
+    # window extends back to that date so Stelle sees the full arc, not
+    # just the trailing 3 weeks. Non-prototype users keep the tight
+    # 21-day default to avoid pre-Virio content polluting voice.
+    primary_days = _effective_lookback_days(user_id)
+    rows = _fetch(primary_days)
+    if primary_days > _LINKEDIN_WINDOW_DAYS:
+        logger.info(
+            "[post_bundle] using extended %dd window for %s (agency-start "
+            "override) — fetched %d posts",
+            primary_days, username, len(rows),
+        )
+    if len(rows) < _MIN_POSTS_BEFORE_FALLBACK and primary_days < _LINKEDIN_WINDOW_FALLBACK_DAYS:
         # Fallback: widen to 60d so low-frequency creators still get
         # enough posts to compute semantic neighbors (which require
-        # _NEIGHBOR_MIN_POSTS=5). Logged so we can spot the FOCs
-        # that never reach the 21d threshold.
+        # _NEIGHBOR_MIN_POSTS=5). Skipped for prototype clients whose
+        # agency-start window is already wider than 60d.
         logger.info(
             "[post_bundle] only %d post(s) in last %dd for %s — "
             "widening to %dd fallback window",
-            len(rows), _LINKEDIN_WINDOW_DAYS, username,
+            len(rows), primary_days, username,
             _LINKEDIN_WINDOW_FALLBACK_DAYS,
         )
         rows = _fetch(_LINKEDIN_WINDOW_FALLBACK_DAYS)
