@@ -24,7 +24,8 @@ import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { briefingsApi, cyreneApi, ghostwriterApi, interviewApi } from "@/lib/api";
+import { briefingsApi, cyreneApi, ghostwriterApi, interviewApi, transcriptsApi, type MeetingSubtype } from "@/lib/api";
+import { startInterviewCapture, type CaptureHandle } from "@/lib/interview-capture";
 
 interface TranscriptSegment {
   text: string;
@@ -55,8 +56,36 @@ export default function InterviewPrepPage() {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [trashed, setTrashed] = useState(false);
-  const [hasBlackhole, setHasBlackhole] = useState<boolean | null>(null);
+
+  // Post-session "upload to Amphoreus" modal state. Opens automatically
+  // when the Tribbie session completes and the transcript survives
+  // (not trashed). User picks meeting_subtype + confirms, we POST the
+  // stitched transcript to the mirror paste endpoint. The write lands
+  // in Amphoreus Supabase so cyrene.fly.dev + Stelle see it — even
+  // though the recording happened on the operator's laptop.
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [uploadSubtype, setUploadSubtype] = useState<MeetingSubtype>("content_interview");
+  const [uploadDescription, setUploadDescription] = useState("");
+  const [uploadingToMirror, setUploadingToMirror] = useState(false);
+  const [uploadedToMirror, setUploadedToMirror] = useState<{ id: string; filename: string } | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Browser-capture support detection. Tribbie now captures audio in
+  // the browser via getDisplayMedia (tab/system audio) + getUserMedia
+  // (mic) — no BlackHole, no local install. Safari support for
+  // getDisplayMedia audio is still partial, so we feature-detect and
+  // show a short browser-compat warning when unsupported. Runs once
+  // on mount; no backend call needed.
+  const [canCaptureInBrowser, setCanCaptureInBrowser] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (typeof navigator === "undefined") return;
+    const ok =
+      !!navigator.mediaDevices
+      && typeof navigator.mediaDevices.getDisplayMedia === "function"
+      && typeof navigator.mediaDevices.getUserMedia === "function";
+    setCanCaptureInBrowser(ok);
+  }, []);
 
   // --- Briefing (Aglaea) state ---
   const [hasBriefing, setHasBriefing] = useState<boolean | null>(null);
@@ -74,14 +103,34 @@ export default function InterviewPrepPage() {
 
   const transcriptRef = useRef<HTMLDivElement>(null);
   const briefingLogRef = useRef<HTMLDivElement>(null);
+  // Browser-capture handle for the current session. Created in
+  // handleStart, torn down in handleStop / on done / on error. Keeping
+  // it in a ref (not state) so capture teardown doesn't race React
+  // re-renders and we can always call stop() synchronously.
+  const captureRef = useRef<CaptureHandle | null>(null);
 
-  // Detect BlackHole, briefing existence, and briefing content on mount
+  // Whether to capture the interviewer's mic alongside the tab audio.
+  // Default: true (complete two-sided transcript, needs headphones).
+  // False: tab-audio only (matches legacy BlackHole scope — interviewee
+  // voice only, zero bleed risk, no headphones required). Persisted per
+  // browser in localStorage so each teammate's preference sticks.
+  const [captureMic, setCaptureMic] = useState<boolean>(true);
   useEffect(() => {
-    interviewApi
-      .listDevices()
-      .then((res) => setHasBlackhole(res.has_blackhole))
-      .catch(() => setHasBlackhole(false));
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem("tribbie.captureMic");
+    if (stored === "false") setCaptureMic(false);
+  }, []);
+  function toggleCaptureMic(next: boolean) {
+    setCaptureMic(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("tribbie.captureMic", String(next));
+    }
+  }
 
+  // Check briefing existence + content on mount. Audio capture is a
+  // browser capability now (see canCaptureInBrowser above) — no
+  // backend round-trip needed to decide whether we can record.
+  useEffect(() => {
     briefingsApi
       .check(company)
       .then((res) => {
@@ -176,6 +225,197 @@ export default function InterviewPrepPage() {
     },
     [activeCyreneKey, company],
   );
+
+  // Download the brief as a self-contained HTML file. Inline styles
+  // mirror the on-screen visual (emerald accent for positive sections,
+  // red for exhausted, stone for body) so the downloaded file looks
+  // like what the operator sees in the panel. Browser save-as-PDF
+  // works on the resulting HTML if the operator wants a PDF artifact —
+  // we don't ship a PDF library because that's overkill for what is
+  // essentially a structured memo.
+  function handleDownloadBrief() {
+    if (!cyreneBrief) return;
+    const esc = (s: unknown) =>
+      String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    const dateStr = cyreneBrief._computed_at
+      ? new Date(cyreneBrief._computed_at).toLocaleDateString()
+      : new Date().toLocaleDateString();
+    const isoDate = (cyreneBrief._computed_at || new Date().toISOString()).slice(0, 10);
+
+    const themes = cyreneBrief.strategic_themes || [];
+    const probes = cyreneBrief.topics_to_probe || [];
+    const exhausted = cyreneBrief.topics_exhausted || [];
+    const dms = cyreneBrief.dm_targets || [];
+    const nextTrigger = cyreneBrief.next_run_trigger || {};
+    const prose = cyreneBrief.prose || "";
+
+    const themesHtml = themes
+      .map(
+        (t: any) => `
+      <li class="item">
+        <div class="item-title positive">${esc(t.theme)}</div>
+        ${t.evidence ? `<p class="item-body">${esc(t.evidence)}</p>` : ""}
+        ${t.arc ? `<p class="item-italic">Arc: ${esc(t.arc)}</p>` : ""}
+      </li>`,
+      )
+      .join("");
+
+    const probesHtml = probes
+      .map(
+        (p: any, i: number) => `
+      <li class="item">
+        <div class="item-title positive"><span class="num">${i + 1}.</span> ${esc(p.thread)}</div>
+        ${p.why ? `<p class="item-body">${esc(p.why)}</p>` : ""}
+        ${p.suggested_entry_point ? `<p class="item-italic">Entry: ${esc(p.suggested_entry_point)}</p>` : ""}
+      </li>`,
+      )
+      .join("");
+
+    const exhaustedHtml = exhausted
+      .map(
+        (e: any) => `
+      <li class="item">
+        <div class="item-title negative">${esc(e.pattern)}</div>
+        ${e.evidence ? `<p class="item-body">${esc(e.evidence)}</p>` : ""}
+      </li>`,
+      )
+      .join("");
+
+    const dmsHtml = dms
+      .map(
+        (d: any) => `
+      <li class="item">
+        <div class="item-title positive">${esc(d.name)}${d.company ? ` <span class="muted">@ ${esc(d.company)}</span>` : ""}</div>
+        ${d.headline ? `<p class="item-italic">${esc(d.headline)}</p>` : ""}
+        ${d.suggested_angle ? `<p class="item-body">${esc(d.suggested_angle)}</p>` : ""}
+        ${
+          d.icp_score !== undefined || d.posts_engaged !== undefined
+            ? `<p class="muted small">${d.icp_score !== undefined ? `ICP ${esc(d.icp_score)}` : ""}${
+                d.icp_score !== undefined && d.posts_engaged !== undefined ? " · " : ""
+              }${d.posts_engaged !== undefined ? `${esc(d.posts_engaged)} engagements` : ""}</p>`
+            : ""
+        }
+      </li>`,
+      )
+      .join("");
+
+    const sections: string[] = [];
+    if (themes.length)
+      sections.push(`<section><h2>Strategic Themes <span class="count">(${themes.length})</span></h2><ul>${themesHtml}</ul></section>`);
+    if (probes.length)
+      sections.push(`<section><h2>Topics to Probe <span class="count">(${probes.length})</span></h2><ul>${probesHtml}</ul></section>`);
+    if (dms.length)
+      sections.push(`<section><h2>DM Targets <span class="count">(${dms.length})</span></h2><ul>${dmsHtml}</ul></section>`);
+    if (exhausted.length)
+      sections.push(`<section class="exhausted"><h2>Topics Exhausted <span class="count">(${exhausted.length})</span></h2><ul>${exhaustedHtml}</ul></section>`);
+    if (prose)
+      sections.push(`<section><h2>Strategic Narrative</h2><div class="prose">${esc(prose).replace(/\n/g, "<br/>")}</div></section>`);
+
+    const trigBits: string[] = [];
+    if (nextTrigger.condition) trigBits.push(`<strong>Condition:</strong> ${esc(nextTrigger.condition)}`);
+    if (nextTrigger.or_after_days !== undefined) trigBits.push(`<strong>Max days:</strong> ${esc(nextTrigger.or_after_days)}`);
+    if (nextTrigger.rationale) trigBits.push(`<strong>Rationale:</strong> ${esc(nextTrigger.rationale)}`);
+    if (trigBits.length)
+      sections.push(`<section><h2>Next Run Trigger</h2><div class="prose">${trigBits.join("<br/>")}</div></section>`);
+
+    const metaFooter: string[] = [];
+    if (cyreneBrief._turns_used) metaFooter.push(`${esc(cyreneBrief._turns_used)} turns`);
+    if (cyreneBrief._cost_usd) metaFooter.push(`$${esc(cyreneBrief._cost_usd)}`);
+
+    const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cyrene Brief — ${esc(company)}</title>
+<style>
+  :root {
+    --emerald-50: #ecfdf5;
+    --emerald-200: #a7f3d0;
+    --emerald-600: #059669;
+    --emerald-800: #065f46;
+    --emerald-900: #064e3b;
+    --red-200: #fecaca;
+    --red-800: #991b1b;
+    --red-900: #7f1d1d;
+    --stone-50: #fafaf9;
+    --stone-200: #e7e5e4;
+    --stone-400: #a8a29e;
+    --stone-500: #78716c;
+    --stone-600: #57534e;
+    --stone-700: #44403c;
+    --stone-900: #1c1917;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: var(--stone-50);
+    color: var(--stone-900);
+    line-height: 1.55;
+    font-size: 14px;
+    padding: 32px 16px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  header { border-bottom: 1px solid var(--emerald-200); padding-bottom: 16px; margin-bottom: 24px; }
+  header h1 { margin: 0 0 4px; font-size: 22px; color: var(--emerald-900); font-weight: 600; }
+  header .sub { color: var(--emerald-600); font-size: 13px; }
+  section {
+    background: white;
+    border: 1px solid var(--emerald-200);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-bottom: 16px;
+  }
+  section.exhausted { border-color: var(--red-200); }
+  section h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; color: var(--emerald-800); }
+  section.exhausted h2 { color: var(--red-800); }
+  section h2 .count { font-weight: 400; color: var(--stone-500); }
+  ul { list-style: none; margin: 0; padding: 0; }
+  .item { padding: 8px 0; border-bottom: 1px solid var(--stone-200); }
+  .item:last-child { border-bottom: none; }
+  .item-title { font-weight: 500; margin-bottom: 2px; }
+  .item-title.positive { color: var(--emerald-900); }
+  .item-title.negative { color: var(--red-900); }
+  .item-title .num { color: var(--stone-400); margin-right: 4px; }
+  .item-body { margin: 2px 0; color: var(--stone-600); font-size: 13px; }
+  .item-italic { margin: 2px 0; font-style: italic; color: var(--stone-500); font-size: 13px; }
+  .muted { color: var(--stone-500); font-weight: 400; }
+  .small { font-size: 12px; }
+  .prose { color: var(--stone-700); white-space: pre-wrap; line-height: 1.65; }
+  footer { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--stone-200); color: var(--stone-500); font-size: 12px; display: flex; gap: 16px; }
+  @media print {
+    body { background: white; padding: 0; }
+    section { break-inside: avoid; box-shadow: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Cyrene Strategic Brief</h1>
+      <div class="sub">${esc(company)} · Computed ${esc(dateStr)}</div>
+    </header>
+    ${sections.join("\n")}
+    ${metaFooter.length ? `<footer>${metaFooter.map((m) => `<span>${m}</span>`).join("")}</footer>` : ""}
+  </div>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `cyrene-brief-${company}-${isoDate}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
 
   async function handleRunCyrene() {
     if (isRunningCyrene) return;
@@ -327,14 +567,48 @@ export default function InterviewPrepPage() {
     setSavedPath(null);
     setTrashed(false);
     setError(null);
-    setStatus("Starting...");
+    setStatus("Requesting audio permissions…");
 
+    // Order matters: ask the backend to register the job + audio source
+    // first (so the WS has something to attach to), THEN prompt the
+    // browser for mic + tab audio, THEN open the WS from the hook.
+    //
+    // The browser-permission prompts (getUserMedia, getDisplayMedia)
+    // MUST run inside this click handler — browsers block them when
+    // triggered asynchronously after the user gesture boundary.
+    let jid: string;
     try {
       const { job_id } = await interviewApi.start(company);
+      jid = job_id;
       setJobId(job_id);
-      setStatus("Connecting...");
+    } catch (e) {
+      setError(`Couldn't start session: ${String(e)}`);
+      setIsRecording(false);
+      setStatus("Error");
+      return;
+    }
 
-      for await (const data of interviewApi.streamJob(job_id)) {
+    try {
+      setStatus("Pick the call tab in the picker and check ‘Share tab audio’…");
+      const capture = await startInterviewCapture(jid, { captureMic });
+      captureRef.current = capture;
+      capture.onError((err) => {
+        setError(`Audio capture failed: ${err.message}`);
+      });
+      setStatus("Audio connected. Starting transcription…");
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+      setIsRecording(false);
+      setStatus("Error");
+      // Best-effort: ask the backend to tear down the already-started
+      // session so we don't leave a zombie job waiting for audio that
+      // will never arrive.
+      try { await interviewApi.stop(jid, company); } catch {/* ignore */}
+      return;
+    }
+
+    try {
+      for await (const data of interviewApi.streamJob(jid)) {
         const ts = ((data.timestamp as number | undefined) ?? Date.now() / 1000) * 1000;
 
         if (data.type === "status") {
@@ -351,6 +625,8 @@ export default function InterviewPrepPage() {
           setError((data.data as { message?: string } | undefined)?.message || "Unknown error");
           setIsRecording(false);
           setStatus("Error");
+          await captureRef.current?.stop();
+          captureRef.current = null;
           return;
         } else if (data.type === "done") {
           const filePath = (data.data as { output?: string } | undefined)?.output || null;
@@ -358,14 +634,27 @@ export default function InterviewPrepPage() {
           setSavedPath(filePath);
           setIsRecording(false);
           setStatus(msg);
+          await captureRef.current?.stop();
+          captureRef.current = null;
+          // Auto-populate a sensible default description then prompt
+          // the operator to upload. They can cancel the modal if this
+          // was a throwaway recording.
+          const now = new Date();
+          const dateStr = now.toISOString().slice(0, 10);
+          setUploadDescription(`Tribbie session ${dateStr}`);
+          setShowUploadModal(true);
           return;
         }
       }
       setIsRecording(false);
+      await captureRef.current?.stop();
+      captureRef.current = null;
     } catch (e) {
       setError(String(e));
       setIsRecording(false);
       setStatus("Error");
+      await captureRef.current?.stop();
+      captureRef.current = null;
     }
   }
 
@@ -377,9 +666,54 @@ export default function InterviewPrepPage() {
     } catch {
       // Backend signals the session; done event will arrive via SSE
     }
+    // Don't stop the capture here — let the SSE 'done' handler do it
+    // so any last-second audio still makes it through before the WS
+    // closes. If the backend never sends 'done' the stream loop will
+    // exit and its finally branch tears the capture down.
   }
 
-  const canStart = hasBlackhole !== false && hasBriefing === true && !isGeneratingBrief;
+  async function handleUploadToAmphoreus() {
+    // Stitch the in-memory transcript back into text. The on-disk .txt
+    // Tribbie saved locally has the same content, but using the UI
+    // state means the operator gets exactly what they saw — no
+    // post-processing drift.
+    const text = transcript
+      .map((s) => s.text)
+      .join("\n")
+      .trim();
+    if (!text) {
+      setUploadError("Transcript is empty — nothing to upload.");
+      return;
+    }
+    if (!uploadDescription.trim()) {
+      setUploadError("Add a description before uploading.");
+      return;
+    }
+    setUploadingToMirror(true);
+    setUploadError(null);
+    try {
+      const res = await transcriptsApi.pasteToMirror(
+        company,
+        text,
+        uploadDescription.trim(),
+        undefined,             // userId — resolved server-side from the slug
+        "transcript",          // kind — always meetings-mount for Tribbie
+        uploadSubtype,
+      );
+      setUploadedToMirror({ id: res.id, filename: res.filename });
+      setShowUploadModal(false);
+      setStatus(`Uploaded to Amphoreus as ${uploadSubtype === "content_interview" ? "interview" : uploadSubtype}`);
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setUploadingToMirror(false);
+    }
+  }
+
+  const canStart =
+    canCaptureInBrowser !== false
+    && hasBriefing === true
+    && !isGeneratingBrief;
 
   return (
     <div className="flex h-screen flex-col">
@@ -450,8 +784,8 @@ export default function InterviewPrepPage() {
             title={
               hasBriefing !== true
                 ? "Generate a briefing first"
-                : hasBlackhole === false
-                ? "BlackHole audio device required"
+                : canCaptureInBrowser === false
+                ? "Browser doesn't support screen-audio capture — use Chrome or Edge"
                 : "Start the live interview companion"
             }
             className="rounded-lg bg-red-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
@@ -499,7 +833,99 @@ export default function InterviewPrepPage() {
             {savedPath?.split("/").pop()}
           </span>
         )}
+        {uploadedToMirror && (
+          <span className="ml-3 rounded bg-fuchsia-100 px-2 py-0.5 text-[11px] font-medium text-fuchsia-700">
+            ↑ Amphoreus: {uploadedToMirror.filename}
+          </span>
+        )}
+        {savedPath && !trashed && !uploadedToMirror && !showUploadModal && (
+          <button
+            onClick={() => setShowUploadModal(true)}
+            className="ml-2 rounded bg-fuchsia-100 px-2 py-0.5 text-[11px] font-medium text-fuchsia-700 hover:bg-fuchsia-200"
+            title="Push this transcript to Amphoreus Supabase so Stelle + the Transcripts tab see it"
+          >
+            ↑ Upload to Amphoreus
+          </button>
+        )}
       </div>
+
+      {/* Post-session upload modal */}
+      {showUploadModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-semibold">Upload to Amphoreus</h3>
+            <p className="mt-1 text-xs text-stone-500">
+              Pushes this transcript to Amphoreus Supabase. Stelle will see it in <code>{`<slug>/transcripts/`}</code>;
+              the Transcripts tab will show it with an <span className="font-medium">interview</span> or
+              <span className="font-medium"> sync</span> badge.
+            </p>
+
+            <label className="mt-4 block text-xs font-medium text-stone-600">
+              Meeting type
+            </label>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {([
+                { v: "content_interview" as const, label: "Content interview", hint: "Direct interview with the FOC about their content / story / strategy. High-signal." },
+                { v: "sync" as const,              label: "Sync",              hint: "Weekly ops check-in, GTM sync, etc. Lower content-generation signal." },
+                { v: "other" as const,             label: "Other",             hint: "Anything that doesn't fit interview / sync." },
+              ]).map((o) => (
+                <button
+                  key={o.v}
+                  type="button"
+                  onClick={() => setUploadSubtype(o.v)}
+                  title={o.hint}
+                  className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                    uploadSubtype === o.v
+                      ? "border-fuchsia-700 bg-fuchsia-700 text-white"
+                      : "border-stone-300 bg-white text-stone-600 hover:border-stone-500"
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+
+            <label className="mt-4 block text-xs font-medium text-stone-600">
+              Description <span className="text-stone-400">(visible in the Transcripts tab)</span>
+            </label>
+            <input
+              type="text"
+              value={uploadDescription}
+              onChange={(e) => setUploadDescription(e.target.value)}
+              placeholder={uploadSubtype === "content_interview" ? "e.g. Content interview — Mark — 2026-04-21" : "e.g. Weekly sync — Mark — 2026-04-21"}
+              className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-1.5 text-sm focus:border-stone-500 focus:outline-none"
+            />
+
+            <div className="mt-3 text-[11px] text-stone-500">
+              {transcript.length} segment{transcript.length === 1 ? "" : "s"} · target client:{" "}
+              <span className="font-mono text-stone-700">{company}</span>
+            </div>
+
+            {uploadError && (
+              <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                {uploadError}
+              </div>
+            )}
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                onClick={() => setShowUploadModal(false)}
+                disabled={uploadingToMirror}
+                className="rounded-lg px-4 py-1.5 text-sm text-stone-500 hover:text-stone-800 disabled:opacity-50"
+              >
+                Not now
+              </button>
+              <button
+                onClick={() => void handleUploadToAmphoreus()}
+                disabled={uploadingToMirror || transcript.length === 0}
+                className="rounded-lg bg-fuchsia-700 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-fuchsia-800 disabled:opacity-50"
+              >
+                {uploadingToMirror ? "Uploading…" : "Upload to Amphoreus"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* No strategic review warning */}
       {!cyreneBrief && !isRunningCyrene && (
@@ -511,28 +937,59 @@ export default function InterviewPrepPage() {
         </div>
       )}
 
-      {/* BlackHole setup guide */}
-      {hasBlackhole === false && (
-        <div className="border-b border-amber-200 bg-amber-50 px-6 py-3 text-sm">
-          <p className="font-semibold text-amber-900">BlackHole audio device not detected</p>
-          <ol className="mt-1.5 list-decimal space-y-0.5 pl-4 text-amber-800">
-            <li>
-              Run: <code className="rounded bg-amber-100 px-1 font-mono text-xs">brew install blackhole-2ch</code>
-            </li>
-            <li>Reboot your Mac</li>
-            <li>
-              Open <strong>Audio MIDI Setup</strong> → click <strong>+</strong> →{" "}
-              <strong>Create Multi-Output Device</strong>
-            </li>
-            <li>Check both <strong>BlackHole 2ch</strong> and your speakers/headphones</li>
-            <li>
-              Set this Multi-Output Device as your system output in{" "}
-              <strong>System Settings → Sound</strong>
-            </li>
-          </ol>
-          <p className="mt-2 text-xs text-amber-700">
-            Then refresh this page — the Start Recording button will become active.
+      {/* Browser-compat notice. Tribbie now captures audio entirely in
+          the browser (getDisplayMedia for tab/system audio + getUserMedia
+          for mic), so the only onboarding gate is "are you in a browser
+          that supports it" — not BlackHole, not a local install. If the
+          feature-detect fails we nudge the user to Chrome/Edge; otherwise
+          a tiny hint strip explains what the first-click flow looks like
+          so they're not startled by the Chrome screen-picker dialog. */}
+      {canCaptureInBrowser === false && (
+        <div className="border-b border-amber-300 bg-amber-50 px-6 py-3 text-sm">
+          <p className="font-semibold text-amber-900">
+            This browser can&rsquo;t capture call audio
           </p>
+          <p className="mt-1 text-amber-800">
+            Tribbie uses{" "}
+            <code className="rounded bg-amber-100 px-1 font-mono text-xs">
+              navigator.mediaDevices.getDisplayMedia
+            </code>{" "}
+            to share the audio from the tab your call is in. That API is
+            fully supported in <strong>Chrome</strong> and <strong>Edge</strong> on
+            desktop; Safari audio capture support is still partial. Open this
+            page in Chrome or Edge and the Start recording button will become
+            active.
+          </p>
+        </div>
+      )}
+
+      {canCaptureInBrowser === true && !isRecording && (
+        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-1.5 border-b border-stone-200 bg-stone-50 px-6 py-2 text-xs text-stone-600">
+          <p className="flex-1 min-w-[300px]">
+            <span className="font-medium text-stone-700">How recording works:</span>{" "}
+            click <strong>Start recording</strong>
+            {captureMic ? ", allow microphone access, " : ", "}
+            then pick the tab your Zoom/Meet/Slack call is in and tick{" "}
+            <strong>Share tab audio</strong>.{" "}
+            {captureMic
+              ? "Mic + remote voices mix locally, stream to the cloud for transcription,"
+              : "Remote voices stream to the cloud for transcription (your mic is not captured),"}{" "}
+            and the transcript uploads to Amphoreus when you stop.
+          </p>
+          <label className="flex cursor-pointer items-center gap-2 whitespace-nowrap rounded border border-stone-200 bg-white px-2 py-1 text-stone-700 hover:bg-stone-100">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 accent-stone-700"
+              checked={captureMic}
+              onChange={(e) => toggleCaptureMic(e.target.checked)}
+            />
+            <span>
+              Capture my mic too
+              <span className="ml-1 text-stone-400">
+                {captureMic ? "(headphones recommended)" : "(interviewee-only transcript)"}
+              </span>
+            </span>
+          </label>
         </div>
       )}
 
@@ -608,36 +1065,65 @@ export default function InterviewPrepPage() {
                 </span>
               )}
             </h3>
-            <button
-              onClick={() => setShowCyreneBrief(false)}
-              className="text-xs text-emerald-500 hover:text-emerald-700"
-            >
-              Hide
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleDownloadBrief}
+                className="text-xs text-emerald-700 hover:text-emerald-900 underline-offset-2 hover:underline"
+                title="Download as HTML — open in any browser, save-as-PDF if you want"
+              >
+                Download
+              </button>
+              <button
+                onClick={() => setShowCyreneBrief(false)}
+                className="text-xs text-emerald-500 hover:text-emerald-700"
+              >
+                Hide
+              </button>
+            </div>
           </div>
 
-          <div className="mt-3 grid grid-cols-1 gap-4 text-xs sm:grid-cols-2 lg:grid-cols-3">
-            {/* Interview Questions */}
-            {cyreneBrief.interview_questions?.length > 0 && (
+          <div className="mt-3 flex flex-col gap-4 text-xs">
+            {/* Strategic Themes — 4-8 week directions for the public voice */}
+            {cyreneBrief.strategic_themes?.length > 0 && (
               <div className="rounded-lg border border-emerald-200 bg-white p-3">
-                <h4 className="mb-1.5 font-semibold text-emerald-800">Interview Questions</h4>
-                <ol className="list-decimal space-y-1 pl-4 text-stone-700">
-                  {cyreneBrief.interview_questions.map((q: string, i: number) => (
-                    <li key={i}>{q}</li>
+                <h4 className="mb-1.5 font-semibold text-emerald-800">
+                  Strategic Themes ({cyreneBrief.strategic_themes.length})
+                </h4>
+                <ul className="space-y-2 text-stone-700">
+                  {cyreneBrief.strategic_themes.map((t: any, i: number) => (
+                    <li key={i}>
+                      <div className="font-medium text-emerald-900">{t.theme}</div>
+                      {t.evidence && (
+                        <p className="mt-0.5 text-stone-600">{t.evidence}</p>
+                      )}
+                      {t.arc && (
+                        <p className="mt-0.5 text-stone-500 italic">Arc: {t.arc}</p>
+                      )}
+                    </li>
                   ))}
-                </ol>
+                </ul>
               </div>
             )}
 
-            {/* Content Priorities */}
-            {cyreneBrief.content_priorities?.length > 0 && (
+            {/* Topics to Probe — Tribbie's interview menu */}
+            {cyreneBrief.topics_to_probe?.length > 0 && (
               <div className="rounded-lg border border-emerald-200 bg-white p-3">
-                <h4 className="mb-1.5 font-semibold text-emerald-800">Content Priorities</h4>
-                <ul className="list-disc space-y-1 pl-4 text-stone-700">
-                  {cyreneBrief.content_priorities.map((p: string, i: number) => (
-                    <li key={i}>{p}</li>
+                <h4 className="mb-1.5 font-semibold text-emerald-800">
+                  Topics to Probe ({cyreneBrief.topics_to_probe.length})
+                </h4>
+                <ol className="list-decimal space-y-2 pl-4 text-stone-700">
+                  {cyreneBrief.topics_to_probe.map((p: any, i: number) => (
+                    <li key={i}>
+                      <div className="font-medium text-emerald-900">{p.thread}</div>
+                      {p.why && (
+                        <p className="mt-0.5 text-stone-600">{p.why}</p>
+                      )}
+                      {p.suggested_entry_point && (
+                        <p className="mt-0.5 text-stone-500 italic">Entry: {p.suggested_entry_point}</p>
+                      )}
+                    </li>
                   ))}
-                </ul>
+                </ol>
               </div>
             )}
 
@@ -648,7 +1134,7 @@ export default function InterviewPrepPage() {
                   DM Targets ({cyreneBrief.dm_targets.length})
                 </h4>
                 <div className="space-y-2">
-                  {cyreneBrief.dm_targets.slice(0, 5).map((t: any, i: number) => (
+                  {cyreneBrief.dm_targets.map((t: any, i: number) => (
                     <div key={i} className="text-stone-700">
                       <span className="font-medium">{t.name}</span>
                       {t.company && <span className="text-stone-500"> @ {t.company}</span>}
@@ -661,32 +1147,35 @@ export default function InterviewPrepPage() {
               </div>
             )}
 
-            {/* ICP Exposure */}
-            {cyreneBrief.icp_exposure_assessment && (
-              <div className="rounded-lg border border-emerald-200 bg-white p-3">
-                <h4 className="mb-1.5 font-semibold text-emerald-800">ICP Exposure</h4>
-                <p className="text-stone-700">{cyreneBrief.icp_exposure_assessment}</p>
-              </div>
-            )}
-
-            {/* Stelle Timing */}
-            {cyreneBrief.stelle_timing && (
-              <div className="rounded-lg border border-emerald-200 bg-white p-3">
-                <h4 className="mb-1.5 font-semibold text-emerald-800">Stelle Timing</h4>
-                <p className="text-stone-700">{cyreneBrief.stelle_timing}</p>
-              </div>
-            )}
-
-            {/* Content Avoid */}
-            {cyreneBrief.content_avoid?.length > 0 && (
+            {/* Topics Exhausted — worn-out patterns to steer away from */}
+            {cyreneBrief.topics_exhausted?.length > 0 && (
               <div className="rounded-lg border border-red-200 bg-white p-3">
-                <h4 className="mb-1.5 font-semibold text-red-800">Avoid</h4>
-                <ul className="list-disc space-y-1 pl-4 text-stone-700">
-                  {cyreneBrief.content_avoid.map((a: string, i: number) => (
-                    <li key={i}>{a}</li>
+                <h4 className="mb-1.5 font-semibold text-red-800">
+                  Topics Exhausted ({cyreneBrief.topics_exhausted.length})
+                </h4>
+                <ul className="space-y-1.5 text-stone-700">
+                  {cyreneBrief.topics_exhausted.map((e: any, i: number) => (
+                    <li key={i}>
+                      <div className="font-medium text-red-900">{e.pattern}</div>
+                      {e.evidence && (
+                        <p className="mt-0.5 text-stone-600">{e.evidence}</p>
+                      )}
+                    </li>
                   ))}
                 </ul>
               </div>
+            )}
+
+            {/* Prose — strategic narrative (collapsed-ish) */}
+            {cyreneBrief.prose && (
+              <details className="rounded-lg border border-emerald-200 bg-white p-3">
+                <summary className="cursor-pointer font-semibold text-emerald-800">
+                  Strategic narrative
+                </summary>
+                <p className="mt-2 whitespace-pre-wrap leading-relaxed text-stone-700">
+                  {cyreneBrief.prose}
+                </p>
+              </details>
             )}
           </div>
 
@@ -737,23 +1226,33 @@ export default function InterviewPrepPage() {
 
         {/* Right column: Briefing (top) + Suggestions (bottom) — always both visible */}
         <div className="flex w-96 flex-col xl:w-[420px]">
-          {/* Interview Questions (from Cyrene brief) */}
+          {/* Topics to Probe (from Cyrene brief) — Tribbie's topic menu for this call */}
           <div className="flex h-1/2 flex-col border-b border-stone-200">
             <div className="flex shrink-0 items-center justify-between border-b border-stone-100 bg-stone-50 px-4 py-2">
               <span className="text-xs font-semibold uppercase tracking-wide text-stone-500">
-                Interview Questions
+                Topics to Probe
               </span>
-              {cyreneBrief?.interview_questions && (
+              {cyreneBrief?.topics_to_probe && (
                 <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-600">
-                  {cyreneBrief.interview_questions.length}
+                  {cyreneBrief.topics_to_probe.length}
                 </span>
               )}
             </div>
             <div className="flex-1 overflow-y-auto p-4">
-              {cyreneBrief?.interview_questions?.length > 0 ? (
-                <ol className="list-decimal space-y-2 pl-4 text-sm text-stone-700">
-                  {cyreneBrief.interview_questions.map((q: string, i: number) => (
-                    <li key={i} className="leading-relaxed">{q}</li>
+              {cyreneBrief?.topics_to_probe?.length > 0 ? (
+                <ol className="list-decimal space-y-3 pl-4 text-sm text-stone-700">
+                  {cyreneBrief.topics_to_probe.map((p: any, i: number) => (
+                    <li key={i} className="leading-relaxed">
+                      <div className="font-medium text-stone-900">{p.thread}</div>
+                      {p.why && (
+                        <p className="mt-0.5 text-xs text-stone-500">{p.why}</p>
+                      )}
+                      {p.suggested_entry_point && (
+                        <p className="mt-0.5 text-xs italic text-stone-500">
+                          Entry: {p.suggested_entry_point}
+                        </p>
+                      )}
+                    </li>
                   ))}
                 </ol>
               ) : briefingContent ? (
@@ -762,7 +1261,7 @@ export default function InterviewPrepPage() {
                 </div>
               ) : (
                 <p className="text-sm text-stone-400">
-                  Run a strategic review to generate data-backed interview questions.
+                  Run a strategic review to generate data-backed topics to probe.
                 </p>
               )}
             </div>
