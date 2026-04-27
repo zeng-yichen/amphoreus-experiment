@@ -336,30 +336,55 @@ export const postsApi = {
   // row and every paired draft_feedback row so the draft surfaces in
   // Stelle's / Aglaea's post bundle under the "Rejected" class with
   // the comments that caused the rejection paired line-by-line.
-  // Use after manually deleting the draft from Ordinal.
-  reject: (postId: string, reason?: string) =>
+  //
+  // No reason argument: the rejection's reason IS the comments
+  // operators left on the draft before clicking Reject. Comments
+  // already flow into the bundle via draft_feedback. Capturing a
+  // separate one-line reason is redundant signal-collection — same
+  // channel, two collection points.
+  reject: (postId: string) =>
     apiFetch<{ rejected: true; post_id: string }>(`/api/posts/${postId}/reject`, {
       method: "POST",
-      body: JSON.stringify({ reason: reason ?? null }),
+      body: JSON.stringify({}),
     }),
 
-  // Manually pair a Stelle draft to its published LinkedIn post by
-  // date. ``publishDate`` is a YYYY-MM-DD string interpreted in
-  // America/Los_Angeles (PST/PDT). The server finds the single
-  // linkedin_posts row from this FOC on that LA calendar day and
-  // stamps ``matched_provider_urn`` on the draft — which then lets
-  // post_bundle render DELTA (draft → published). Returns 409 when
-  // zero matches (not scraped yet) or multiple matches (posted
-  // twice same day) so the caller can surface a useful message.
+  // Record the publish date for a Stelle draft, and opportunistically
+  // pair it to the published LinkedIn post if the mirror has it.
+  // ``publishDate`` is YYYY-MM-DD interpreted in America/Los_Angeles.
+  //
+  // Response shape (always 200 unless 409 for ambiguous_date):
+  //   - ``date_set: true`` is always present after a successful save.
+  //   - ``paired: true`` → matching LinkedIn post found in mirror;
+  //     ``matched_*`` fields populated; post_bundle will render
+  //     DELTA (draft → published) on the next read.
+  //   - ``paired: false`` → date saved, pairing deferred. The reason
+  //     is in ``pairing_pending_reason`` (e.g. "post_not_yet_scraped").
+  //     An auto-pair pass picks it up once the scrape catches up.
+  //
+  // 409 is reserved for the one case that needs operator input —
+  // creator posted twice the same PT day ("ambiguous_date"). The
+  // date itself IS saved even when 409 is returned.
   setPublishDate: (postId: string, publishDate: string) =>
-    apiFetch<{
-      paired: true;
-      post_id: string;
-      matched_provider_urn: string;
-      matched_posted_at: string;
-      matched_hook: string;
-      matched_reactions: number;
-    }>(`/api/posts/${postId}/set-publish-date`, {
+    apiFetch<
+      | {
+          date_set: true;
+          paired: true;
+          post_id: string;
+          publish_date: string;
+          matched_provider_urn: string;
+          matched_posted_at: string;
+          matched_hook: string;
+          matched_reactions: number;
+        }
+      | {
+          date_set: true;
+          paired: false;
+          post_id: string;
+          publish_date: string;
+          pairing_pending_reason: string;
+          pairing_pending_message?: string;
+        }
+    >(`/api/posts/${postId}/set-publish-date`, {
       method: "POST",
       body: JSON.stringify({ publish_date: publishDate }),
     }),

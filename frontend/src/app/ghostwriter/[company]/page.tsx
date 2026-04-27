@@ -320,21 +320,39 @@ export default function GhostwriterIDE() {
   //     no stream resume.
   //   - If the client has never had a run: terminal stays empty.
   //
+  // Agent filter (added 2026-04-26): only Stelle-family runs ("stelle",
+  // "stelle-inline-edit") get rehydrated here. The backend's
+  // ``local_runs`` table is shared across pipelines — Tribbie (interview)
+  // and Cyrene (strategic review) write into the same table keyed by
+  // company. Without this guard, the ghostwriter terminal would replay
+  // foreign-agent events; e.g. a Tribbie session that errored on a
+  // missing Cyrene brief would surface "No Cyrene brief for <slug>" in
+  // the ghostwriter chronicles, even though Stelle has no such
+  // dependency. Trimble/Heather hit this exact failure mode on
+  // 2026-04-26.
+  //
   // Previously we cleared the terminal entirely on refresh for any
   // completed/failed run, which lost the Irontomb reactions and
   // submit_draft confirmations the operator wanted to review.
   useEffect(() => {
     let cancelled = false;
+    const isStelleAgent = (a: unknown): boolean =>
+      typeof a === "string" && a.startsWith("stelle");
 
     (async () => {
       // Pick the run to rehydrate: saved "in-flight" job wins, else the
-      // most recent run for this client.
+      // most recent STELLE run for this client. We fetch a small batch
+      // for the fallback (instead of ``limit=1``) so a recent Tribbie
+      // or Cyrene run doesn't shadow the latest Stelle one.
       const savedJobId = localStorage.getItem(activeJobKey);
       let runId: string | null = savedJobId;
       if (!runId) {
         try {
-          const listing = await ghostwriterApi.getRuns(company, 1);
-          runId = listing.runs?.[0]?.id ?? null;
+          const listing = await ghostwriterApi.getRuns(company, 10);
+          const latestStelle = (listing.runs ?? []).find((r) =>
+            isStelleAgent(r?.agent),
+          );
+          runId = latestStelle?.id ?? null;
         } catch {
           return;
         }
@@ -349,6 +367,19 @@ export default function GhostwriterIDE() {
         return;
       }
       if (cancelled) return;
+
+      // Drop stale localStorage that points at a non-Stelle run. This is
+      // the actual fix for the Trimble/Heather symptom — a saved job_id
+      // from a prior Tribbie session would otherwise replay its events
+      // (including MissingCyreneBriefError) every time the user loaded
+      // /ghostwriter/<slug>. Bail without rendering anything; the
+      // terminal stays empty until the user clicks Generate.
+      if (!isStelleAgent(res.run?.agent)) {
+        if (savedJobId === runId) {
+          localStorage.removeItem(activeJobKey);
+        }
+        return;
+      }
 
       const status = res.run?.status;
       const isLive = status !== "completed" && status !== "failed";
@@ -1135,19 +1166,27 @@ function PostsManager({
   // draft_feedback comments so Stelle / Aglaea can learn from the
   // rejection on future runs. Use when the client explicitly turns
   // down a draft (Ordinal "Blocked" or equivalent).
+  //
+  // No separate reason prompt: comments ARE the rejection's reason.
+  // Operators leave inline / post-wide comments on the draft (which
+  // get persisted to draft_feedback), then click Reject. The comments
+  // surface to Stelle's bundle under the REJECTED block paired to the
+  // draft body. Adding a parallel rejection_reason field would be
+  // redundant signal capture — same channel, two collection points.
   async function handleReject(postId: string) {
-    const reason = prompt(
+    const ok = window.confirm(
       "Reject this draft?\n\n" +
-        "The draft + all client comments will be preserved as a negative " +
-        "learning signal for Stelle / Aglaea. The draft will NOT appear " +
-        "as dedup signal on future runs.\n\n" +
-        "Optional reason (press Enter to skip):",
-      ""
+        "Any comments you've left on this draft (inline or post-wide) " +
+        "will be the rejection's learning signal — Stelle and Aglaea " +
+        "see them paired to this draft on future runs. Leave them first " +
+        "if you want them to inform learning.\n\n" +
+        "The draft is preserved (NOT deleted) and won't act as dedup " +
+        "signal — future runs can write on the same topic."
     );
-    if (reason === null) return; // user cancelled
+    if (!ok) return;
     onAction(postId);
     try {
-      await postsApi.reject(postId, reason || undefined);
+      await postsApi.reject(postId);
       onRefresh();
     } finally {
       onAction(null);
@@ -1168,11 +1207,12 @@ function PostsManager({
       timeZone: "America/Los_Angeles",
     }); // "YYYY-MM-DD"
     const input = prompt(
-      "Pair this draft with its published LinkedIn post.\n\n" +
-        "Enter the date the FOC published it (PST/PDT, YYYY-MM-DD).\n" +
-        "The server finds the matching LinkedIn post from their page " +
-        "on that calendar day and links the two.\n\n" +
-        "Requires: the post must already be scraped into our mirror.",
+      "Record the date this draft was published on LinkedIn.\n\n" +
+        "Enter the PST/PDT calendar date (YYYY-MM-DD).\n" +
+        "The date is saved immediately. If the published LinkedIn " +
+        "post is already in our mirror, we pair them now so the " +
+        "draft → published diff shows up in Stelle's next run. " +
+        "Otherwise pairing happens automatically once we scrape it.",
       todayLA,
     );
     if (!input) return;
@@ -1184,17 +1224,28 @@ function PostsManager({
     onAction(postId);
     try {
       const r = await postsApi.setPublishDate(postId, trimmed);
-      alert(
-        `Paired.\n\n` +
-          `Published: ${(r.matched_posted_at || "").slice(0, 16)}\n` +
-          `Reactions: ${r.matched_reactions}\n` +
-          `Hook: "${r.matched_hook}"`,
-      );
+      if (r.paired) {
+        alert(
+          `Paired.\n\n` +
+            `Published: ${(r.matched_posted_at || "").slice(0, 16)}\n` +
+            `Reactions: ${r.matched_reactions}\n` +
+            `Hook: "${r.matched_hook}"`,
+        );
+      } else {
+        // Date saved; pairing is deferred until the scrape catches up
+        // (or the operator fixes the underlying reason). Tell the
+        // operator the date stuck and what's blocking auto-pair.
+        const msg =
+          r.pairing_pending_message ||
+          `Pairing pending (${r.pairing_pending_reason}).`;
+        alert(`Date saved (${r.publish_date}).\n\n${msg}`);
+      }
       onRefresh();
     } catch (err: any) {
-      // Server returns 409 for zero-match / multi-match — surface the
-      // detail message so the operator knows whether to retry after
-      // the next scrape or disambiguate.
+      // 409 is now reserved for ambiguous_date (creator posted twice
+      // the same PT day). The date IS saved on the server even when
+      // this fires — re-POSTing after picking a specific post id
+      // will re-run pairing without resaving the date.
       const detail =
         err?.body?.detail ?? err?.message ?? "Pairing failed.";
       alert(
