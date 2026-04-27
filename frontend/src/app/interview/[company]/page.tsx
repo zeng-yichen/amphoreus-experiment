@@ -246,6 +246,7 @@ export default function InterviewPrepPage() {
       : new Date().toLocaleDateString();
     const isoDate = (cyreneBrief._computed_at || new Date().toISOString()).slice(0, 10);
 
+    const diagnosis = cyreneBrief.current_strategy_diagnosis || null;
     const themes = cyreneBrief.strategic_themes || [];
     const probes = cyreneBrief.topics_to_probe || [];
     const exhausted = cyreneBrief.topics_exhausted || [];
@@ -253,11 +254,45 @@ export default function InterviewPrepPage() {
     const nextTrigger = cyreneBrief.next_run_trigger || {};
     const prose = cyreneBrief.prose || "";
 
+    const diagnosisHtml = diagnosis
+      ? (() => {
+          const w = diagnosis.what_is_working || [];
+          const b = diagnosis.what_is_broken || [];
+          const s = diagnosis.blind_spots || [];
+          const block = (label: string, klass: "positive" | "negative" | "warning", items: any[], renderer: (x: any) => string) =>
+            items.length === 0
+              ? ""
+              : `<div class="diag-block ${klass}"><h3 class="diag-label">${esc(label)} <span class="count">(${items.length})</span></h3><ul>${items.map(renderer).join("")}</ul></div>`;
+          return [
+            block(
+              "What's working",
+              "positive",
+              w,
+              (x) => `<li class="item"><div class="item-title positive">${esc(x.pattern)}</div>${x.evidence ? `<p class="item-body">${esc(x.evidence)}</p>` : ""}</li>`,
+            ),
+            block(
+              "What's broken",
+              "negative",
+              b,
+              (x) => `<li class="item"><div class="item-title negative">${esc(x.pattern)}</div>${x.evidence ? `<p class="item-body">${esc(x.evidence)}</p>` : ""}${x.consequence ? `<p class="item-italic">Consequence: ${esc(x.consequence)}</p>` : ""}</li>`,
+            ),
+            block(
+              "Blind spots",
+              "warning",
+              s,
+              (x) => `<li class="item"><div class="item-title warning">${esc(x.observation)}</div>${x.evidence ? `<p class="item-body">${esc(x.evidence)}</p>` : ""}</li>`,
+            ),
+          ].join("");
+        })()
+      : "";
+
     const themesHtml = themes
       .map(
         (t: any) => `
       <li class="item">
-        <div class="item-title positive">${esc(t.theme)}</div>
+        <div class="item-title positive">${esc(t.theme)}${
+          t.addresses ? ` <span class="addr-tag">↳ ${esc(t.addresses)}</span>` : ""
+        }</div>
         ${t.evidence ? `<p class="item-body">${esc(t.evidence)}</p>` : ""}
         ${t.arc ? `<p class="item-italic">Arc: ${esc(t.arc)}</p>` : ""}
       </li>`,
@@ -304,6 +339,8 @@ export default function InterviewPrepPage() {
       .join("");
 
     const sections: string[] = [];
+    if (diagnosisHtml)
+      sections.push(`<section class="spine"><h2>Current strategy — diagnosis</h2><div class="diag-grid">${diagnosisHtml}</div></section>`);
     if (themes.length)
       sections.push(`<section><h2>Strategic Themes <span class="count">(${themes.length})</span></h2><ul>${themesHtml}</ul></section>`);
     if (probes.length)
@@ -342,6 +379,9 @@ export default function InterviewPrepPage() {
     --red-200: #fecaca;
     --red-800: #991b1b;
     --red-900: #7f1d1d;
+    --amber-200: #fde68a;
+    --amber-800: #92400e;
+    --amber-900: #78350f;
     --stone-50: #fafaf9;
     --stone-200: #e7e5e4;
     --stone-400: #a8a29e;
@@ -381,6 +421,32 @@ export default function InterviewPrepPage() {
   .item-title { font-weight: 500; margin-bottom: 2px; }
   .item-title.positive { color: var(--emerald-900); }
   .item-title.negative { color: var(--red-900); }
+  .item-title.warning { color: var(--amber-900); }
+  .addr-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--emerald-50);
+    color: var(--emerald-600);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 10px;
+    font-weight: 400;
+  }
+  section.spine { border-color: var(--emerald-600); border-width: 2px; }
+  .diag-grid { display: flex; flex-direction: column; gap: 12px; }
+  .diag-block { padding-top: 4px; }
+  .diag-block + .diag-block { border-top: 1px solid var(--stone-200); padding-top: 12px; }
+  .diag-label {
+    margin: 0 0 6px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .diag-block.positive .diag-label { color: var(--emerald-600); }
+  .diag-block.negative .diag-label { color: var(--red-800); }
+  .diag-block.warning  .diag-label { color: var(--amber-800); }
   .item-title .num { color: var(--stone-400); margin-right: 4px; }
   .item-body { margin: 2px 0; color: var(--stone-600); font-size: 13px; }
   .item-italic { margin: 2px 0; font-style: italic; color: var(--stone-500); font-size: 13px; }
@@ -1083,6 +1149,63 @@ export default function InterviewPrepPage() {
           </div>
 
           <div className="mt-3 flex flex-col gap-4 text-xs">
+            {/* Current Strategy Diagnosis — the spine of the brief */}
+            {cyreneBrief.current_strategy_diagnosis && (
+              <div className="rounded-lg border border-emerald-300 bg-white p-3">
+                <h4 className="mb-2 text-sm font-semibold text-emerald-900">
+                  Current strategy — diagnosis
+                </h4>
+                {cyreneBrief.current_strategy_diagnosis.what_is_working?.length > 0 && (
+                  <div className="mb-3">
+                    <h5 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+                      What's working ({cyreneBrief.current_strategy_diagnosis.what_is_working.length})
+                    </h5>
+                    <ul className="space-y-1.5 text-stone-700">
+                      {cyreneBrief.current_strategy_diagnosis.what_is_working.map((w: any, i: number) => (
+                        <li key={i}>
+                          <div className="font-medium text-emerald-900">{w.pattern}</div>
+                          {w.evidence && <p className="mt-0.5 text-stone-600">{w.evidence}</p>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {cyreneBrief.current_strategy_diagnosis.what_is_broken?.length > 0 && (
+                  <div className="mb-3">
+                    <h5 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-red-700">
+                      What's broken ({cyreneBrief.current_strategy_diagnosis.what_is_broken.length})
+                    </h5>
+                    <ul className="space-y-1.5 text-stone-700">
+                      {cyreneBrief.current_strategy_diagnosis.what_is_broken.map((b: any, i: number) => (
+                        <li key={i}>
+                          <div className="font-medium text-red-900">{b.pattern}</div>
+                          {b.evidence && <p className="mt-0.5 text-stone-600">{b.evidence}</p>}
+                          {b.consequence && (
+                            <p className="mt-0.5 text-stone-500 italic">Consequence: {b.consequence}</p>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {cyreneBrief.current_strategy_diagnosis.blind_spots?.length > 0 && (
+                  <div>
+                    <h5 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-700">
+                      Blind spots ({cyreneBrief.current_strategy_diagnosis.blind_spots.length})
+                    </h5>
+                    <ul className="space-y-1.5 text-stone-700">
+                      {cyreneBrief.current_strategy_diagnosis.blind_spots.map((s: any, i: number) => (
+                        <li key={i}>
+                          <div className="font-medium text-amber-900">{s.observation}</div>
+                          {s.evidence && <p className="mt-0.5 text-stone-600">{s.evidence}</p>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Strategic Themes — 4-8 week directions for the public voice */}
             {cyreneBrief.strategic_themes?.length > 0 && (
               <div className="rounded-lg border border-emerald-200 bg-white p-3">
@@ -1092,7 +1215,14 @@ export default function InterviewPrepPage() {
                 <ul className="space-y-2 text-stone-700">
                   {cyreneBrief.strategic_themes.map((t: any, i: number) => (
                     <li key={i}>
-                      <div className="font-medium text-emerald-900">{t.theme}</div>
+                      <div className="font-medium text-emerald-900">
+                        {t.theme}
+                        {t.addresses && (
+                          <span className="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-normal text-emerald-700">
+                            ↳ {t.addresses}
+                          </span>
+                        )}
+                      </div>
                       {t.evidence && (
                         <p className="mt-0.5 text-stone-600">{t.evidence}</p>
                       )}

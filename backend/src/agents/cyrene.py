@@ -1147,10 +1147,15 @@ _TOOLS: list[dict[str, Any]] = [
             "raw transcripts at generation time. Don't write this as\n"
             "instructions to Stelle.\n"
             "\n"
-            "Five structured fields + a prose narrative:\n"
+            "Six structured fields + a prose narrative:\n"
+            "  - ``current_strategy_diagnosis``: THE SPINE. Three buckets —\n"
+            "    what_is_working, what_is_broken, blind_spots — each\n"
+            "    cited with concrete evidence. This is the answer to the\n"
+            "    core question. Themes / probes below are downstream.\n"
             "  - ``strategic_themes``: the 3-5 directions this client's\n"
             "    public voice should develop over the next 4-8 weeks. Each\n"
-            "    tied to engagement / ICP-exposure evidence.\n"
+            "    cites which diagnosis bucket it addresses (`addresses`\n"
+            "    field) and is tied to engagement / ICP-exposure evidence.\n"
             "  - ``topics_to_probe``: threads the operator should pull on\n"
             "    during the next Tribbie call. Grounded in a specific\n"
             "    engagement signal, a question from a past post's comment\n"
@@ -1173,6 +1178,84 @@ _TOOLS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
+                "current_strategy_diagnosis": {
+                    "type": "object",
+                    "description": (
+                        "THE SPINE OF THE BRIEF. Explicit articulation of "
+                        "what's working, what's broken, and what's missing "
+                        "in this client's current LinkedIn strategy. The "
+                        "answer to the core question. Themes / probes / "
+                        "exhausted topics below are downstream of this. "
+                        "Every entry cites concrete evidence (observation, "
+                        "engager, trend number, transcript quote). For "
+                        "first-run-for-this-client cases (no prior "
+                        "strategy yet), what_is_broken can be empty; "
+                        "what_is_working and blind_spots should still "
+                        "be populated from voice / audience / ICP signals."
+                    ),
+                    "properties": {
+                        "what_is_working": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "pattern":  {
+                                        "type": "string",
+                                        "description": "The pattern / angle / structure / cadence that's landing for this client.",
+                                    },
+                                    "evidence": {
+                                        "type": "string",
+                                        "description": "Concrete data: post IDs, engagement numbers, ICP-scored reactor counts, comment quotes. NOT vibes.",
+                                    },
+                                },
+                                "required": ["pattern", "evidence"],
+                            },
+                            "description": "1-3 patterns that are working. Concrete, evidence-grounded.",
+                        },
+                        "what_is_broken": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "pattern": {
+                                        "type": "string",
+                                        "description": "The pattern / approach / habit that's underperforming.",
+                                    },
+                                    "evidence": {
+                                        "type": "string",
+                                        "description": "Concrete data showing the failure: post IDs, declining trend numbers, off-ICP engagement, transcript moments the strategy isn't reflecting.",
+                                    },
+                                    "consequence": {
+                                        "type": "string",
+                                        "description": "What this is costing — missed pipeline, off-ICP engagement, audience fatigue, voice drift, etc.",
+                                    },
+                                },
+                                "required": ["pattern", "evidence"],
+                            },
+                            "description": "0-3 patterns that are broken. Empty only on first-run-for-this-client when there's no prior strategy yet.",
+                        },
+                        "blind_spots": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "observation": {
+                                        "type": "string",
+                                        "description": "What the strategy is missing entirely — a topic, an audience segment, a structural element, a story area the transcripts surface but no post has touched.",
+                                    },
+                                    "evidence": {
+                                        "type": "string",
+                                        "description": "What in the data points to this gap — comments asking about X, ICP segment with high engagement on competitor posts, transcript quotes never converted into posts, etc.",
+                                    },
+                                },
+                                "required": ["observation", "evidence"],
+                            },
+                            "description": "0-2 things the current strategy is missing entirely. Forward-looking gaps the diagnosis surfaces.",
+                        },
+                    },
+                    "required": ["what_is_working", "what_is_broken", "blind_spots"],
+                },
                 "strategic_themes": {
                     "type": "array",
                     "items": {
@@ -1181,6 +1264,17 @@ _TOOLS: list[dict[str, Any]] = [
                             "theme": {
                                 "type": "string",
                                 "description": "Short label — 4-10 words for the direction (e.g. 'from product-features to industry-scarring anecdotes').",
+                            },
+                            "addresses": {
+                                "type": "string",
+                                "description": (
+                                    "Which diagnosis bucket this theme addresses. "
+                                    "Format: 'what_is_broken[0]' / 'what_is_working[1]' / "
+                                    "'blind_spots[0]'. Makes the critique → fix link "
+                                    "explicit so the operator can read the brief as "
+                                    "diagnosis → prescription, not as freestanding "
+                                    "creative re-direction."
+                                ),
                             },
                             "evidence": {
                                 "type": "string",
@@ -1191,13 +1285,14 @@ _TOOLS: list[dict[str, Any]] = [
                                 "description": "How this theme should develop over the next 4-8 weeks. Where does it start, where does it go?",
                             },
                         },
-                        "required": ["theme", "evidence"],
+                        "required": ["theme", "addresses", "evidence"],
                     },
                     "description": (
                         "The 3-5 directions this FOC's public voice should "
-                        "develop toward over the coming weeks. Not tactics, "
-                        "not next-post instructions — strategic direction. "
-                        "Each grounded in real data, not vibes."
+                        "develop toward over the coming weeks. Each MUST "
+                        "cite which diagnosis bucket it addresses. Not "
+                        "tactics, not next-post instructions — strategic "
+                        "direction. Each grounded in real data, not vibes."
                     ),
                 },
                 "topics_to_probe": {
@@ -1291,6 +1386,7 @@ _TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": [
+                "current_strategy_diagnosis",
                 "strategic_themes",
                 "topics_to_probe",
                 "next_run_trigger",
@@ -1311,6 +1407,35 @@ operation. You operate ABOVE the post generation pipeline — your job is \
 to make every successive cycle of content creation more effective than \
 the last by studying what happened, identifying what to do next, and \
 producing a strategic brief that informs the entire operation.
+
+## Core question
+
+Every Cyrene run answers exactly one question:
+
+**What is wrong with this client's current content strategy, and what \
+specifically should change?**
+
+Every tool you call, every observation you read, every transcript you \
+query, every brief you cite from history — they all serve answering \
+this question. Your output is the answer. The brief's structured \
+fields are the *shape* of the answer; this question is its *spine*.
+
+If you find yourself proposing themes without first articulating \
+what's broken, you've drifted. Re-anchor: diagnose, then prescribe.
+
+Hard rule: every claim about what's wrong, and every claim about \
+what should change, must trace to a specific observation, a specific \
+engager, a specific trend number, or a specific transcript quote. If \
+you can't ground a critique in concrete evidence, leave it out — \
+don't fabricate to fill a field.
+
+First-run-for-this-client edge case: when no current strategy exists \
+yet (this is the first Cyrene run for this client), the question \
+reframes to *"given what the data shows about voice, audience, and \
+ICP, what should the starting strategy be — and what should we \
+explicitly NOT do?"* The "should not" half preserves the diagnostic \
+posture even on day zero. ``what_is_broken`` may be empty in this \
+case; ``what_is_working`` and ``blind_spots`` should not be.
 
 ## Your objective
 
@@ -1390,65 +1515,45 @@ when the client mentions them on interview calls, which are \
 transcribed into `transcripts/`. `query_transcript_inventory` with \
 `read_filename` returns a transcript's full text.
 
-## How to work
+## Tools to answer the core question
 
-Study the data across multiple tools before forming recommendations. \
-A good Cyrene run takes 15-30 turns. You are forming a comprehensive \
-strategy from evidence, not generating a quick summary.
+Study the data across multiple tools before forming the answer. A \
+good Cyrene run takes 15-30 turns. You are answering the core \
+question from evidence, not generating a quick summary.
 
 No hand-engineered strategy frameworks. No "post 3x/week." No \
-"rotate between TOFU/MOFU/BOFU." Read the data, see what's working, \
-see what's not, and form your own view.
+"rotate between TOFU/MOFU/BOFU." No off-the-shelf failure-mode \
+taxonomies. Read the data, see what's working, see what's broken, \
+see what's missing, form your own view.
 
-## Output: strategic direction, not post instructions
+## Structured shape of the answer
 
-Your brief has two downstream consumers. **Stelle is not one of them.** \
-Stelle extracts content from raw transcripts at generation time — she \
-never reads this brief. Do not write it as instructions for the next \
-batch of posts.
+Two downstream consumers read your brief: the **operator** (long-term \
+planning of this client's LinkedIn journey) and **Tribbie** (next \
+interview prep). **Stelle does NOT consume it** — she extracts \
+content from raw transcripts at generation time. Don't write the \
+brief as instructions to Stelle.
 
-  1. **The operator** — the person running this client's long-term
-     LinkedIn presence. They use the brief to plan the client's
-     journey over weeks and months: which directions to steer the
-     public voice, which topics have run their course, which prospects
-     warrant direct outreach now.
+`submit_brief` takes structured fields documented in the tool schema. \
+The four most important:
 
-  2. **Tribbie** — the interview agent who runs the next client call.
-     She uses the brief as her topic menu: the threads to pull on, the
-     engagement signals to surface to the client, the gaps in the
-     transcript corpus that need filling. She phrases the questions
-     in-session; the brief gives her the targets.
-
-So `submit_brief` takes five structured fields + a prose narrative:
-
-  - ``strategic_themes`` (3-5): directions this FOC's public voice
-    should develop toward over the next 4-8 weeks. Each with
-    concrete engagement / ICP-exposure evidence and an arc describing
-    where the theme starts and where it goes. Not tactics, not
-    next-post instructions — strategic direction.
-  - ``topics_to_probe`` (5-12): threads Tribbie pulls on in the next
-    interview. Each grounded in a specific engagement signal, a comment
-    on a past post, or a visible gap in the transcript corpus. Include
-    a suggested entry point when you have one.
-  - ``topics_exhausted`` (0-5): patterns the client has already posted
-    to diminishing returns. Cite specific post IDs or dates plus the
-    engagement trajectory. Leave empty if you don't have post-level
-    evidence — don't invent.
-  - ``dm_targets`` (3-8): warm prospects the client should DM, with
-    the engagement signal that justifies reaching out.
-  - ``next_run_trigger``: when Cyrene should run again.
-  - ``prose`` (400-1200 words): strategic narrative. Where is this
-    client's LinkedIn journey going? What's shifting in who engages?
-    What's the arc over the past month? Context + reasoning — the
-    structured fields above are the actionable output, prose is the
-    explanation that ties them together.
-
-**Hard rule: no invented direction.** Every ``strategic_themes``,
-``topics_to_probe``, and ``topics_exhausted`` entry cites concrete
-evidence from your tool calls — a specific observation, a specific
-engager, a specific trend number, a specific transcript quote. If you
-don't have data to ground a theme or probe, leave it out rather than
-fabricating one.
+  - ``current_strategy_diagnosis`` — the answer to the core question, \
+    in three buckets: ``what_is_working``, ``what_is_broken``, \
+    ``blind_spots``. Every entry cites concrete evidence. **This is \
+    the spine of the brief.** Themes / probes / exhausted topics \
+    below are downstream of it.
+  - ``strategic_themes`` (3-5) — directions to develop the public \
+    voice. Each theme cites which diagnosis bucket it addresses \
+    (`addresses` field: e.g. "what_is_broken[0]"). Critique → fix \
+    link is explicit. Not tactics, not next-post instructions — \
+    strategic direction over 4-8 weeks.
+  - ``topics_to_probe`` (5-12) — threads for Tribbie's next \
+    interview, derived from the diagnosis (gaps to fill, blind \
+    spots to surface, working patterns to extend).
+  - ``topics_exhausted`` (0-5), ``dm_targets`` (3-8), \
+    ``next_run_trigger``, ``prose`` (400-1200 words) — supporting \
+    structure. ``prose`` ties the diagnosis to the prescription \
+    in narrative form.
 
 When ready, call submit_brief.
 
