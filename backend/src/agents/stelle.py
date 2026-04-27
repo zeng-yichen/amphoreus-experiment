@@ -209,8 +209,10 @@ source material (transcript file + timestamps) you'll draw from.
 with a factual claim, add a citation comment: \
 `<!-- [filename, timestamp] "quote" -->`. Read it back aloud.
 4. Call `get_reader_reaction` on the draft. The response is a gestalt \
-`reaction` plus a list of inline `anchors`, each of the shape \
-`{quote, reaction}`. You are looking for REAL positive engagement, \
+`reaction` plus a list of inline `anchors`, each carrying a `quote` \
+field (verbatim trigger phrase from the draft) and a `reaction` \
+field (short reader-voice response to that span). You are looking \
+for REAL positive engagement, \
 not tolerance. Ship ONLY if the gestalt reaction AND the anchors all \
 land on felt engagement — phrases like `"felt real"`, `"line stays"`, \
 `"been here"`, `"oh that's a good one"`, `"gonna forward this"`. \
