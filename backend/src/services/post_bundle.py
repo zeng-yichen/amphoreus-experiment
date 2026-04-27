@@ -506,18 +506,6 @@ def build_post_bundle_with_stats(
     parts.append("")
     parts.append("=== END POSTS ===")
 
-    # NOTE (2026-04-25): Phainon exemplar injection has been excised
-    # from the Stelle pipeline. The predictor (V2a reward) calibrates
-    # to +Spearman on only 1 of 3 measured creators, and the generator
-    # samples from a hand-curated ``_ANGLES`` list (BL-violating). Until
-    # we (a) clean promotional pollution from the corpus, (b) build a
-    # held-out predictor harness with per-creator + cohort Spearman,
-    # and (c) drop the angle taxonomy for model-derived diversity,
-    # consuming Phainon's output here is theater. The cron + table are
-    # preserved upstream for the calibration work; this consumer is
-    # disabled. See ``services/phainon_reward.py`` for the predictor
-    # research target.
-
     # Structured stats log — grep-friendly so a downstream audit
     # script (``neighbor_signal_audit``) can aggregate bundle builds
     # without parsing free-text log lines. Keys match the returned

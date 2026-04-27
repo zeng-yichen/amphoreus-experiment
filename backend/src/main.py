@@ -201,18 +201,6 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Failed to start amphoreus_linkedin_scrape cron (non-fatal).")
 
-    # Phainon exemplar prototype — opt-in via ENABLE_PHAINON_PROTOTYPE.
-    # Weekly (Sunday 23:00 UTC by default) generation of N candidate
-    # drafts per FOC in the 6-creator prototype roster, optionally
-    # scored by the V2a reward function (only for creators where
-    # ground-truth-era Spearman ≥ 0.4). Top exemplars surface in
-    # Stelle's post bundle. See services/phainon.py.
-    try:
-        from backend.src.services.phainon_cron import start_phainon_cron
-        start_phainon_cron()
-    except Exception:
-        logger.exception("Failed to start phainon cron (non-fatal).")
-
     yield
 
     # Graceful shutdown. Only call stop_sync_loop if the module was
@@ -242,11 +230,6 @@ async def lifespan(app: FastAPI):
             stop_amphoreus_linkedin_scrape_cron,
         )
         stop_amphoreus_linkedin_scrape_cron()
-    except Exception:
-        pass
-    try:
-        from backend.src.services.phainon_cron import stop_phainon_cron
-        stop_phainon_cron()
     except Exception:
         pass
     try:
