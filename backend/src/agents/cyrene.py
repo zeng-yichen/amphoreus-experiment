@@ -147,10 +147,22 @@ def _load_cyrene_observations(company: str) -> list[dict]:
         )
         return []
 
-    # Pull this creator's published history — last 180 days is a wide-
-    # enough window for strategic review (Cyrene looks at trends over
-    # months, not just the last 3 weeks Stelle calibrates on).
-    since_iso = (_dt.now(_tz.utc) - _td(days=180)).isoformat()
+    # Pull this creator's published history. For prototype clients we
+    # know the agency-start date; the lookback narrows to that boundary
+    # so pre-Virio content (different voice era, more promotional)
+    # doesn't pollute Cyrene's diagnosis. For non-prototype clients,
+    # default 180d is a wide-enough window for strategic trend reading.
+    # Same agency-start helper Stelle's post_bundle uses, just with a
+    # larger default — Cyrene wants months, Stelle wants 3 weeks.
+    from backend.src.services.post_bundle import _effective_lookback_days
+    lookback_days = _effective_lookback_days(user_id, default_days=180)
+    since_iso = (_dt.now(_tz.utc) - _td(days=lookback_days)).isoformat()
+    if lookback_days != 180:
+        logger.info(
+            "[Cyrene] %s: agency-start lookback active — %dd window "
+            "(vs 180d default) for observation rebuild",
+            username, lookback_days,
+        )
     try:
         lp_rows = (
             sb.table("linkedin_posts")

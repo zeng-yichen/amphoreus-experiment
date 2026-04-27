@@ -115,29 +115,39 @@ _AGENCY_START_DATE_BY_USER_ID: dict[str, str] = {
 }
 
 
-def _effective_lookback_days(user_id: Optional[str]) -> int:
+def _effective_lookback_days(
+    user_id: Optional[str],
+    default_days: int = _LINKEDIN_WINDOW_DAYS,
+) -> int:
     """Days of LinkedIn-post lookback for a given FOC.
 
     Returns the days-since-agency-start when this FOC has a known
     start date in ``_AGENCY_START_DATE_BY_USER_ID``; otherwise returns
-    the 21-day default. Used by the LinkedIn-post fetch to widen the
-    window for prototype clients so Stelle sees their full Virio-era
-    voice, not just the trailing 3 weeks.
+    ``default_days``.
+
+    ``default_days`` lets callers tune what "no agency-start known"
+    means in their context. Stelle's bundle wants a tight 21-day
+    voice-era window when the agency-start isn't set (= the module
+    constant default). Cyrene's strategic review wants 180d for trend
+    analysis when the agency-start isn't set (passes default_days=180).
+
+    For users who ARE in the dict, this returns the same window
+    regardless of caller — agency-start is the right horizon for
+    every consumer that wants Virio-era-only data. Guard rail: never
+    shorter than the module's primary 21d, never longer than 365d
+    (clamps stale config from blowing up bundles after a churn).
     """
     if not user_id:
-        return _LINKEDIN_WINDOW_DAYS
+        return default_days
     start_iso = _AGENCY_START_DATE_BY_USER_ID.get(user_id)
     if not start_iso:
-        return _LINKEDIN_WINDOW_DAYS
+        return default_days
     try:
         start_dt = datetime.fromisoformat(start_iso).replace(tzinfo=timezone.utc)
         days = (datetime.now(timezone.utc) - start_dt).days
-        # Guard rails: never shorter than the default, never absurdly
-        # long (cap at 1 year so a stale config can't blow up the
-        # bundle if someone leaves a date set after a client churns).
         return max(_LINKEDIN_WINDOW_DAYS, min(days, 365))
     except Exception:
-        return _LINKEDIN_WINDOW_DAYS
+        return default_days
 _MAX_COMMENT_BODY           = 600    # char cap per comment
 _MAX_SELECTED_TEXT          = 200    # char cap per inline anchor
 _MAX_POST_BODY_CHARS        = 4000   # char cap per post body in bundle
