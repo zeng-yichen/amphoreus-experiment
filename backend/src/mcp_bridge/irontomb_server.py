@@ -133,8 +133,10 @@ server.register(
     name="submit_reaction",
     description=(
         "Submit your reader reaction. Ends the session.\n"
-        "  reaction — under-15-word reader-voice reaction\n"
-        "  anchor   — where in the post you reacted"
+        "  reaction — under-15-word GESTALT reader-voice reaction "
+        "(net effect after reading the whole draft)\n"
+        "  anchors  — list of {quote, reaction} for each reader-state-"
+        "change moment. At least 1 required."
     ),
     input_schema={
         "type": "object",
@@ -142,23 +144,52 @@ server.register(
             "reaction": {
                 "type": "string",
                 "description": (
-                    "Your raw, visceral, under-15-word reaction as a "
-                    "LinkedIn reader. Not a critique. Not writing-teacher "
-                    "vocabulary. The thing that actually flashes through "
-                    "your head while scrolling."
+                    "Your raw, visceral, under-15-word GESTALT reaction "
+                    "as a LinkedIn reader — the thing that flashes "
+                    "through your head AFTER reading the last line. "
+                    "Captures the post's net effect (accumulated "
+                    "irritation, lingering felt-ness, the moment it "
+                    "died). Not a critique. Not writing-teacher "
+                    "vocabulary."
                 ),
             },
-            "anchor": {
-                "type": "string",
+            "anchors": {
+                "type": "array",
+                "minItems": 1,
                 "description": (
-                    "Where in the post you reacted. Quote 3-5 words "
-                    "from the post, OR \"paragraph N\", OR \"at the "
-                    "end\", OR \"hook\", OR \"never got past the first "
-                    "line\"."
+                    "Reader-state-change moments as you read. At least "
+                    "one anchor required — surface the specific phrase "
+                    "where your felt-state shifted (positive OR "
+                    "negative). For drafts with multiple shifts, emit "
+                    "one anchor per shift in reading order. For drafts "
+                    "that read uniformly without specific moments "
+                    "standing out, anchor on the line that best "
+                    "represents the overall texture."
                 ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "quote": {
+                            "type": "string",
+                            "description": (
+                                "3-15 words verbatim from the draft — "
+                                "the phrase that triggered the shift."
+                            ),
+                        },
+                        "reaction": {
+                            "type": "string",
+                            "description": (
+                                "Your under-15-word reader-voice "
+                                "reaction to that specific moment. "
+                                "Same register as the gestalt reaction."
+                            ),
+                        },
+                    },
+                    "required": ["quote", "reaction"],
+                },
             },
         },
-        "required": ["reaction", "anchor"],
+        "required": ["reaction", "anchors"],
     },
     # submit_reaction just echoes back — the caller parses it from the output
     handler=lambda args: json.dumps({"submitted": True, **args}),
