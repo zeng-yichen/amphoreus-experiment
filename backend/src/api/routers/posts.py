@@ -209,12 +209,55 @@ async def list_posts(company: str | None = None, limit: int = 50):
     else:
         posts = list_local_posts(company=company_uuid, limit=limit)
 
-    # (Semantic-match verdict enrichment removed 2026-04-23. The v1
-    # ``draft_publish_matches`` table is frozen; pair state is now
-    # carried directly on ``local_posts`` via ``matched_provider_urn``
-    # / ``match_method`` / ``matched_at`` / ``match_similarity``, which
-    # ``_LOCAL_POSTS_COLS`` already selects. The frontend Posts tab
-    # reads those columns off ``post.*`` directly — no separate join.)
+    # Enrich paired drafts with the published post body + engagement
+    # so the frontend can show the published version inline next to
+    # the draft. Pair state itself is carried on the local_posts row
+    # via matched_provider_urn / match_method / matched_at /
+    # match_similarity (already in _LOCAL_POSTS_COLS); this just
+    # joins the published body so the UI doesn't need a second fetch.
+    paired_urns = [
+        (p.get("matched_provider_urn") or "").strip()
+        for p in posts
+        if (p.get("matched_provider_urn") or "").strip()
+    ]
+    if paired_urns:
+        try:
+            from backend.src.db.amphoreus_supabase import _get_client, is_configured
+            if is_configured():
+                sb = _get_client()
+                if sb is not None:
+                    pub_rows = (
+                        sb.table("linkedin_posts")
+                          .select(
+                              "provider_urn, post_text, posted_at, "
+                              "total_reactions, total_comments, total_reposts"
+                          )
+                          .in_("provider_urn", paired_urns)
+                          .execute()
+                          .data
+                        or []
+                    )
+                    pub_by_urn = {
+                        (r.get("provider_urn") or ""): r for r in pub_rows
+                    }
+                    for p in posts:
+                        urn = (p.get("matched_provider_urn") or "").strip()
+                        if not urn:
+                            continue
+                        pub = pub_by_urn.get(urn)
+                        if not pub:
+                            continue
+                        p["published_post_text"]  = pub.get("post_text") or ""
+                        p["published_posted_at"]  = pub.get("posted_at") or ""
+                        p["published_reactions"]  = pub.get("total_reactions") or 0
+                        p["published_comments"]   = pub.get("total_comments") or 0
+                        p["published_reposts"]    = pub.get("total_reposts") or 0
+        except Exception as exc:
+            logger.debug(
+                "[posts.list] published-body enrichment failed (non-fatal): %s",
+                exc,
+            )
+
     return {"posts": posts}
 
 
@@ -342,218 +385,25 @@ async def reject_post(post_id: str, request: Request, body: RejectRequest | None
 
 
 # ---------------------------------------------------------------------------
-# Manual draft ↔ published pairing
+# Manual draft ↔ published pairing — REMOVED 2026-04-28
 # ---------------------------------------------------------------------------
-
-class SetPublishDateRequest(BaseModel):
-    """Operator tells Amphoreus when (in PST) a draft was published on
-    LinkedIn. We use that calendar day to find the corresponding
-    ``linkedin_posts`` row from the same creator and stamp
-    ``matched_provider_urn`` on the draft — exactly the same column set
-    the semantic match-back worker writes to, just with
-    ``match_method='manual_date'``. The post bundle then renders a
-    ``DELTA (draft → published)`` block inline with the draft, which
-    is the signal Stelle/Cyrene/Aglaea actually need to see what the
-    client changed between our draft and their published version.
-    """
-    publish_date: str = Field(
-        ...,
-        description=(
-            "Calendar date in America/Los_Angeles local time (PST or PDT "
-            "as applicable), formatted YYYY-MM-DD. The server converts "
-            "to a UTC instant-range covering the whole LA day."
-        ),
-        pattern=r"^\d{4}-\d{2}-\d{2}$",
-    )
-
-
-@router.post("/{post_id}/set-publish-date")
-async def set_publish_date(post_id: str, req: SetPublishDateRequest):
-    """Pair a Stelle draft to its published LinkedIn post by date.
-
-    Operator flow: client ships a post → operator opens the Amphoreus
-    Posts tab → clicks "Set publish date" on the Stelle draft → picks
-    the calendar day (LA local) → server finds the matching LinkedIn
-    post from this FOC's mirror and links them.
-
-    Once paired, ``post_bundle._render_block`` emits a
-    ``DELTA (draft → published)`` block showing the diff between what
-    we wrote and what went live. This was an intended feature of the
-    observation pipeline from the beginning and stopped working when
-    Ordinal churned; the manual-date path brings it back without
-    depending on semantic match confidence.
-
-    Failure modes (all return 409 with a diagnostic):
-      * No linkedin_post row from this creator on the given LA day —
-        usually means Amphoreus hasn't scraped the post yet. Retry
-        after the next mirror sync / Amphoreus scrape.
-      * Multiple linkedin_post rows — creator posted twice the same
-        LA day. Caller needs to narrow (future: add an optional
-        time-of-day refinement in the request body).
-    """
-    from backend.src.db.local import get_local_post, update_local_post_fields
-    from backend.src.db.amphoreus_supabase import _get_client, is_configured
-    from backend.src.agents.stelle import _resolve_linkedin_username
-    try:
-        from zoneinfo import ZoneInfo
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"zoneinfo unavailable on this runtime: {exc}",
-        )
-
-    draft = get_local_post(post_id)
-    if draft is None:
-        raise HTTPException(status_code=404, detail="Post not found")
-    company = (draft.get("company") or "").strip()
-    if not company:
-        raise HTTPException(
-            status_code=400,
-            detail="Draft has no company — cannot resolve creator username",
-        )
-
-    # Resolve the creator's LinkedIn username from the draft's company.
-    # Uses the same helper post_bundle uses to fetch engagement, so
-    # shared-Ordinal-workspace edge cases stay consistent.
-    username = _resolve_linkedin_username(company)
-    if not username:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Could not resolve LinkedIn username for this draft's "
-                "company. Check users.linkedin_url upstream."
-            ),
-        )
-
-    # PST/PDT day → UTC instant range. We treat the input as a calendar
-    # day in America/Los_Angeles and match any linkedin_post with
-    # posted_at inside [00:00 LA, next 00:00 LA). zoneinfo handles DST
-    # transitions so March/November posts still work correctly.
-    try:
-        y, m, d = (int(x) for x in req.publish_date.split("-"))
-        tz = ZoneInfo("America/Los_Angeles")
-        day_start_local = datetime(y, m, d, 0, 0, 0, tzinfo=tz)
-        day_end_local = datetime(y, m, d, 23, 59, 59, 999999, tzinfo=tz)
-        day_start_utc = day_start_local.astimezone(timezone.utc)
-        day_end_utc = day_end_local.astimezone(timezone.utc)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid publish_date: {exc}",
-        )
-
-    if not is_configured():
-        raise HTTPException(
-            status_code=503,
-            detail="Amphoreus Supabase not configured",
-        )
-    sb = _get_client()
-    if sb is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Amphoreus Supabase client unavailable",
-        )
-
-    try:
-        rows = (
-            sb.table("linkedin_posts")
-              .select("provider_urn, post_text, posted_at, total_reactions, "
-                      "total_comments, total_reposts, _source")
-              .eq("creator_username", username)
-              .gte("posted_at", day_start_utc.isoformat())
-              .lte("posted_at", day_end_utc.isoformat())
-              .order("posted_at", desc=False)
-              .execute()
-              .data
-            or []
-        )
-    except Exception as exc:
-        logger.exception("[posts.set_publish_date] linkedin_posts fetch failed")
-        raise HTTPException(status_code=502, detail=f"linkedin_posts query failed: {exc}")
-
-    if not rows:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"No LinkedIn post from @{username} on {req.publish_date} "
-                f"(PT). The mirror may not have scraped it yet — try again "
-                f"after the next sync, or confirm the date."
-            ),
-        )
-    if len(rows) > 1:
-        # Multiple posts same LA day — tell the caller so they can narrow.
-        previews = [
-            {
-                "provider_urn": r.get("provider_urn"),
-                "posted_at":    r.get("posted_at"),
-                "hook":         ((r.get("post_text") or "").split("\n", 1)[0])[:120],
-                "reactions":    r.get("total_reactions") or 0,
-            }
-            for r in rows
-        ]
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "ambiguous_date",
-                "message": (
-                    f"@{username} published {len(rows)} posts on "
-                    f"{req.publish_date} (PT). Need to disambiguate."
-                ),
-                "candidates": previews,
-            },
-        )
-
-    matched = rows[0]
-    matched_urn = matched.get("provider_urn")
-    if not matched_urn:
-        raise HTTPException(
-            status_code=502,
-            detail="Matched row has no provider_urn (mirror data corrupt?)",
-        )
-
-    # Stamp the pairing onto the local_posts row. Uses the same columns
-    # the semantic matcher writes, distinguished by ``match_method``.
-    # Similarity is NULL for manual pairings (not applicable).
-    update_local_post_fields(
-        post_id,
-        {
-            "matched_provider_urn": matched_urn,
-            "matched_at":           datetime.now(timezone.utc).isoformat(),
-            "match_similarity":     None,
-            "match_method":         "manual_date",
-        },
-    )
-
-    return {
-        "paired":              True,
-        "post_id":             post_id,
-        "matched_provider_urn": matched_urn,
-        "matched_posted_at":    matched.get("posted_at"),
-        "matched_hook":         (matched.get("post_text") or "").split("\n", 1)[0][:120],
-        "matched_reactions":    matched.get("total_reactions") or 0,
-    }
-
-
-@router.delete("/{post_id}/set-publish-date")
-async def unset_publish_date(post_id: str):
-    """Undo a manual pairing. Clears matched_provider_urn and friends
-    on the draft — useful when the operator picked the wrong date.
-    Semantic-matcher-set pairings can also be cleared here; if the
-    worker runs again, it may re-pair from the semantic path.
-    """
-    from backend.src.db.local import get_local_post, update_local_post_fields
-    if get_local_post(post_id) is None:
-        raise HTTPException(status_code=404, detail="Post not found")
-    update_local_post_fields(
-        post_id,
-        {
-            "matched_provider_urn": None,
-            "matched_at":           None,
-            "match_similarity":     None,
-            "match_method":         None,
-        },
-    )
-    return {"unpaired": True, "post_id": post_id}
+#
+# The ``POST /api/posts/{id}/set-publish-date`` and ``DELETE`` endpoints
+# plus their SetPublishDateRequest model used to let operators tell
+# Amphoreus when a draft was published so it could pair to the right
+# linkedin_posts row. Removed because the semantic match-back worker
+# (services/draft_match_worker.run_match_back) now runs after EVERY
+# Apify scrape and pairs unpaired drafts automatically — no operator
+# input needed. Threshold: cosine ≥ 0.82 with margin ≥ 0.04 to second-
+# best, which is strict enough that incidental topic-overlap doesnt
+# trigger spurious pairings.
+#
+# Drafts no longer carry ``scheduled_date`` (operator never sets it)
+# and ``match_method=manual_date`` is no longer written. Existing
+# rows with those values keep working — readers tolerate either
+# manual_date or semantic provenance.
+#
+# ---------------------------------------------------------------------------
 
 
 @router.post("/{post_id}/rewrite")

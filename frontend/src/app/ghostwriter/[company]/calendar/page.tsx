@@ -157,10 +157,11 @@ export default function CalendarPage() {
       const key = p.scheduled_date;
       if (!postsByDate[key]) postsByDate[key] = [];
       postsByDate[key].push(p);
-    } else if (!p.ordinal_post_id) {
-      // Only unpushed posts without a date go in the unscheduled sidebar.
-      // Pushed posts stay where they are (on the calendar if dated, or
-      // hidden if they were pushed without a date via an older flow).
+    } else {
+      // Drafts without a scheduled_date land in the unscheduled
+      // sidebar. (Post-Ordinal: ``ordinal_post_id`` is no longer
+      // populated by any active code path. Legacy rows that still
+      // have it set are visible regardless.)
       unscheduled.push(p);
     }
   }
@@ -222,23 +223,15 @@ export default function CalendarPage() {
     }
   }
 
-  // Push all
-  async function handlePushAll() {
-    setPushing(true);
-    try {
-      const result = await ghostwriterApi.pushAll(company);
-      alert(`Pushed ${result.pushed} post(s) to Ordinal.`);
-      await fetchPosts();
-    } catch (e) {
-      console.error("Push failed:", e);
-    } finally {
-      setPushing(false);
-    }
-  }
+  // handlePushAll was removed 2026-04-28 — Virio churned off Ordinal.
+  // The "push to Ordinal" button it backed is gone; the calendar is
+  // now display-only for drafts + their scheduled_date hints. The
+  // pushing/setPushing local state is preserved as no-op for now to
+  // avoid threading an even larger diff; will sweep in the Ordinal-
+  // cleanup follow-up.
 
   const nDrafts = posts.filter((p) => p.status === "draft").length;
   const nScheduled = posts.filter((p) => p.scheduled_date && p.status === "draft").length;
-  const nPushed = posts.filter((p) => p.ordinal_post_id).length;
 
   if (loading) {
     return (
@@ -269,7 +262,6 @@ export default function CalendarPage() {
         <div className="flex gap-3 text-xs text-stone-500">
           <span>{nDrafts} draft{nDrafts !== 1 ? "s" : ""}</span>
           <span>{nScheduled} scheduled</span>
-          <span>{nPushed} pushed</span>
         </div>
 
         {/* Cadence toggle */}
@@ -307,16 +299,10 @@ export default function CalendarPage() {
           </button>
         )}
 
-        {/* Push all */}
-        {nScheduled > 0 && (
-          <button
-            onClick={handlePushAll}
-            disabled={pushing}
-            className="rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
-          >
-            {pushing ? "Pushing..." : `Push ${nScheduled} to Ordinal`}
-          </button>
-        )}
+        {/* Push-all-to-Ordinal removed 2026-04-23 (Ordinal outbound
+            deprecated; backend returns 410 Gone). Scheduled dates
+            remain editable in the calendar and will feed the
+            replacement publishing pipeline when it ships. */}
       </header>
 
       {/* Month navigation */}
@@ -380,21 +366,18 @@ export default function CalendarPage() {
                     )}
                   </div>
 
-                  {/* Post cards in this cell */}
+                  {/* Post cards in this cell. Post-Ordinal: every draft
+                      is draggable. The "isPushed" gating + "P" status
+                      badge were removed 2026-04-28 — there's no longer
+                      a "pushed" post state in any active code path. */}
                   <div className="mt-1 space-y-1">
-                    {dayPosts.map((post) => {
-                      const isPushed = !!post.ordinal_post_id;
-                      return (
+                    {dayPosts.map((post) => (
                       <div
                         key={post.id}
-                        draggable={!isPushed}
-                        onDragStart={isPushed ? undefined : () => onDragStart(post.id)}
+                        draggable
+                        onDragStart={() => onDragStart(post.id)}
                         onClick={() => setExpandedPost(post)}
-                        className={`rounded border p-1.5 text-xs leading-tight shadow-sm ${
-                          isPushed
-                            ? "cursor-pointer opacity-75"
-                            : "cursor-grab transition-shadow hover:shadow-md active:cursor-grabbing"
-                        } ${statusColor(post.status)}`}
+                        className={`cursor-grab rounded border p-1.5 text-xs leading-tight shadow-sm transition-shadow hover:shadow-md active:cursor-grabbing ${statusColor(post.status)}`}
                         title="Click to view full post"
                       >
                         <div className="flex items-start gap-1">
@@ -405,17 +388,16 @@ export default function CalendarPage() {
                           >
                             {post.status === "draft"
                               ? "D"
-                              : post.status === "pushed" || post.status === "scheduled"
+                              : post.status === "scheduled"
                               ? "S"
-                              : "P"}
+                              : "?"}
                           </span>
                           <span className="line-clamp-2 text-stone-700">
                             {post.hook || post.content_preview?.slice(0, 60)}
                           </span>
                         </div>
                       </div>
-                      );
-                    })}
+                    ))}
                   </div>
                 </div>
               );
@@ -538,25 +520,10 @@ export default function CalendarPage() {
                   </span>
                 )}
                 <div className="flex-1" />
-                <button
-                  onClick={async () => {
-                    try {
-                      const data = await ghostwriterApi.pushSingle(company, expandedPost.id);
-                      if (data.status === "pushed") {
-                        alert("Pushed to Ordinal!");
-                      } else {
-                        alert(`Status: ${data.status}`);
-                      }
-                      setExpandedPost(null);
-                      await fetchPosts();
-                    } catch (e) {
-                      alert(`Push failed: ${e}`);
-                    }
-                  }}
-                  className="rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-emerald-700"
-                >
-                  Push to Ordinal{expandedPost.scheduled_date ? ` (${expandedPost.scheduled_date})` : ""}
-                </button>
+                {/* Per-post "Push to Ordinal" button removed 2026-04-23.
+                    Virio churning off Ordinal; backend returns 410 Gone.
+                    The scheduled_date on this draft is still editable
+                    and will feed the replacement publishing pipeline. */}
               </div>
             )}
           </div>

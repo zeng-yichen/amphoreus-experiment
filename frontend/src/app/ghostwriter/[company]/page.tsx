@@ -1193,70 +1193,13 @@ function PostsManager({
     }
   }
 
-  // Manually pair this draft to the LinkedIn post that was actually
-  // published. Asks the operator for the PST/PDT calendar day the post
-  // went live; the server converts to UTC, matches against
-  // linkedin_posts for the creator on that LA day, and stamps
-  // matched_provider_urn on the draft. Stelle's next run then renders
-  // DELTA (draft → published) inline in the post bundle — the signal
-  // that was dormant after Ordinal churned.
-  async function handleSetPublishDate(postId: string) {
-    // Default to today's LA date — the most common case. Users type
-    // over it for back-fills.
-    const todayLA = new Date().toLocaleDateString("en-CA", {
-      timeZone: "America/Los_Angeles",
-    }); // "YYYY-MM-DD"
-    const input = prompt(
-      "Record the date this draft was published on LinkedIn.\n\n" +
-        "Enter the PST/PDT calendar date (YYYY-MM-DD).\n" +
-        "The date is saved immediately. If the published LinkedIn " +
-        "post is already in our mirror, we pair them now so the " +
-        "draft → published diff shows up in Stelle's next run. " +
-        "Otherwise pairing happens automatically once we scrape it.",
-      todayLA,
-    );
-    if (!input) return;
-    const trimmed = input.trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-      alert("Date must be YYYY-MM-DD.");
-      return;
-    }
-    onAction(postId);
-    try {
-      const r = await postsApi.setPublishDate(postId, trimmed);
-      if (r.paired) {
-        alert(
-          `Paired.\n\n` +
-            `Published: ${(r.matched_posted_at || "").slice(0, 16)}\n` +
-            `Reactions: ${r.matched_reactions}\n` +
-            `Hook: "${r.matched_hook}"`,
-        );
-      } else {
-        // Date saved; pairing is deferred until the scrape catches up
-        // (or the operator fixes the underlying reason). Tell the
-        // operator the date stuck and what's blocking auto-pair.
-        const msg =
-          r.pairing_pending_message ||
-          `Pairing pending (${r.pairing_pending_reason}).`;
-        alert(`Date saved (${r.publish_date}).\n\n${msg}`);
-      }
-      onRefresh();
-    } catch (err: any) {
-      // 409 is now reserved for ambiguous_date (creator posted twice
-      // the same PT day). The date IS saved on the server even when
-      // this fires — re-POSTing after picking a specific post id
-      // will re-run pairing without resaving the date.
-      const detail =
-        err?.body?.detail ?? err?.message ?? "Pairing failed.";
-      alert(
-        typeof detail === "string"
-          ? `Pair failed: ${detail}`
-          : `Pair failed: ${JSON.stringify(detail, null, 2)}`,
-      );
-    } finally {
-      onAction(null);
-    }
-  }
+  // handleSetPublishDate was removed 2026-04-28. Pairing now happens
+  // automatically on every Apify scrape via the semantic match-back
+  // worker — operators don't tell the system when a draft was
+  // published, the worker pairs it the next time the LinkedIn post
+  // is scraped. Paired drafts surface their published-version body
+  // inline in the Posts tab via the ``published_post_text`` field
+  // returned by GET /api/posts (see PublishedVersion expander below).
 
   async function handleRewrite(post: any) {
     onAction(post.id);
@@ -2691,12 +2634,11 @@ function PostsManager({
                   {post.status || "draft"}
                   {post.created_at ? ` \u00b7 ${new Date(post.created_at * 1000).toLocaleDateString()}` : ""}
                 </span>
-                {/* Pair state chip — shows when the draft has been
-                    linked (manually via Set-publish-date or by the
-                    semantic match-back worker) to a published
-                    LinkedIn post. Tooltip carries the full detail
-                    since the list response doesn't include the
-                    published-post body. */}
+                {/* Pair state chip — set when the semantic match-back
+                    worker linked this draft to a published LinkedIn
+                    post. Auto-pairs run after every Apify scrape;
+                    operators don't trigger pairing manually anymore.
+                    Tooltip carries provenance metadata. */}
                 {post.matched_provider_urn && (
                   <span
                     title={[
@@ -2716,21 +2658,9 @@ function PostsManager({
                   </span>
                 )}
                 <button
-                  onClick={() => void handleSetPublishDate(post.id)}
-                  disabled={actionInProgress === post.id}
-                  title={
-                    post.matched_provider_urn
-                      ? `Already paired to published LinkedIn post (${post.match_method || "?"}). Click to re-pair with a different date.`
-                      : "Pair this draft with its published LinkedIn post by date (PST). Once paired, Stelle sees DELTA (draft → published) in her next bundle."
-                  }
-                  className="rounded px-2 py-1 text-xs text-sky-500 hover:bg-sky-950 disabled:opacity-50"
-                >
-                  {post.matched_provider_urn ? "Re-pair" : "Set publish date"}
-                </button>
-                <button
                   onClick={() => void handleReject(post.id)}
                   disabled={actionInProgress === post.id || post.status === "rejected"}
-                  title="Mark as rejected by the client. Preserves the draft + comments as a learning signal (NOT dedup signal). Use after deleting the draft from Ordinal."
+                  title="Mark as rejected by the client. Preserves the draft + comments as a learning signal."
                   className="rounded px-2 py-1 text-xs text-amber-500 hover:bg-amber-950 disabled:opacity-50"
                 >
                   {post.status === "rejected" ? "Rejected" : "Reject"}
@@ -2744,6 +2674,28 @@ function PostsManager({
                   Delete
                 </button>
               </div>
+
+              {/* Published-version expander — visible when the
+                  semantic match-back worker linked this draft to a
+                  published post AND list_posts joined the body in.
+                  Operators click to inspect the draft → published
+                  diff (what the client actually shipped). */}
+              {post.matched_provider_urn && post.published_post_text && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer text-xs text-emerald-400 hover:text-emerald-300">
+                    Show published version
+                    {post.published_posted_at
+                      ? ` \u00b7 ${new Date(post.published_posted_at).toLocaleDateString()}`
+                      : ""}
+                    {post.published_reactions != null
+                      ? ` \u00b7 ${post.published_reactions} reactions`
+                      : ""}
+                  </summary>
+                  <div className="mt-2 whitespace-pre-wrap rounded border border-emerald-900/40 bg-emerald-950/20 p-3 text-sm text-stone-200">
+                    {post.published_post_text}
+                  </div>
+                </details>
+              )}
             </>
           )}
         </div>

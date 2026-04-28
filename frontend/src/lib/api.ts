@@ -348,52 +348,15 @@ export const postsApi = {
       body: JSON.stringify({}),
     }),
 
-  // Record the publish date for a Stelle draft, and opportunistically
-  // pair it to the published LinkedIn post if the mirror has it.
-  // ``publishDate`` is YYYY-MM-DD interpreted in America/Los_Angeles.
-  //
-  // Response shape (always 200 unless 409 for ambiguous_date):
-  //   - ``date_set: true`` is always present after a successful save.
-  //   - ``paired: true`` → matching LinkedIn post found in mirror;
-  //     ``matched_*`` fields populated; post_bundle will render
-  //     DELTA (draft → published) on the next read.
-  //   - ``paired: false`` → date saved, pairing deferred. The reason
-  //     is in ``pairing_pending_reason`` (e.g. "post_not_yet_scraped").
-  //     An auto-pair pass picks it up once the scrape catches up.
-  //
-  // 409 is reserved for the one case that needs operator input —
-  // creator posted twice the same PT day ("ambiguous_date"). The
-  // date itself IS saved even when 409 is returned.
-  setPublishDate: (postId: string, publishDate: string) =>
-    apiFetch<
-      | {
-          date_set: true;
-          paired: true;
-          post_id: string;
-          publish_date: string;
-          matched_provider_urn: string;
-          matched_posted_at: string;
-          matched_hook: string;
-          matched_reactions: number;
-        }
-      | {
-          date_set: true;
-          paired: false;
-          post_id: string;
-          publish_date: string;
-          pairing_pending_reason: string;
-          pairing_pending_message?: string;
-        }
-    >(`/api/posts/${postId}/set-publish-date`, {
-      method: "POST",
-      body: JSON.stringify({ publish_date: publishDate }),
-    }),
-
-  unsetPublishDate: (postId: string) =>
-    apiFetch<{ unpaired: true; post_id: string }>(
-      `/api/posts/${postId}/set-publish-date`,
-      { method: "DELETE" },
-    ),
+  // setPublishDate / unsetPublishDate were removed 2026-04-28.
+  // Pairing now happens automatically on every Apify scrape via the
+  // semantic match-back worker (cosine ≥ 0.82, margin ≥ 0.04). The
+  // operator no longer tells the system when a draft was published —
+  // the worker pairs it the next time the LinkedIn post is scraped.
+  // Drafts that pair will show ``matched_provider_urn`` and the
+  // joined-published-body fields (``published_post_text``,
+  // ``published_posted_at``, ``published_reactions``, etc.) on the
+  // GET /api/posts response.
 
   rewrite: (postId: string, company: string, postText: string, styleInstruction?: string) =>
     apiFetch<{ result: any }>(`/api/posts/${postId}/rewrite`, {
