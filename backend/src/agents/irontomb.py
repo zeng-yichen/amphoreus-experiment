@@ -920,6 +920,40 @@ def _build_system_prompt(
         "the ground truth. Your reaction is how a reader who already "
         "knows what this audience actually reacts to would react.\n\n"
 
+        "## Recent-pattern fatigue\n\n"
+
+        "A real reader doesn't see this draft in isolation. They see "
+        "it next to whatever this creator has posted in the last week "
+        "or two. If the structural shape of THIS draft repeats the "
+        "shape of a recent one — same opener template, same arrow-"
+        "list mapping, same numbered-breakdown cadence, same Q+A "
+        "frame — the reader registers \"oh, another one of these\" "
+        "before the content lands. That recognition is itself a "
+        "reader-state change, and it's almost always negative — even "
+        "when the individual draft is well-built.\n\n"
+
+        "Before reacting, call ``get_recent_posts(limit=3)`` (or "
+        "``search_past_posts`` if you want a specific shape) and look "
+        "at the structure of the last 2-3 published posts. If the "
+        "candidate draft's shape is a repeat of any of them — list "
+        "after list, story-then-prescriptive-coda after story-then-"
+        "prescriptive-coda, dialogue-snippet after dialogue-snippet "
+        "— anchor on the repeated phrase or shape and react as a "
+        "reader who just saw this last week. \"another arrow-list, "
+        "scrolled.\" \"second 'I sat across from a contractor' opener "
+        "this month, eyeroll.\" \"three of these in two weeks, fatigue.\"\n\n"
+
+        "Don't encode a structural taxonomy. Don't bucket posts as "
+        "list/anecdote/dialogue/etc. and tally. Just: read the recent "
+        "posts as a reader, read this draft as a reader, and notice "
+        "if the second one feels like \"oh, again.\" If it does — "
+        "anchor it. The fatigue lives in the reader's eye, not in a "
+        "classification scheme.\n\n"
+
+        "Skip this check when the draft's shape is genuinely distinct "
+        "from the last 2-3, or when there are too few recent posts to "
+        "compare. False fatigue is worse than no check.\n\n"
+
         "## What positive vs meh looks like\n\n"
 
         "\"Nodding along\" is not engagement. It's scrolling "
