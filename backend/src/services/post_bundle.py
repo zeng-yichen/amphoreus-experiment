@@ -550,9 +550,51 @@ def build_post_bundle_with_stats(
     # Claude CLI's ARG_MAX on exec, scoping is broken — see the
     # deleted-cap comment block at the top of this file.
 
+    # Voice-length calibration line — measurement of this creator's
+    # actual published-post length distribution. Anchors Stelle's
+    # target length explicitly when the latent voice signal in the
+    # rendered bodies gets overridden by an aggressive optional
+    # prompt or by single-source-bias in the source transcripts.
+    # Surfaced 2026-04-28 after Hensley's batch came back at 1140-
+    # 1612 chars vs his real distribution of 1010-2966 (median
+    # 2052) — bodies were in-context but Stelle was still
+    # converging on a too-short rhythm. BL-clean: this is a
+    # measurement, not a directive. Stelle reads the numbers and
+    # decides what to do.
+    voice_stat_line: Optional[str] = None
+    try:
+        published_lens = [
+            len((row.get("post_text") or "").strip())
+            for row in linkedin_posts_by_urn.values()
+            if (row.get("post_text") or "").strip()
+        ]
+        if len(published_lens) >= 4:
+            published_lens.sort()
+            n = len(published_lens)
+            median = published_lens[n // 2] if n % 2 == 1 else (
+                (published_lens[n // 2 - 1] + published_lens[n // 2]) / 2
+            )
+            p25 = published_lens[max(0, n // 4)]
+            p75 = published_lens[min(n - 1, (3 * n) // 4)]
+            voice_stat_line = (
+                f"Voice-length calibration (last {n} published posts): "
+                f"median={int(median)} chars, p25={p25}, p75={p75}, "
+                f"range={published_lens[0]}-{published_lens[-1]}. "
+                f"Aim drafts at this distribution — not all the same "
+                f"length, but each within the IQR unless you have a "
+                f"deliberate reason to go shorter or longer."
+            )
+    except Exception as exc:
+        logger.debug("[post_bundle] voice-length stat compute failed: %s", exc)
+
     parts = [
         "=== POSTS (body · engagement · comments · edits, last 90d) ===",
         "",
+    ]
+    if voice_stat_line:
+        parts.append(voice_stat_line)
+        parts.append("")
+    parts.extend([
         "Each block below contains one post with every signal we have",
         "about it bundled together. Posts with real engagement numbers",
         "(reactions, comments, reposts) shipped to LinkedIn — ingest",
@@ -571,7 +613,7 @@ def build_post_bundle_with_stats(
         "",
         "Rejected = client said no to THIS execution; DO NOT treat as",
         "topic dedup, but learn from the paired comments below each.",
-    ]
+    ])
     if draft_blocks:
         parts.append("")
         parts.append(f"--- POSTS ({len(draft_blocks)}) ---")
