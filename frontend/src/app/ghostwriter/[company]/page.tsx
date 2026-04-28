@@ -959,6 +959,45 @@ function PostsManager({
   const [editText, setEditText] = useState("");
   const [factReport, setFactReport] = useState<{ id: string; report: string } | null>(null);
   const [citationData, setCitationData] = useState<Record<string, string[]>>({});
+  // Tracks which post just had its body copied — shows a transient
+  // "Copied!" affordance on the Copy button. Reset after ~1.5s.
+  const [copiedPostId, setCopiedPostId] = useState<string | null>(null);
+
+  // Copy a post body to the clipboard. Uses the modern
+  // navigator.clipboard API; falls back to a hidden-textarea +
+  // execCommand for non-secure contexts or browsers that block
+  // clipboard access. Last resort: alert the user to copy manually.
+  async function handleCopyPost(postId: string, content: string) {
+    if (!content) return;
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedPostId(postId);
+      window.setTimeout(() => {
+        setCopiedPostId((cur) => (cur === postId ? null : cur));
+      }, 1500);
+      return;
+    } catch {
+      /* fall through to legacy path */
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = content;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      setCopiedPostId(postId);
+      window.setTimeout(() => {
+        setCopiedPostId((cur) => (cur === postId ? null : cur));
+      }, 1500);
+    } catch {
+      window.alert(
+        "Couldn't copy automatically — please select the post body and copy with Cmd/Ctrl+C.",
+      );
+    }
+  }
 
   // Comments (draft_feedback) state. Per-post so toggling one panel
   // doesn't clobber another's loaded list.
@@ -2594,6 +2633,18 @@ function PostsManager({
                   className="rounded bg-stone-800 px-2.5 py-1 text-xs text-stone-300 hover:bg-stone-700"
                 >
                   Edit
+                </button>
+                <button
+                  onClick={() => void handleCopyPost(post.id, post.content || "")}
+                  disabled={!post.content}
+                  title="Copy the post body to the clipboard."
+                  className={`rounded px-2.5 py-1 text-xs ${
+                    copiedPostId === post.id
+                      ? "bg-emerald-900/40 text-emerald-300"
+                      : "bg-stone-800 text-stone-300 hover:bg-stone-700"
+                  } disabled:opacity-40`}
+                >
+                  {copiedPostId === post.id ? "Copied!" : "Copy"}
                 </button>
                 {/* Rewrite button temporarily disabled (2026-04-20) —
                     the behavior was surprising (silently commits content
