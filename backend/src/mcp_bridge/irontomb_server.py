@@ -100,6 +100,34 @@ server.register(
 
 
 # ---------------------------------------------------------------------------
+# Tool: get_recent_unpublished_drafts
+# ---------------------------------------------------------------------------
+server.register(
+    name="get_recent_unpublished_drafts",
+    description=(
+        "Recent drafts written for this creator that haven't been "
+        "published yet (or haven't been paired by the match-back "
+        "worker yet). Complements get_recent_posts, which only shows "
+        "scored historic posts. Use for the recent-pattern-fatigue "
+        "check: when Stelle writes a batch of drafts in one session, "
+        "only the candidate draft is in your context — the other "
+        "batch siblings are queued in local_posts. If 4 of the 5 "
+        "drafts in this week's batch are arrow-list mappings, the "
+        "audience will register fatigue when the 5th lands. Pull "
+        "these to see them."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "description": "Max drafts (1-20, default 5)"},
+            "days":  {"type": "integer", "description": "Look back this many days (default 14)"},
+        },
+    },
+    handler=lambda args: _dispatch("get_recent_unpublished_drafts", args),
+)
+
+
+# ---------------------------------------------------------------------------
 # Tool: search_linkedin_corpus
 # ---------------------------------------------------------------------------
 server.register(

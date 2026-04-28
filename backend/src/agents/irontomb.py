@@ -502,6 +502,71 @@ def _get_post_detail_impl(company: str, ordinal_post_id: str) -> Optional[dict]:
     return None
 
 
+def _get_recent_unpublished_drafts_impl(
+    company: str, limit: int, days: int = 14,
+) -> list[dict]:
+    """Recent drafts written for this creator that haven't been
+    published yet (or haven't been paired by the match-back worker
+    yet — same data shape, different mechanism).
+
+    Complements _get_recent_posts_impl, which only surfaces SCORED
+    historic posts. The fatigue-check use-case needs to see
+    queued-for-publishing drafts too — when Stelle writes 5 list-
+    style drafts in the same batch, none of them are scored yet,
+    but they're collectively about to land in the audience's feed.
+
+    Returns up to ``limit`` rows with shape:
+      {
+        "draft_id":    str,
+        "created_at":  ISO8601,
+        "body":        first ~600 chars of the draft (enough to read
+                       the structure without exhausting the context),
+        "status":      "draft" | "rejected" | ...
+      }
+
+    Best-effort — failures return empty list.
+    """
+    try:
+        from backend.src.db.amphoreus_supabase import _get_client, is_configured
+        if not is_configured():
+            return []
+        sb = _get_client()
+        if sb is None:
+            return []
+        from datetime import datetime, timezone, timedelta
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = (
+            sb.table("local_posts")
+              .select("id,content,created_at,status")
+              .eq("company", company)
+              .is_("matched_provider_urn", "null")
+              .gte("created_at", since)
+              .order("created_at", desc=True)
+              .limit(max(1, min(limit, 20)))
+              .execute()
+              .data
+            or []
+        )
+        out = []
+        for r in rows:
+            body = (r.get("content") or "").strip()
+            if not body:
+                continue
+            out.append({
+                "draft_id":   (r.get("id") or "")[:12],
+                "created_at": r.get("created_at"),
+                "body":       body[:600],
+                "status":     r.get("status") or "draft",
+            })
+        return out
+    except Exception as exc:
+        logger.debug(
+            "[Irontomb] _get_recent_unpublished_drafts_impl(%s) failed: %s",
+            company, exc,
+        )
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Retrieval tool schemas
 # ---------------------------------------------------------------------------
@@ -559,6 +624,41 @@ _GET_RECENT_POSTS_TOOL: dict[str, Any] = {
         "required": [],
     },
 }
+
+_GET_RECENT_UNPUBLISHED_DRAFTS_TOOL: dict[str, Any] = {
+    "name": "get_recent_unpublished_drafts",
+    "description": (
+        "Recent drafts written for this creator that haven't been "
+        "published yet (or haven't been paired by the match-back "
+        "worker yet). Complements ``get_recent_posts``, which only "
+        "surfaces scored historic posts.\n\n"
+        "Use this for the recent-pattern-fatigue check: when Stelle "
+        "writes a batch of drafts in one session, only the candidate "
+        "draft is in your context — the other batch siblings are "
+        "queued in local_posts. If 4 of the 5 drafts in this week's "
+        "batch are arrow-list mappings, the audience will register "
+        "fatigue when the 5th lands, even though none have been "
+        "published yet. Pull these to see them.\n\n"
+        "Returns up to ``limit`` rows with: draft_id, created_at, "
+        "body (first ~600 chars), status."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "default": 5,
+                "description": "Max drafts to return (1-20, default 5).",
+            },
+            "days": {
+                "type": "integer",
+                "default": 14,
+                "description": "Look back this many days. Default 14 covers a typical batch + last week.",
+            },
+        },
+    },
+}
+
 
 _GET_POST_DETAIL_TOOL: dict[str, Any] = {
     "name": "get_post_detail",
@@ -789,7 +889,12 @@ def _build_system_prompt(
         "- `search_past_posts(query, limit)` — keyword-ranked search "
         "over THIS client's full scored post history.\n"
         "- `get_recent_posts(limit)` — the N most recent scored posts "
-        "from this client.\n"
+        "from this client (PUBLISHED + paired only).\n"
+        "- `get_recent_unpublished_drafts(limit, days)` — drafts "
+        "queued for this client that haven't been published / paired "
+        "yet. Use alongside `get_recent_posts` for fatigue checks "
+        "across the FULL near-term content stream (published + "
+        "queued), not just the history.\n"
         "- `get_post_detail(ordinal_post_id)` — full untruncated text of "
         "one specific post from this client.\n"
         "- `retrieve_similar_posts(query, k, min_reactions, ...)` — "
@@ -932,16 +1037,32 @@ def _build_system_prompt(
         "reader-state change, and it's almost always negative — even "
         "when the individual draft is well-built.\n\n"
 
-        "Before reacting, call ``get_recent_posts(limit=3)`` (or "
-        "``search_past_posts`` if you want a specific shape) and look "
-        "at the structure of the last 2-3 published posts. If the "
-        "candidate draft's shape is a repeat of any of them — list "
-        "after list, story-then-prescriptive-coda after story-then-"
-        "prescriptive-coda, dialogue-snippet after dialogue-snippet "
-        "— anchor on the repeated phrase or shape and react as a "
-        "reader who just saw this last week. \"another arrow-list, "
-        "scrolled.\" \"second 'I sat across from a contractor' opener "
-        "this month, eyeroll.\" \"three of these in two weeks, fatigue.\"\n\n"
+        "Before reacting, call BOTH:\n"
+        "  - ``get_recent_posts(limit=3)`` — the last 2-3 PUBLISHED "
+        "    posts the audience already saw\n"
+        "  - ``get_recent_unpublished_drafts(limit=5, days=14)`` — "
+        "    drafts queued for this creator that haven't shipped "
+        "    yet (the OTHER drafts in the same batch as this one, "
+        "    plus anything from the last two weeks that hasn't "
+        "    paired yet)\n\n"
+
+        "The fatigue check spans BOTH sets. The audience experiences "
+        "shapes serially regardless of whether they were published "
+        "yesterday or are about to be published Monday. If 4 of the "
+        "5 drafts in this batch are arrow-list mappings, the 5th "
+        "doesn't get a free pass just because nothing list-shaped "
+        "has been PUBLISHED yet — anchor the fatigue on the queued "
+        "siblings.\n\n"
+
+        "If the candidate draft's shape is a repeat of any of them — "
+        "list after list, story-then-prescriptive-coda after story-"
+        "then-prescriptive-coda, dialogue-snippet after dialogue-"
+        "snippet — anchor on the repeated phrase or shape and react "
+        "as a reader who just saw this last week (or who's about to "
+        "see two of them in the same feed). Examples: \"another "
+        "arrow-list, scrolled.\" \"second 'I sat across from a "
+        "contractor' opener this month, eyeroll.\" \"third batch "
+        "draft this week with the same shape — fatigue.\"\n\n"
 
         "Don't encode a structural taxonomy. Don't bucket posts as "
         "list/anecdote/dialogue/etc. and tally. Just: read the recent "
@@ -1015,6 +1136,20 @@ def _dispatch_retrieval_tool(
             return json.dumps({
                 "returned": len(posts),
                 "posts": posts,
+            }, default=str)
+
+        if tool_name == "get_recent_unpublished_drafts":
+            limit = max(1, min(int(tool_input.get("limit", 5)), 20))
+            days = max(1, min(int(tool_input.get("days", 14)), 60))
+            drafts = _get_recent_unpublished_drafts_impl(company, limit, days)
+            return json.dumps({
+                "returned": len(drafts),
+                "drafts":   drafts,
+                "note": (
+                    "These are unpublished drafts queued for this creator — "
+                    "useful for within-batch pattern-fatigue checks alongside "
+                    "get_recent_posts (which only shows published+scored history)."
+                ),
             }, default=str)
 
         if tool_name == "get_post_detail":
@@ -1191,6 +1326,7 @@ def simulate_flame_chase_journey(company: str, draft_text: str) -> dict[str, Any
     tools = [
         _SEARCH_PAST_POSTS_TOOL,
         _GET_RECENT_POSTS_TOOL,
+        _GET_RECENT_UNPUBLISHED_DRAFTS_TOOL,
         _GET_POST_DETAIL_TOOL,
         # Semantic retrieval across the full ~390k cross-creator corpus
         # (Amphoreus post_embeddings pgvector mirror). Grounds Irontomb's
