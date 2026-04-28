@@ -229,42 +229,73 @@ def get_client_transcripts(
     except Exception as exc:
         logger.debug("[amphoreus_supabase] get_client_transcripts amph: %s", exc)
 
-    # Bucket 2: Jacquard-sourced via 3-hop join (skipped for bare
-    # companies with no resolved user — operator-attended Jacquard
-    # calls are per-FOC; company-wide mode would return noise).
+    # Bucket 2: Jacquard-sourced via 3-hop join.
+    #
+    # Previously this whole block required ``user_id`` to be already
+    # resolved by the caller. Cyrene calls ``_query_transcript_inventory``
+    # with whatever string CYRENE_COMPANY held, and run_cyrene_cli was
+    # passing the bare company UUID — so resolve_to_company_and_user
+    # returned (uuid, None), Bucket 2 was skipped, and Cyrene saw 1
+    # transcript when Hensley actually had 25. Surfaced 2026-04-28.
+    #
+    # Fix: when user_id wasn't resolved up-front, fall back to
+    # collecting EVERY user's email under this company and union the
+    # transcripts they participated in. At single-FOC clients
+    # (Hensley, Andrew, Sachil) this is identical to per-user scoping
+    # because there's only one user. At multi-FOC clients (Trimble,
+    # Commenda, Virio) it surfaces the company-wide transcript pool —
+    # operator-side context Cyrene needs for cross-FOC strategic
+    # awareness even when she's running scoped to one FOC.
     jacq_rows: list[dict[str, Any]] = []
-    if user_id:
-        try:
+    try:
+        emails: list[str] = []
+        if user_id:
             email_row = (
                 sb.table("users").select("email").eq("id", user_id).limit(1).execute().data
                 or []
             )
             emails = [e["email"] for e in email_row if e.get("email")]
+        else:
+            # Bare-UUID fallback: pull every user under this company and
+            # union their transcript participation. Slightly wider than
+            # per-FOC mode but never NARROWER — Cyrene needs everything
+            # the client/team has been on a call about.
+            user_rows = (
+                sb.table("users").select("email").eq("company_id", company_uuid).limit(50).execute().data
+                or []
+            )
+            emails = [e["email"] for e in user_rows if e.get("email")]
             if emails:
-                parts = (
-                    sb.table("meeting_participants")
-                      .select("provider_transcript_id")
-                      .in_("email", emails)
-                      .limit(2000)
+                logger.debug(
+                    "[amphoreus_supabase] get_client_transcripts: bare-UUID "
+                    "fallback resolved %d user emails for company=%s",
+                    len(emails), company_uuid,
+                )
+        if emails:
+            parts = (
+                sb.table("meeting_participants")
+                  .select("provider_transcript_id")
+                  .in_("email", emails)
+                  .limit(2000)
+                  .execute()
+                  .data
+                or []
+            )
+            tids = sorted({p["provider_transcript_id"] for p in parts if p.get("provider_transcript_id")})
+            # Chunk IN-list to avoid PostgREST URL-length 400s.
+            _CHUNK = 100
+            for i in range(0, len(tids), _CHUNK):
+                resp = (
+                    sb.table("meetings")
+                      .select("provider_transcript_id, name, transcript_text, start_time, created_at, duration_seconds, calendar_attendees, _source")
+                      .in_("provider_transcript_id", tids[i:i + _CHUNK])
                       .execute()
                       .data
                     or []
                 )
-                tids = sorted({p["provider_transcript_id"] for p in parts if p.get("provider_transcript_id")})
-                # Chunk IN-list to avoid PostgREST URL-length 400s.
-                _CHUNK = 100
-                for i in range(0, len(tids), _CHUNK):
-                    resp = (
-                        sb.table("meetings")
-                          .select("provider_transcript_id, name, transcript_text, start_time, created_at, duration_seconds, calendar_attendees, _source")
-                          .in_("provider_transcript_id", tids[i:i + _CHUNK])
-                          .execute()
-                          .data
-                        or []
-                    )
-                    jacq_rows.extend(resp)
-        except Exception as exc:
-            logger.debug("[amphoreus_supabase] get_client_transcripts jacq: %s", exc)
+                jacq_rows.extend(resp)
+    except Exception as exc:
+        logger.debug("[amphoreus_supabase] get_client_transcripts jacq: %s", exc)
 
     # Dedupe on provider_transcript_id (prefer amphoreus when overlap).
     seen: dict[str, dict] = {}
