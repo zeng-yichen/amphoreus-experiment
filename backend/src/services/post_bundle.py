@@ -268,7 +268,22 @@ def build_post_bundle_with_stats(
         return "", stats
 
     try:
-        ordinal_posts        = _fetch_ordinal_posts(company)
+        # 2026-04-28: Ordinal churn. We no longer use Ordinal as the
+        # post-storage / scheduling layer — published posts come back
+        # via the linkedin_posts mirror (Jacquard 8h sync + Amphoreus
+        # Apify weekday-midnight scrape), and unpushed drafts live in
+        # local_posts only. Calling /api/v1/posts at bundle-build time
+        # was (a) dead-weight latency (5 paginated HTTP calls per
+        # bundle), (b) bundle bloat — Virio's Ordinal workspace still
+        # has 676 cached posts, ~65 attributed to Jeremy, which
+        # ballooned his bundle past Linux ARG_MAX and crashed every
+        # Stelle run for him with OSError [Errno 7] "Argument list too
+        # long: 'claude'". Stubbed to []. The pass-1 ordinal_posts
+        # loop becomes a no-op; pass-2 (local drafts) and pass-3
+        # (LinkedIn mirror) carry the bundle. ``_fetch_ordinal_posts``
+        # function preserved for now in case a backfill / migration
+        # script needs it — just unwired from the hot path.
+        ordinal_posts: list[dict[str, Any]] = []
         # Per-FOC filter on Ordinal posts. Shared-Ordinal-workspace
         # clients (Virio has one Ordinal workspace for 8+ LinkedIn
         # profiles) return every teammate's posts from /posts, keyed
