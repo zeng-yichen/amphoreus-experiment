@@ -834,13 +834,30 @@ def load_local_posts_for_match_back(
         )
         if generated_after_iso:
             q = q.gte("created_at", generated_after_iso)
-        return q.order("created_at", desc=True).limit(500).execute().data or []
+        rows = q.order("created_at", desc=True).limit(500).execute().data or []
     except Exception as exc:
         logger.warning(
             "[amphoreus_supabase] load_local_posts_for_match_back(%s) failed: %s",
             company, exc,
         )
         return []
+
+    # PostgREST returns pgvector columns as JSON-string representations
+    # ("[0.123,-0.456,...]") rather than parsed list[float]. The
+    # match-back worker checks isinstance(emb, list) before computing
+    # cosine, so unparsed strings get silently skipped. This was a
+    # 100%-no-op semantic-match-back bug surfaced 2026-04-28 (every
+    # draft in the system had string-typed embeddings → zero pairings).
+    # Normalize to list[float] here so the caller sees a uniform type.
+    for r in rows:
+        emb = r.get("embedding")
+        if isinstance(emb, str):
+            try:
+                # pgvector serializes as "[v1,v2,...]" — valid JSON.
+                r["embedding"] = _json.loads(emb)
+            except Exception:
+                r["embedding"] = None
+    return rows
 
 
 def record_local_post_match(
