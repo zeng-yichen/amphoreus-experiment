@@ -455,50 +455,114 @@ def _process_creator(username: str, company_slugs: list[str]) -> dict[str, int]:
     if not candidates:
         return out
 
+    # Build the full bipartite graph of (post, draft, sim) edges.
+    # Then pair greedily max-edge-first with a both-side margin check.
+    #
+    # Why not "for each post, take best draft" (the previous algorithm)?
+    # That greedy-by-post-iteration-order locks in early matches even
+    # when a later post would be a much better fit for the same draft.
+    # Worked example: best edge in graph is (P2, D1, 0.91), but loop
+    # processed P1 first and gave it D1 at 0.85 because P1 came first
+    # in date-descending order. P2 then had to settle for D2 at 0.84,
+    # and the actual best pairing (P2↔D1) was unreachable.
+    #
+    # Max-edge-first (sort all edges by sim desc, take greedily) is
+    # provably within 1/2 of optimal for max-weight bipartite matching
+    # and almost always within a few percent in practice. The both-
+    # side margin check (sim - second-best-for-this-post ≥ margin AND
+    # sim - second-best-for-this-draft ≥ margin) preserves the
+    # "no ambiguous pairings" property the previous one-sided check
+    # was trying to enforce.
+    all_edges: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+    # Cache embeddings per post so we don't re-embed for the second pass.
+    post_embs: dict[str, list[float]] = {}
     for post in unmatched:
         post_text = (post.get("post_text") or "").strip()
         provider_urn = (post.get("provider_urn") or "").strip()
         if not post_text or not provider_urn:
             continue
-
-        # Further narrow candidates by the per-post [-14d, +0d] window.
         posted_at_iso = post.get("posted_at")
-        window_candidates = _filter_by_draft_window(candidates, posted_at_iso, _DRAFT_WINDOW_DAYS)
+        window_candidates = _filter_by_draft_window(
+            candidates, posted_at_iso, _DRAFT_WINDOW_DAYS,
+        )
         if not window_candidates:
             continue
-
         post_emb = embed_text_for_local_post(post_text)
         if post_emb is None:
             continue
+        post_embs[provider_urn] = post_emb
+        for draft in window_candidates:
+            emb = draft.get("embedding")
+            if not isinstance(emb, list) or len(emb) != len(post_emb):
+                continue
+            sim = _cosine(post_emb, emb)
+            if sim < _MATCH_SIM_MIN:
+                # Cheap floor — skip edges that can't possibly clear
+                # the threshold to keep all_edges small on big graphs.
+                continue
+            all_edges.append((sim, post, draft))
 
-        top1, top2 = _two_closest_drafts(post_emb, window_candidates)
-        if top1 is None:
+    if not all_edges:
+        return out
+
+    # Precompute per-post and per-draft second-best similarities so the
+    # margin check is consistent regardless of pairing order.
+    by_post: dict[str, list[float]] = {}
+    by_draft: dict[str, list[float]] = {}
+    for sim, post, draft in all_edges:
+        by_post.setdefault(post["provider_urn"], []).append(sim)
+        by_draft.setdefault(draft["id"], []).append(sim)
+    for k in by_post:
+        by_post[k].sort(reverse=True)
+    for k in by_draft:
+        by_draft[k].sort(reverse=True)
+
+    def _margin_ok(sim: float, post_urn: str, draft_id: str) -> bool:
+        """sim must beat the second-best sim from BOTH sides by ≥ margin."""
+        post_sims = by_post.get(post_urn, [])
+        draft_sims = by_draft.get(draft_id, [])
+        post_second = post_sims[1] if len(post_sims) > 1 else 0.0
+        draft_second = draft_sims[1] if len(draft_sims) > 1 else 0.0
+        return (
+            (sim - post_second) >= _MATCH_MARGIN_MIN
+            and (sim - draft_second) >= _MATCH_MARGIN_MIN
+        )
+
+    # Sort all edges descending by similarity. Greedy iteration takes
+    # the global best available edge at each step.
+    all_edges.sort(key=lambda e: e[0], reverse=True)
+
+    paired_post_urns: set[str] = set()
+    paired_draft_ids: set[str] = set()
+
+    for sim, post, draft in all_edges:
+        post_urn = post["provider_urn"]
+        draft_id = draft["id"]
+        if post_urn in paired_post_urns or draft_id in paired_draft_ids:
             continue
-
-        sim1, draft1 = top1
-        sim2 = top2[0] if top2 is not None else 0.0
-        if sim1 < _MATCH_SIM_MIN or (sim1 - sim2) < _MATCH_MARGIN_MIN:
+        if not _margin_ok(sim, post_urn, draft_id):
             out["skipped_unsure"] += 1
             logger.debug(
-                "[draft_match_worker] unsure: %s username=%s sim1=%.3f sim2=%.3f",
-                provider_urn[:24], username, sim1, sim2,
+                "[draft_match_worker] unsure (max-edge-first): "
+                "%s ↔ %s sim=%.3f post_2nd=%.3f draft_2nd=%.3f",
+                post_urn[:24], draft_id[:12], sim,
+                (by_post.get(post_urn, [0])[1] if len(by_post.get(post_urn, [])) > 1 else 0.0),
+                (by_draft.get(draft_id, [0])[1] if len(by_draft.get(draft_id, [])) > 1 else 0.0),
             )
             continue
-
         ok = record_local_post_match(
-            post_id=draft1["id"],
-            matched_provider_urn=provider_urn,
-            similarity=sim1,
+            post_id=draft_id,
+            matched_provider_urn=post_urn,
+            similarity=sim,
             method="semantic",
         )
         if ok:
             out["matched"] += 1
-            # Update our in-memory candidate list so this draft isn't
-            # considered for another LinkedIn post in the same pass.
-            candidates = [c for c in candidates if c.get("id") != draft1["id"]]
+            paired_post_urns.add(post_urn)
+            paired_draft_ids.add(draft_id)
             logger.info(
-                "[draft_match_worker] paired draft %s ↔ %s (sim=%.3f)",
-                draft1["id"][:12], provider_urn[:32], sim1,
+                "[draft_match_worker] paired draft %s ↔ %s (sim=%.3f, max-edge)",
+                draft_id[:12], post_urn[:32], sim,
             )
 
     return out
