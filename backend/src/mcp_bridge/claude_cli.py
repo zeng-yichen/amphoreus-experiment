@@ -1498,7 +1498,18 @@ def _translate_cli_event(event: dict, event_callback: Any) -> None:
                         c.get("text", "") if isinstance(c, dict) else str(c)
                         for c in content
                     )
-                event_callback("tool_result", {"result": str(content)[:500]})
+                # 8000-char cap (was 500, raised 2026-04-28). Irontomb's
+                # tool_result contains the gestalt + anchors[] + a
+                # _prior_reactions trajectory of the last 5 calls; even
+                # a single multi-anchor response easily exceeds 500.
+                # The model itself receives the full content — this cap
+                # only affects what we LOG to run_events for post-hoc
+                # audit. The 500-char cap was making truncated JSON
+                # impossible to parse during diagnosis runs and made
+                # the anchor schema-floor look unenforced when it was
+                # actually fine. 8000 holds a typical reaction +
+                # trajectory + headroom.
+                event_callback("tool_result", {"result": str(content)[:8000]})
         elif etype == "system":
             sub = event.get("subtype") or ""
             if sub:
