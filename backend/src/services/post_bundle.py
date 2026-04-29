@@ -654,7 +654,41 @@ def build_post_bundle_with_stats(
                 "not creator-baseline-normalized."
             )
             parts.append("")
+            parts.append("Sub-list A — ABSOLUTE (raw reaction count):")
+            parts.append("")
             parts.extend(cross_lines)
+
+            # Sub-list B — same window, but ranked by within-creator log-z.
+            # Surfaces "this is way above this creator's own baseline" rather
+            # than "this got the most absolute reactions." Catches breakthroughs
+            # at smaller-baseline creators that the absolute list crowds out.
+            try:
+                z_lines = _fetch_cross_roster_z_outliers(
+                    exclude_username=_resolve_username_for_cross_filter(company, user_id),
+                    candidate_days=30,
+                    baseline_days=90,
+                    limit=5,
+                )
+                if z_lines:
+                    parts.append("")
+                    parts.append(
+                        "Sub-list B — RELATIVE TO CREATOR BASELINE "
+                        "(within-creator log-z, last 30d vs prior 90d):"
+                    )
+                    parts.append("")
+                    parts.append(
+                        "Same window, but ranked by how far the post outperformed "
+                        "the creator's OWN 90-day median (in log-reaction space). "
+                        "log_z=+1.5 means ~1.5 stddev above that creator's typical "
+                        "post. Surfaces relative breakthroughs at smaller-baseline "
+                        "creators that the absolute list crowds out. Same caveat: "
+                        "ambient signal, not exemplars."
+                    )
+                    parts.append("")
+                    parts.extend(z_lines)
+            except Exception as exc:
+                logger.debug("[post_bundle] cross-roster z-outliers section failed: %s", exc)
+
             parts.append("")
             parts.append("=== END HIGH-PERFORMERS ===")
     except Exception as exc:
@@ -998,6 +1032,150 @@ def _fetch_cross_roster_winners(
             hook = (r.get("post_text") or "").split("\n", 1)[0].strip()
         hook = hook[:120]
         out.append(f"  [{date}] @{creator:<26}  {rx:>5} rx   \"{hook}\"")
+    return out
+
+
+def _fetch_cross_roster_z_outliers(
+    *,
+    exclude_username: Optional[str],
+    candidate_days: int = 30,
+    baseline_days: int = 90,
+    limit: int = 5,
+    min_n: int = 5,
+) -> list[str]:
+    """Top-N posts in the last ``candidate_days`` ranked by within-creator
+    log-z. Companion to ``_fetch_cross_roster_winners`` — same general
+    section, but rewards "outperforms own baseline" rather than "big in
+    absolute terms." Surfaces posts that ARE the kind of breakthrough a
+    creator can learn from when their absolute counts can't compete with
+    bigger-baseline names.
+
+    Algorithm:
+      1. Pull last ``baseline_days`` of posts for ALL tracked creators.
+      2. Per creator, compute mean+std of ``log(total_reactions + 1)``.
+         Skip creators with < min_n posts (std unreliable) or std<0.1
+         (all posts roughly identical, z-score meaningless).
+      3. Score each post in the candidate window (``candidate_days``)
+         as z = (log_rx - log_mean) / log_std.
+      4. Sort all candidates desc by z. Dedupe to one post per creator.
+      5. Take top ``limit``.
+
+    Why log-z, not raw z: LinkedIn engagement is power-law / log-normal
+    distributed. Raw z gets dominated by a creator's own outlier posts
+    in the std calculation, making "ordinary above-average" posts look
+    mediocre. Log-transform pulls the distribution closer to symmetric.
+
+    Why baseline_days > candidate_days: distribution stats need a
+    larger window for stability. Candidate posts come from the recency
+    bucket; the comparison-distribution comes from the longer arc.
+    """
+    import os, math
+    from collections import defaultdict
+    import statistics as _stats
+    url = os.environ.get("AMPHOREUS_SUPABASE_URL", "").strip()
+    key = os.environ.get("AMPHOREUS_SUPABASE_KEY", "").strip()
+    if not url or not key:
+        return []
+    baseline_iso = (datetime.now(timezone.utc) - timedelta(days=baseline_days)).isoformat()
+    candidate_cutoff = datetime.now(timezone.utc) - timedelta(days=candidate_days)
+
+    try:
+        # One pull covers both: stats baseline AND candidate set.
+        # Same pollution filters the absolute list uses.
+        params = {
+            "select": "creator_username,hook,post_text,posted_at,total_reactions,provider_urn",
+            "posted_at": f"gte.{baseline_iso}",
+            "or": "(is_company_post.is.null,is_company_post.eq.false)",
+            "reshared_post_urn": "is.null",
+            "post_text": "not.is.null",
+            "limit": "5000",  # generous; tracked roster × 90d is usually < 1k
+        }
+        resp = httpx.get(
+            f"{url}/rest/v1/linkedin_posts",
+            params=params,
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=20.0,
+        )
+        resp.raise_for_status()
+        rows = resp.json() or []
+    except Exception as exc:
+        logger.debug("[post_bundle] cross-roster z-outliers fetch failed: %s", exc)
+        return []
+
+    # Group by creator, compute per-creator log stats
+    by_creator: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        cu = (r.get("creator_username") or "").strip()
+        if cu:
+            by_creator[cu].append(r)
+
+    creator_stats: dict[str, tuple[float, float]] = {}
+    for cu, posts in by_creator.items():
+        if len(posts) < min_n:
+            continue
+        log_rx = [
+            math.log((p.get("total_reactions") or 0) + 1)
+            for p in posts
+        ]
+        try:
+            mu = _stats.mean(log_rx)
+            sd = _stats.pstdev(log_rx)
+        except _stats.StatisticsError:
+            continue
+        if sd < 0.1:
+            # No spread — z is meaningless (creator posts are all roughly identical)
+            continue
+        creator_stats[cu] = (mu, sd)
+
+    # Score the candidate set (last candidate_days only, exclude this creator)
+    candidates: list[tuple[float, dict]] = []
+    for r in rows:
+        cu = (r.get("creator_username") or "").strip()
+        if not cu or cu == exclude_username:
+            continue
+        if cu not in creator_stats:
+            continue
+        posted_at = r.get("posted_at") or ""
+        try:
+            posted_dt = datetime.fromisoformat(posted_at.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if posted_dt < candidate_cutoff:
+            continue
+        rx = r.get("total_reactions") or 0
+        mu, sd = creator_stats[cu]
+        z = (math.log(rx + 1) - mu) / sd
+        candidates.append((z, r))
+
+    if not candidates:
+        return []
+
+    # Dedupe to one post per creator (highest z), take top limit
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    seen: set[str] = set()
+    picked: list[tuple[float, dict]] = []
+    for z, r in candidates:
+        cu = r["creator_username"]
+        if cu in seen:
+            continue
+        seen.add(cu)
+        picked.append((z, r))
+        if len(picked) >= limit:
+            break
+
+    out: list[str] = []
+    for z, r in picked:
+        rx = r.get("total_reactions") or 0
+        date = (r.get("posted_at") or "")[:10]
+        creator = r.get("creator_username") or "?"
+        hook = (r.get("hook") or "").strip()
+        if not hook:
+            hook = (r.get("post_text") or "").split("\n", 1)[0].strip()
+        hook = hook[:120]
+        sign = "+" if z >= 0 else ""
+        out.append(
+            f"  [{date}] @{creator:<26}  log_z={sign}{z:.2f}  ({rx} rx)   \"{hook}\""
+        )
     return out
 
 
