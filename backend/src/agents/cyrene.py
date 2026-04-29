@@ -85,7 +85,10 @@ def _strip_display_tags(obs_list: list[dict]) -> list[dict]:
     return out
 
 
-def _load_cyrene_observations(company: str) -> list[dict]:
+def _load_cyrene_observations(
+    company: str,
+    user_id: Optional[str] = None,
+) -> list[dict]:
     """Build the observation ledger for a company on-demand from the
     canonical Amphoreus Supabase tables.
 
@@ -121,8 +124,12 @@ def _load_cyrene_observations(company: str) -> list[dict]:
     on ``matched_provider_urn``, so every client with scraped LinkedIn
     content produces a real observation ledger.
 
-    Scoped to the FOC via ``DATABASE_USER_UUID`` env when set —
-    matches ``_resolve_linkedin_username``'s multi-FOC discipline.
+    Scoped to the FOC: caller can pass ``user_id`` explicitly (in-
+    process invocations like ``run_strategic_review``), or it falls
+    back to ``DATABASE_USER_UUID`` env (the MCP-subprocess path). At
+    multi-FOC clients (Trimble, Commenda, Hyperspell, Koah) one of
+    the two MUST be set or handle resolution fails and the function
+    returns empty.
     """
     import os as _os
     import statistics as _stats
@@ -138,7 +145,10 @@ def _load_cyrene_observations(company: str) -> list[dict]:
     if sb is None:
         return []
 
-    user_id = (_os.environ.get("DATABASE_USER_UUID") or "").strip() or None
+    # Explicit kwarg wins; env fallback covers MCP subprocess context
+    # where the parent wrote DATABASE_USER_UUID into the subprocess env.
+    if not user_id:
+        user_id = (_os.environ.get("DATABASE_USER_UUID") or "").strip() or None
     username = _resolve_linkedin_username(company, user_id=user_id)
     if not username:
         logger.info(
@@ -1168,10 +1178,15 @@ _TOOLS: list[dict[str, Any]] = [
             "    public voice should develop over the next 4-8 weeks. Each\n"
             "    cites which diagnosis bucket it addresses (`addresses`\n"
             "    field) and is tied to engagement / ICP-exposure evidence.\n"
-            "  - ``topics_to_probe``: threads the operator should pull on\n"
-            "    during the next Tribbie call. Grounded in a specific\n"
-            "    engagement signal, a question from a past post's comment\n"
-            "    section, or a gap in the transcript corpus. 5-12 entries.\n"
+            "  - ``topics_to_probe``: threads Tribbie should pull on\n"
+            "    in the next client interview to advance the strategy\n"
+            "    diagnosed above. Forward-looking: 'the diagnosis says\n"
+            "    X is broken/missing — we need the client to articulate\n"
+            "    Y on the next call to fix it.' Each entry cites which\n"
+            "    diagnosis bucket it addresses (``addresses`` field).\n"
+            "    NOT backward-looking follow-ups on already-discussed\n"
+            "    transcript material (those recycle content instead of\n"
+            "    advancing the strategy). 5-12 entries.\n"
             "  - ``topics_exhausted``: patterns / angles the client has\n"
             "    already posted to diminishing returns. Cite which posts.\n"
             "    0-5 entries. Do not invent.\n"
@@ -1314,24 +1329,83 @@ _TOOLS: list[dict[str, Any]] = [
                         "properties": {
                             "thread": {
                                 "type": "string",
-                                "description": "The topic / angle / story area Tribbie should pull on.",
+                                "description": (
+                                    "The topic / angle / story area Tribbie "
+                                    "should pull on in the next interview. "
+                                    "Forward-looking: what does this client "
+                                    "need to talk about NEXT to advance the "
+                                    "strategy diagnosed above?"
+                                ),
+                            },
+                            "addresses": {
+                                "type": "string",
+                                "description": (
+                                    "Which diagnosis bucket this probe "
+                                    "advances. Format: "
+                                    "``what_is_broken[N]`` / "
+                                    "``blind_spots[N]`` / "
+                                    "``what_is_working[N]`` (where N is "
+                                    "the index in that bucket's array). "
+                                    "Each probe MUST be tied to a specific "
+                                    "diagnosis entry — if you can't say "
+                                    "which bucket it advances, it doesn't "
+                                    "belong here. Drill-deeper-on-already-"
+                                    "discussed-detail probes are only "
+                                    "valid when the diagnosis explicitly "
+                                    "flags that drill as the strategic "
+                                    "move (e.g., ``what_is_broken`` says "
+                                    "the client only mentioned topic X in "
+                                    "passing and needs to develop it)."
+                                ),
                             },
                             "why": {
                                 "type": "string",
-                                "description": "Which engagement signal, comment, or transcript gap motivates probing this. Cite concretely.",
+                                "description": (
+                                    "Forward-looking rationale: what's "
+                                    "MISSING from the current content arc "
+                                    "that this probe would unlock? Cite "
+                                    "the specific gap (engagement signal, "
+                                    "comment thread, transcript silence, "
+                                    "ICP-segment exposure miss). NOT 'in "
+                                    "transcript X they mentioned Y, let's "
+                                    "ask more about Y' — that's "
+                                    "backward-looking. The right shape is "
+                                    "'the diagnosis says Z is broken, and "
+                                    "we need this client to articulate W "
+                                    "to fix it.'"
+                                ),
                             },
                             "suggested_entry_point": {
                                 "type": "string",
                                 "description": "Optional — a specific opening question or reference point Tribbie could use to get the client into the thread.",
                             },
                         },
-                        "required": ["thread", "why"],
+                        "required": ["thread", "addresses", "why"],
                     },
                     "description": (
-                        "Threads for the next client interview. Tribbie "
-                        "uses these as her topic menu — she'll phrase the "
-                        "questions in-session. Each entry is a pointer, "
-                        "not a scripted question. 5-12 entries."
+                        "Threads Tribbie should pull on in the next client "
+                        "interview to advance the strategy diagnosed above. "
+                        "5-12 entries.\n\n"
+                        "FORWARD-LOOKING, NOT FOLLOW-UP. The default failure "
+                        "mode is 'in transcript X the client mentioned Y, "
+                        "let's drill deeper into Y.' That produces probes "
+                        "that recycle existing material instead of "
+                        "developing the strategy.\n\n"
+                        "Right shape: 'The diagnosis says Z is broken / "
+                        "missing / under-developed. To fix Z, we need this "
+                        "client to articulate W on the next call.' The "
+                        "``addresses`` field forces this — every probe "
+                        "must point at a specific diagnosis bucket entry. "
+                        "If the probe doesn't advance the diagnosis, it "
+                        "doesn't belong in the brief.\n\n"
+                        "Drill-deeper probes ARE valid when the diagnosis "
+                        "itself names the drill as the strategic move "
+                        "(e.g., what_is_broken says 'client only "
+                        "name-dropped topic X once, never developed the "
+                        "actual point' — then a probe to develop X is "
+                        "advancing the diagnosis, not avoiding it). "
+                        "Default mode is forward-looking; drill-deeper "
+                        "is the named exception."
                     ),
                 },
                 "topics_exhausted": {
@@ -1560,8 +1634,19 @@ The four most important:
     link is explicit. Not tactics, not next-post instructions — \
     strategic direction over 4-8 weeks.
   - ``topics_to_probe`` (5-12) — threads for Tribbie's next \
-    interview, derived from the diagnosis (gaps to fill, blind \
-    spots to surface, working patterns to extend).
+    interview, derived FROM THE DIAGNOSIS YOU JUST WROTE. Forward-\
+    looking: "the diagnosis says X is broken/missing — we need the \
+    client to articulate Y on the next call to fix it." Each probe \
+    cites which diagnosis bucket entry it advances (``addresses`` \
+    field, same shape as ``strategic_themes``). \
+    \
+    Standard failure mode: backward-looking probes that drill into \
+    transcript material already covered ("in interview 3 they \
+    mentioned topic Z, let's ask more about Z"). That recycles \
+    existing content instead of moving the strategy. Drill-deeper \
+    probes are valid ONLY when the diagnosis itself names the drill \
+    as the strategic move — otherwise default to forward-looking \
+    new-territory probes that fill diagnosis gaps.
   - ``topics_exhausted`` (0-5), ``dm_targets`` (3-8), \
     ``next_run_trigger``, ``prose`` (400-1200 words) — supporting \
     structure. ``prose`` ties the diagnosis to the prescription \
@@ -1661,7 +1746,7 @@ def run_strategic_review(
     # ruan_mei_load read which always returned 0 after the
     # ruan_mei_state wipe. 2026-04-24.
     try:
-        n_scored = len(_load_cyrene_observations(company))
+        n_scored = len(_load_cyrene_observations(company, user_id=user_id))
     except Exception:
         n_scored = 0
 
