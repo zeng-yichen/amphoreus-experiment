@@ -1,8 +1,6 @@
 """Briefings API — reads Cyrene's strategic brief for interview prep."""
 
-import json
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -14,13 +12,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/briefings", tags=["briefings"])
 
 
-def _cyrene_brief_path(company: str) -> Path:
-    from backend.src.db import vortex
-    return vortex.memory_dir(company) / "cyrene_brief.json"
+def _load_cyrene_brief_from_supabase(company: str) -> dict | None:
+    """Read the latest Cyrene brief for ``company`` from Supabase.
+
+    2026-04-29: replaces the legacy fly-local fallback. Briefs live
+    exclusively in ``cyrene_briefs``. Returns None if Supabase has no
+    row for this company (or read fails) — caller surfaces 404.
+    """
+    try:
+        from backend.src.db.amphoreus_supabase import get_latest_cyrene_brief
+        return get_latest_cyrene_brief(company, strict_user_only=False)
+    except Exception as exc:
+        logger.warning("[briefings] Supabase brief lookup failed for %s: %s", company, exc)
+        return None
 
 
 def _brief_to_markdown(brief: dict) -> str:
-    """Render a Cyrene brief dict as markdown for ReactMarkdown consumption."""
+    """Render a Cyrene brief dict as markdown for ReactMarkdown consumption.
+
+    Brief shape (2026-04-22 BL cleanup):
+      * ``prose`` — free-form strategic memo (primary)
+      * ``dm_targets`` — structured handoff list
+      * ``next_run_trigger`` — when Cyrene should run again
+
+    Legacy schema (``content_priorities``, ``content_avoid``,
+    ``icp_exposure_assessment``, ``stelle_timing``) rendered as
+    fallback for pre-migration briefs.
+    """
     lines: list[str] = []
     company = brief.get("_company", "")
     computed = brief.get("_computed_at", "")
@@ -28,31 +46,38 @@ def _brief_to_markdown(brief: dict) -> str:
     if computed:
         lines.append(f"\n_Computed: {computed}_\n")
 
-    assess = brief.get("icp_exposure_assessment")
-    if assess:
-        lines.append("## ICP / Reach Assessment\n")
-        lines.append(str(assess).strip('"'))
+    prose = (brief.get("prose") or "").strip()
+    if prose:
+        lines.append("## Strategic Memo\n")
+        lines.append(prose)
         lines.append("")
+    else:
+        # Legacy fallback — old rigid-schema briefs still render.
+        assess = brief.get("icp_exposure_assessment")
+        if assess:
+            lines.append("## ICP / Reach Assessment\n")
+            lines.append(str(assess).strip('"'))
+            lines.append("")
 
-    timing = brief.get("stelle_timing")
-    if timing:
-        lines.append("## Stelle Timing\n")
-        lines.append(str(timing).strip('"'))
-        lines.append("")
+        timing = brief.get("stelle_timing")
+        if timing:
+            lines.append("## Stelle Timing\n")
+            lines.append(str(timing).strip('"'))
+            lines.append("")
 
-    prios = brief.get("content_priorities") or []
-    if prios:
-        lines.append("## Content Priorities\n")
-        for i, p in enumerate(prios, 1):
-            lines.append(f"{i}. {p}")
-        lines.append("")
+        prios = brief.get("content_priorities") or []
+        if prios:
+            lines.append("## Content Priorities\n")
+            for i, p in enumerate(prios, 1):
+                lines.append(f"{i}. {p}")
+            lines.append("")
 
-    avoid = brief.get("content_avoid") or []
-    if avoid:
-        lines.append("## Content Avoid\n")
-        for a in avoid:
-            lines.append(f"- {a}")
-        lines.append("")
+        avoid = brief.get("content_avoid") or []
+        if avoid:
+            lines.append("## Content Avoid\n")
+            for a in avoid:
+                lines.append(f"- {a}")
+            lines.append("")
 
     dms = brief.get("dm_targets") or []
     if dms:
@@ -101,17 +126,15 @@ def _brief_to_markdown(brief: dict) -> str:
 @router.get("/check/{company}")
 async def check_briefing(company: str):
     """Check whether a Cyrene brief exists for a company."""
-    return {"exists": _cyrene_brief_path(company).exists()}
+    return {"exists": _load_cyrene_brief_from_supabase(company) is not None}
 
 
 @router.get("/content/{company}")
 async def get_briefing_content(company: str):
     """Return the Cyrene brief as a markdown string for interview prep."""
-    path = _cyrene_brief_path(company)
-    if not path.exists():
+    brief = _load_cyrene_brief_from_supabase(company)
+    if not brief:
         raise HTTPException(status_code=404, detail="No Cyrene brief found. Run Cyrene first.")
-    brief = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(brief, dict):
         return {"content": _brief_to_markdown(brief)}
-    # Already a string (legacy) — return as-is
     return {"content": str(brief)}

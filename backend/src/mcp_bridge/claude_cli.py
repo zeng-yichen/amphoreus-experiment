@@ -1092,9 +1092,8 @@ def run_cyrene_cli(
     from pathlib import Path as _Path
 
     # Lazy imports to avoid circular
-    from backend.src.agents.cyrene import _SYSTEM_PROMPT, _BRIEF_FILENAME
+    from backend.src.agents.cyrene import _SYSTEM_PROMPT
     from backend.src.agents.irontomb import _load_icp_context
-    from backend.src.db import vortex as P
 
     logger.info(
         "[CLI-Cyrene] Starting CLI-based strategic review for %s (user_id=%s)...",
@@ -1127,7 +1126,7 @@ def run_cyrene_cli(
     # ruan_mei_state wipe. 2026-04-24.
     try:
         from backend.src.agents.cyrene import _load_cyrene_observations
-        n_scored = len(_load_cyrene_observations(company))
+        n_scored = len(_load_cyrene_observations(company, user_id=user_id))
     except Exception:
         n_scored = 0
 
@@ -1236,6 +1235,14 @@ def run_cyrene_cli(
     # Pull max turns from Cyrene constants to stay in sync.
     from backend.src.agents.cyrene import _CYRENE_MAX_TURNS
 
+    # Model selection — env-configurable so bulk refreshes can route
+    # around UPP refusals on Opus by switching to Sonnet without a
+    # code change. The CLI's UPP error message itself recommends this:
+    # "try running /model claude-sonnet-4-20250514 to switch models".
+    # Default sonnet-4-5 — strong enough for Cyrene's analysis and
+    # currently does not refuse the same engagement-data patterns.
+    _cyrene_model = (os.environ.get("CYRENE_CLI_MODEL") or "sonnet").strip() or "sonnet"
+
     try:
         cmd = [
             "claude",
@@ -1244,12 +1251,15 @@ def run_cyrene_cli(
             "--mcp-config", mcp_config_file,
             "--output-format", "stream-json",
             "--verbose",
-            "--model", "opus",
+            "--model", _cyrene_model,
             "--permission-mode", "bypassPermissions",
             "--max-turns", str(_CYRENE_MAX_TURNS),
         ]
 
-        logger.info("[CLI-Cyrene] Launching claude CLI (max %d turns)...", _CYRENE_MAX_TURNS)
+        logger.info(
+            "[CLI-Cyrene] Launching claude CLI (model=%s, max %d turns)...",
+            _cyrene_model, _CYRENE_MAX_TURNS,
+        )
         t0 = time.time()
         TIMEOUT_SEC = 3600  # Cyrene does 15-30 turns of deep analysis; 1 hour cap.
 
@@ -1305,7 +1315,7 @@ def run_cyrene_cli(
 
         _record_cli_usage(
             stdout=full_stdout,
-            cli_model="opus",
+            cli_model=_cyrene_model,
             call_kind="cyrene_cli",
             client_slug=company,
             duration_ms=int(elapsed * 1000),
@@ -1315,19 +1325,67 @@ def run_cyrene_cli(
         if timed_out:
             return {"_error": f"claude CLI timed out after {TIMEOUT_SEC}s"}
 
+        # Diagnostic: extract assistant text + tool-use names from the
+        # stream-json events so a failed run leaves enough breadcrumbs
+        # in the log to debug. Without this, "exit 1" + 300 chars of
+        # JSON metadata is unactionable.
+        def _summarize_session(stdout: str) -> str:
+            """Pull human-readable summary from claude CLI stream-json
+            output: assistant text + tool calls in order. Truncated."""
+            tool_calls: list[str] = []
+            assistant_texts: list[str] = []
+            for line in stdout.splitlines()[-200:]:
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                t = obj.get("type")
+                if t == "assistant":
+                    msg = obj.get("message") or {}
+                    for blk in msg.get("content") or []:
+                        if blk.get("type") == "text":
+                            txt = (blk.get("text") or "").strip()
+                            if txt:
+                                assistant_texts.append(txt[:1000])
+                        elif blk.get("type") == "tool_use":
+                            name = blk.get("name") or "?"
+                            inp_keys = list((blk.get("input") or {}).keys())
+                            tool_calls.append(f"{name}({','.join(inp_keys[:5])})")
+            parts = [f"tool_calls={tool_calls}"]
+            if assistant_texts:
+                parts.append(f"last_assistant_text={assistant_texts[-1][:600]!r}")
+            return " | ".join(parts)
+
         if returncode != 0:
-            logger.error("[CLI-Cyrene] CLI failed: %s", full_stderr[:500])
+            session_summary = _summarize_session(full_stdout)
+            logger.error(
+                "[CLI-Cyrene] CLI failed (exit %s): %s",
+                returncode, session_summary,
+            )
+            logger.info(
+                "[CLI-Cyrene] stderr tail: %s | stdout tail: %s",
+                full_stderr[-500:], full_stdout[-500:],
+            )
             return {
                 "_error": (
                     f"claude CLI exited {returncode}: "
-                    f"{full_stderr[:300] or full_stdout[-300:]}"
+                    f"{full_stderr[:300] or session_summary[:500]}"
                 ),
             }
 
         if not result_file.exists():
-            logger.error("[CLI-Cyrene] No result file at %s", result_file)
-            logger.info("[CLI-Cyrene] stdout tail: %s", full_stdout[-1000:])
-            return {"_error": "Cyrene CLI did not call submit_brief"}
+            session_summary = _summarize_session(full_stdout)
+            logger.error(
+                "[CLI-Cyrene] No result file (submit_brief not called). %s",
+                session_summary,
+            )
+            logger.info("[CLI-Cyrene] stdout tail: %s", full_stdout[-1500:])
+            return {
+                "_error": (
+                    "Cyrene CLI did not call submit_brief. "
+                    f"{session_summary[:300]}"
+                ),
+            }
 
         brief = json.loads(result_file.read_text(encoding="utf-8"))
 
@@ -1366,27 +1424,19 @@ def run_cyrene_cli(
                 company, user_id, _exc,
             )
 
-        # --- Persist fly-local (legacy / fallback) ---
-        try:
-            brief_path = P.memory_dir(company) / _BRIEF_FILENAME
-            brief_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = brief_path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(brief, indent=2, ensure_ascii=False, default=str),
-                encoding="utf-8",
-            )
-            tmp.rename(brief_path)
-            logger.info(
-                "[CLI-Cyrene] %s: brief saved. "
-                "interview_questions=%d, dm_targets=%d, content_priorities=%d",
-                company,
-                len(brief.get("interview_questions", [])),
-                len(brief.get("dm_targets", [])),
-                len(brief.get("content_priorities", [])),
-            )
-        except Exception as e:
-            logger.warning("[CLI-Cyrene] failed to persist brief for %s: %s", company, e)
-
+        # 2026-04-29: removed fly-local fallback persistence. Briefs
+        # live exclusively in Amphoreus Supabase (``cyrene_briefs``);
+        # the Supabase save above is the only persistence path.
+        logger.info(
+            "[CLI-Cyrene] %s: brief generated. "
+            "topics_to_probe=%d, strategic_themes=%d, "
+            "industry_signals=%d, dm_targets=%d",
+            company,
+            len(brief.get("topics_to_probe", [])),
+            len(brief.get("strategic_themes", [])),
+            len((brief.get("industry_context") or {}).get("current_signals") or []),
+            len(brief.get("dm_targets", [])),
+        )
         return brief
 
     finally:
