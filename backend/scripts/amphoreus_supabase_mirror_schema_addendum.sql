@@ -226,6 +226,34 @@ create index if not exists local_posts_embedding_ivfflat
     with (lists = 50);
 
 
+-- ---------------------------------------------------------------- local_posts: split why_post into three semantic fields (2026-04-29)
+--
+-- Pre-2026-04-29, ``why_post`` was a string concatenation of:
+--   1. Stelle's audit trail (provenance, Irontomb anchors, comfort scores —
+--      ~150-250 words of debugging fuel)
+--   2. Castorice's strategic-fit verdict (~50 words, glanceable)
+--   3. Castorice's fact-check report (variable, when corrections happened)
+--   4. Citations list (already had its own column)
+--
+-- The operator-facing UI showed the entire concatenation under "Castorice
+-- notes," which (a) buried the 50-word verdict under Stelle's prose and
+-- (b) misattributed Stelle's content to Castorice.
+--
+-- v2 splits these into three columns. ``why_post`` becomes the
+-- operator-facing rationale (Castorice strategic_fit_note ONLY).
+-- ``process_notes`` holds Stelle's audit trail (collapsed by default in
+-- the UI — debugging only). ``fact_check_report`` holds the fact-check
+-- transcript (its own UI expander, when present).
+--
+-- Old rows keep their concatenated ``why_post`` and have NULL on the new
+-- two columns. The UI tolerates both shapes; no backfill required.
+-- Safe to re-run.
+alter table if exists local_posts
+    add column if not exists process_notes      text;
+alter table if exists local_posts
+    add column if not exists fact_check_report  text;
+
+
 -- ---------------------------------------------------------------- linkedin_posts: Amphoreus-owned scrape marker
 --
 -- Added by backend/src/services/amphoreus_linkedin_scrape.py, the

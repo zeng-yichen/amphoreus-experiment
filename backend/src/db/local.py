@@ -11,7 +11,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from backend.src.core.config import get_settings
 
@@ -122,16 +122,37 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_client ON workspace_snapshots(client_sl
 CREATE TABLE IF NOT EXISTS local_posts (
     id TEXT PRIMARY KEY,
     company TEXT NOT NULL,
+    -- FOC-user UUID (Jacquard users.id). Mirrors how Jacquard's own
+    -- drafts table disambiguates: one row per FOC user, not per
+    -- company. NULL is legal for historical rows and company-wide
+    -- writes that don't scope to a specific user.
+    user_id TEXT,
     content TEXT NOT NULL,
     title TEXT,
     status TEXT NOT NULL DEFAULT 'draft',
+    -- Operator-facing rationale. Authored by Castorice
+    -- (analyze_strategic_fit), capped at ~50-60 words, glanceable in the
+    -- Posts UI without expansion. Pre-2026-04-29 rows may contain a
+    -- multi-section concatenation of Stelle's prose + Castorice's verdict
+    -- + fact-check report; new rows hold ONLY Castorice's verdict.
     why_post TEXT,
+    -- Stelle's audit trail: provenance, Irontomb anchor highlights,
+    -- comfort score, length stats, decision rationale. Hidden behind a
+    -- "Show process notes" expander in the UI; useful for debugging,
+    -- not for review-time judgment.
+    process_notes TEXT,
+    -- Castorice fact-check transcript (what was changed, what was
+    -- flagged). Rendered in its own UI expander when present.
+    fact_check_report TEXT,
     citation_comments TEXT,
     ordinal_post_id TEXT,
     linked_image_id TEXT,
     created_at REAL NOT NULL DEFAULT (unixepoch('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_local_posts_company ON local_posts(company);
+-- idx_local_posts_user index is created by _migrate_local_posts_columns
+-- after the ALTER TABLE that adds user_id to existing DBs; creating it
+-- here would fail for DBs where user_id hasn't been added yet.
 
 CREATE TABLE IF NOT EXISTS ruan_mei_state (
     company TEXT PRIMARY KEY,
@@ -236,6 +257,10 @@ def _migrate_local_posts_columns(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in rows}
     if "why_post" not in cols:
         conn.execute("ALTER TABLE local_posts ADD COLUMN why_post TEXT")
+    if "process_notes" not in cols:
+        conn.execute("ALTER TABLE local_posts ADD COLUMN process_notes TEXT")
+    if "fact_check_report" not in cols:
+        conn.execute("ALTER TABLE local_posts ADD COLUMN fact_check_report TEXT")
     if "citation_comments" not in cols:
         conn.execute("ALTER TABLE local_posts ADD COLUMN citation_comments TEXT")
     if "ordinal_post_id" not in cols:
@@ -252,6 +277,11 @@ def _migrate_local_posts_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE local_posts ADD COLUMN scheduled_date TEXT")
     if "publication_order" not in cols:
         conn.execute("ALTER TABLE local_posts ADD COLUMN publication_order INTEGER")
+    if "user_id" not in cols:
+        conn.execute("ALTER TABLE local_posts ADD COLUMN user_id TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_local_posts_user ON local_posts(user_id)"
+        )
 
 
 # --- Run helpers ---
@@ -386,6 +416,92 @@ def cache_cleanup() -> int:
 
 # --- Local post helpers ---
 
+def _mirror_to_supabase(fn_name: str, *args, **kwargs) -> None:
+    """Fire-and-log secondary write to Amphoreus Supabase.
+
+    Every SQLite-backed ``local_posts`` mutation below also mirrors
+    through here so Hyacinthia / the Posts-tab API can read from
+    Supabase as the primary source. If Supabase is unreachable (503
+    during DDL windows, etc.) we log + continue — SQLite remains the
+    safety net until the full cutover.
+    """
+    try:
+        from backend.src.db import amphoreus_supabase as _sb
+        fn = getattr(_sb, fn_name, None)
+        if fn is None:
+            return
+        fn(*args, **kwargs)
+    except Exception as exc:
+        logger.debug("[local_posts mirror] %s failed: %s", fn_name, exc)
+
+
+def _record_content_revision(
+    post_id: str,
+    content: str,
+    *,
+    source: str,
+    author_email: str | None = None,
+) -> None:
+    """Append a row to ``local_post_revisions`` every time a draft's
+    content changes.
+
+    Called from :func:`create_local_post` (source=``stelle_initial``)
+    and from every content-mutating update path (edit, revert,
+    rewrite). Best-effort — failures log at debug and swallow, because
+    the canonical write to ``local_posts`` has already succeeded and
+    we'd rather lose a revision-history row than fail the operator's
+    save.
+
+    The revisions table lives in Amphoreus Supabase, not SQLite —
+    local history isn't useful and would just double-write. If the
+    mirror table doesn't exist yet (pre-migration) we silently no-op.
+    """
+    try:
+        from backend.src.db.amphoreus_supabase import _get_client, is_configured
+    except Exception:
+        return
+    if not is_configured():
+        return
+    try:
+        sb = _get_client()
+        if sb is None:
+            return
+        sb.table("local_post_revisions").insert({
+            "draft_id": post_id,
+            "content": content,
+            "source": source,
+            "author_email": author_email,
+        }).execute()
+    except Exception as exc:
+        import logging as _l
+        _l.getLogger(__name__).debug(
+            "[local_posts] revision record skipped (post=%s source=%s): %s",
+            post_id, source, exc,
+        )
+
+
+def _mirror_embed_local_post_content(post_id: str, content: str) -> None:
+    """Best-effort embed + stamp on the Supabase mirror row.
+
+    Lives alongside the other mirror writes because embedding lives only
+    in Supabase (pgvector column); SQLite has no vector type. Runs
+    inline so a freshly-inserted draft is immediately searchable by the
+    match-back worker, at the cost of one OpenAI embedding call per
+    write (~100-300ms). Never raises — silent on any failure.
+    """
+    if not post_id or not content or not content.strip():
+        return
+    try:
+        from backend.src.db import amphoreus_supabase as _sb
+        emb = _sb.embed_text_for_local_post(content)
+        if emb is not None:
+            _sb.set_local_post_embedding(post_id, emb)
+    except Exception as exc:
+        logger.debug(
+            "[local_posts mirror] embed %s failed: %s", post_id[:12], exc,
+        )
+
+
 def create_local_post(
     post_id: str,
     company: str,
@@ -393,28 +509,77 @@ def create_local_post(
     title: str | None = None,
     status: str = "draft",
     why_post: str | None = None,
+    process_notes: str | None = None,
+    fact_check_report: str | None = None,
     citation_comments: list[str] | None = None,
     pre_revision_content: str | None = None,
     cyrene_score: float | None = None,
     generation_metadata: dict | None = None,
     publication_order: int | None = None,
     scheduled_date: str | None = None,
+    user_id: str | None = None,
 ) -> dict:
+    """Insert a draft row.
+
+    ``user_id`` is the Jacquard FOC-user UUID when the draft belongs to a
+    specific person (Heather vs Mark within Trimble, Logan vs Sam within
+    Commenda). Leave NULL for company-wide writes or legacy callers.
+
+    Dual-write: primary destination is Amphoreus Supabase (``local_posts``
+    table), secondary is fly-local SQLite. Reads (``list_local_posts`` /
+    ``get_local_post``) prefer Supabase; SQLite is the fallback / safety
+    net during the migration window.
+    """
     cc_json = json.dumps(citation_comments) if citation_comments else None
     gen_meta_json = json.dumps(generation_metadata) if generation_metadata else None
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO local_posts (id, company, content, title, status, why_post, citation_comments, ordinal_post_id, linked_image_id, pre_revision_content, cyrene_score, generation_metadata, publication_order, scheduled_date) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)",
-            (post_id, company, content, title, status, why_post, cc_json, pre_revision_content, cyrene_score, gen_meta_json, publication_order, scheduled_date),
+            "INSERT INTO local_posts (id, company, user_id, content, title, status, why_post, process_notes, fact_check_report, citation_comments, ordinal_post_id, linked_image_id, pre_revision_content, cyrene_score, generation_metadata, publication_order, scheduled_date) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)",
+            (post_id, company, user_id, content, title, status, why_post, process_notes, fact_check_report, cc_json, pre_revision_content, cyrene_score, gen_meta_json, publication_order, scheduled_date),
         )
+    # Mirror to Amphoreus Supabase (Posts tab + Hyacinthia source of truth).
+    _mirror_to_supabase(
+        "insert_local_post",
+        {
+            "id": post_id,
+            "company": company,
+            "user_id": user_id,
+            "content": content,
+            "title": title,
+            "status": status,
+            "why_post": why_post,
+            "process_notes": process_notes,
+            "fact_check_report": fact_check_report,
+            "citation_comments": cc_json,
+            "ordinal_post_id": None,
+            "linked_image_id": None,
+            "pre_revision_content": pre_revision_content,
+            "cyrene_score": cyrene_score,
+            "generation_metadata": gen_meta_json,
+            "publication_order": publication_order,
+            "scheduled_date": scheduled_date,
+        },
+    )
+    # Embed + stamp the embedding column so the draft_match_worker can
+    # cosine-pair this draft with whatever LinkedIn post it lands on.
+    # Best-effort only — Supabase mirror is already written, and the
+    # match-back worker skips rows with NULL embedding without erroring.
+    _mirror_embed_local_post_content(post_id, content)
+    # Seed the revision history with Stelle's initial write so later
+    # reverts and diffs have a baseline. Subsequent content changes get
+    # additional rows via update_local_post / update_local_post_fields.
+    _record_content_revision(post_id, content, source="stelle_initial")
     return get_local_post(post_id) or {
         "id": post_id,
         "company": company,
+        "user_id": user_id,
         "content": content,
         "title": title,
         "status": status,
         "why_post": why_post,
+        "process_notes": process_notes,
+        "fact_check_report": fact_check_report,
         "citation_comments": cc_json,
         "ordinal_post_id": None,
         "linked_image_id": None,
@@ -422,9 +587,95 @@ def create_local_post(
     }
 
 
-def list_local_posts(company: str | None = None, limit: int = 50) -> list[dict]:
+def list_local_posts(
+    company: str | None = None,
+    limit: int = 50,
+    user_id: str | None = None,
+) -> list[dict]:
+    """List draft rows.
+
+    Filter semantics:
+      - ``user_id`` + ``company``  → rows for this specific FOC user,
+        PLUS rows in the same company with ``user_id=NULL`` (legacy
+        orphans — see invariant note below).
+      - ``user_id`` alone          → strictly per-FOC-user view.
+      - ``company`` alone          → company-wide view, mixes all users
+        including NULL-user-id orphans. This is the admin view.
+      - neither                    → all rows (admin view).
+
+    **Why NULL rows are inclusive here (history — 2026-04-22):**
+
+    A per-FOC query returns BOTH the user's own rows AND NULL-user-id
+    rows under the same company, for two reasons:
+
+    1. At single-FOC companies (Overwolf, Hensley, Innovo, Hume AI,
+       Flora-until-Weber-was-added), every draft written before
+       per-FOC stamping landed with user_id=NULL. The sole FOC is
+       unambiguously the owner; strict filtering would silently hide
+       every legacy draft. 4+ clients in the database today are in
+       this state.
+
+    2. At explicitly-shared multi-FOC companies (Trimble heather/mark,
+       Commenda logan/sam — see memory note
+       ``project_trimble_shared_ordinal_account.md``), one Ordinal
+       account + one FOC pool + shared drafting is the operator
+       model. Inclusive NULL filtering matches that.
+
+    The original leak case — Virio, where 4 orphan drafts written via
+    bare ``virio`` slug leaked into every one of 19 FOC's posts tabs —
+    is now blocked at the **write** path (``submit_draft`` refuses to
+    write an orphan when ``DATABASE_COMPANY_ID`` indicates multi-FOC
+    mode, see stelle.py). So going forward, NULL-user rows only arise
+    at single-FOC companies or legacy rows — both of which inclusive
+    filtering handles correctly.
+
+    Hardening path (not shipped today, queued): backfill the 19
+    remaining NULL rows to their rightful FOC, then tighten this
+    filter back to strict. Until then, **inclusive is the safe
+    default** because write-side orphaning is now prevented.
+
+    Read-preferred: Amphoreus Supabase is the primary store. SQLite
+    serves as fallback when Supabase returns an empty result.
+    """
+    # Primary: Amphoreus Supabase
+    try:
+        from backend.src.db import amphoreus_supabase as _sb
+        if _sb.is_configured():
+            rows = _sb.list_local_posts(company=company, limit=limit)
+            if user_id:
+                if company:
+                    # Inclusive: this user's rows OR NULL-user rows in
+                    # this company. See docstring — safe because write
+                    # path now refuses to orphan at multi-FOC companies.
+                    rows = [
+                        r for r in rows
+                        if r.get("user_id") == user_id
+                        or not (r.get("user_id") or "").strip()
+                    ]
+                else:
+                    # No company context → can't widen. Strict filter.
+                    rows = [r for r in rows if r.get("user_id") == user_id]
+            if rows:
+                return rows
+    except Exception as exc:
+        logger.debug("[list_local_posts] Supabase read failed, falling back: %s", exc)
+
+    # Fallback: SQLite
     with get_connection() as conn:
-        if company:
+        if user_id and company:
+            # Inclusive: user's rows OR NULL-user rows in this company.
+            rows = conn.execute(
+                "SELECT * FROM local_posts "
+                "WHERE company=? AND (user_id=? OR user_id IS NULL OR user_id='') "
+                "ORDER BY created_at DESC LIMIT ?",
+                (company, user_id, limit),
+            ).fetchall()
+        elif user_id:
+            rows = conn.execute(
+                "SELECT * FROM local_posts WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+        elif company:
             rows = conn.execute(
                 "SELECT * FROM local_posts WHERE company=? ORDER BY created_at DESC LIMIT ?",
                 (company, limit),
@@ -438,6 +689,15 @@ def list_local_posts(company: str | None = None, limit: int = 50) -> list[dict]:
 
 
 def get_local_post(post_id: str) -> dict | None:
+    """Read-preferred: Amphoreus Supabase, SQLite fallback."""
+    try:
+        from backend.src.db import amphoreus_supabase as _sb
+        if _sb.is_configured():
+            row = _sb.get_local_post(post_id)
+            if row:
+                return row
+    except Exception as exc:
+        logger.debug("[get_local_post] Supabase read failed, falling back: %s", exc)
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM local_posts WHERE id=?", (post_id,)).fetchone()
         return dict(row) if row else None
@@ -448,19 +708,41 @@ def update_local_post(
     content: str | None = None,
     status: str | None = None,
     title: str | None = None,
+    *,
+    revision_source: str = "operator_edit",
+    revision_author: str | None = None,
 ) -> dict | None:
+    """Update mutable fields on a draft.
+
+    When ``content`` changes, a ``local_post_revisions`` row is
+    appended with ``revision_source`` (default ``operator_edit``).
+    Callers that represent a different provenance (Castorice rewrite,
+    revert-to-original, rewrite-with-feedback) should pass a specific
+    ``revision_source`` so downstream eval can slice the history
+    accurately.
+    """
     fields, values = [], []
+    mirror_fields: dict[str, Any] = {}
     if content is not None:
-        fields.append("content=?"); values.append(content)
+        fields.append("content=?"); values.append(content); mirror_fields["content"] = content
     if status is not None:
-        fields.append("status=?"); values.append(status)
+        fields.append("status=?"); values.append(status); mirror_fields["status"] = status
     if title is not None:
-        fields.append("title=?"); values.append(title)
+        fields.append("title=?"); values.append(title); mirror_fields["title"] = title
     if not fields:
         return get_local_post(post_id)
     values.append(post_id)
     with get_connection() as conn:
         conn.execute(f"UPDATE local_posts SET {', '.join(fields)} WHERE id=?", values)
+    if mirror_fields:
+        _mirror_to_supabase("update_local_post_fields", post_id, mirror_fields)
+    if content is not None:
+        _mirror_embed_local_post_content(post_id, content)
+        _record_content_revision(
+            post_id, content,
+            source=revision_source,
+            author_email=revision_author,
+        )
     return get_local_post(post_id)
 
 
@@ -471,6 +753,9 @@ def update_post_schedule(post_id: str, scheduled_date: str | None) -> dict | Non
             "UPDATE local_posts SET scheduled_date=? WHERE id=?",
             (scheduled_date, post_id),
         )
+    _mirror_to_supabase(
+        "update_local_post_fields", post_id, {"scheduled_date": scheduled_date}
+    )
     return get_local_post(post_id)
 
 
@@ -505,8 +790,19 @@ def list_calendar_posts(company: str, month: str | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def update_local_post_fields(post_id: str, updates: dict[str, Any]) -> dict | None:
-    """Partial update: only keys present in ``updates`` are written (e.g. exclude_unset from PATCH)."""
+def update_local_post_fields(
+    post_id: str,
+    updates: dict[str, Any],
+    *,
+    revision_source: str = "operator_edit",
+    revision_author: str | None = None,
+) -> dict | None:
+    """Partial update: only keys present in ``updates`` are written (e.g. exclude_unset from PATCH).
+
+    When ``content`` is in ``updates``, a ``local_post_revisions`` row
+    is appended — see :func:`update_local_post` for the provenance
+    convention.
+    """
     col_map = {
         "content": "content",
         "status": "status",
@@ -516,6 +812,7 @@ def update_local_post_fields(post_id: str, updates: dict[str, Any]) -> dict | No
         "publication_order": "publication_order",
     }
     fields, values = [], []
+    mirror_fields: dict[str, Any] = {}
     for key, col in col_map.items():
         if key not in updates:
             continue
@@ -524,30 +821,87 @@ def update_local_post_fields(post_id: str, updates: dict[str, Any]) -> dict | No
             val = val or None
         fields.append(f"{col}=?")
         values.append(val)
+        mirror_fields[col] = val
     if not fields:
         return get_local_post(post_id)
     values.append(post_id)
     with get_connection() as conn:
         conn.execute(f"UPDATE local_posts SET {', '.join(fields)} WHERE id=?", values)
+    if mirror_fields:
+        _mirror_to_supabase("update_local_post_fields", post_id, mirror_fields)
+    if "content" in updates and updates["content"] is not None:
+        _mirror_embed_local_post_content(post_id, updates["content"])
+        _record_content_revision(
+            post_id, updates["content"],
+            source=revision_source,
+            author_email=revision_author,
+        )
     return get_local_post(post_id)
 
 
 def set_local_post_ordinal_post_id(local_post_id: str, ordinal_post_id: str | None) -> dict | None:
-    """Store latest Ordinal workspace post id after a successful push (re-push overwrites)."""
+    """Store latest Ordinal workspace post id after a successful push (re-push overwrites).
+
+    Setting ``ordinal_post_id`` to a non-empty value marks the draft
+    as pushed — the next Stelle-run wipe will preserve it (only rows
+    with NULL/empty ordinal_post_id are wiped).
+    """
     with get_connection() as conn:
         conn.execute(
             "UPDATE local_posts SET ordinal_post_id=? WHERE id=?",
             (ordinal_post_id, local_post_id),
         )
+    # Mirror. Also flip status → 'pushed' in Supabase when we have a
+    # non-empty ordinal id so the Posts tab and the wipe filter agree.
+    mirror_fields: dict[str, Any] = {"ordinal_post_id": ordinal_post_id}
+    if ordinal_post_id:
+        mirror_fields["status"] = "pushed"
+    _mirror_to_supabase("update_local_post_fields", local_post_id, mirror_fields)
     return get_local_post(local_post_id)
 
 
-def delete_local_post(post_id: str) -> None:
+def delete_local_post(post_id: str, *, deleted_by: str = "system", reason: Optional[str] = None) -> None:
+    """Delete a draft.
+
+    Dual-surface: SQLite (legacy local cache) + Amphoreus Supabase
+    (authoritative, read by the Posts tab). The Supabase delete is
+    called **directly** here, not via ``_mirror_to_supabase`` — that
+    dispatcher swallows all exceptions at DEBUG level, which used to
+    mask Supabase-side failures (RLS, FK constraint, permission) and
+    let the HTTP layer report "deleted" while the row persisted.
+
+    Any Supabase-side failure now raises so the HTTP route can surface
+    a real error instead of lying to the UI. SQLite-side failures also
+    raise (same policy).
+
+    ``log_deletion`` is best-effort — audit-log failure is non-critical
+    and explicitly swallowed.
+    """
+    # Snapshot before delete so the audit log captures the row content.
+    snapshot: dict | None = None
     with get_connection() as conn:
+        row = conn.execute("SELECT * FROM local_posts WHERE id=?", (post_id,)).fetchone()
+        if row is not None:
+            snapshot = {k: row[k] for k in row.keys()}
         conn.execute("DELETE FROM local_posts WHERE id=?", (post_id,))
+    # Authoritative surface — raise on any Supabase failure.
+    from backend.src.db import amphoreus_supabase as _sb
+    _sb.delete_local_post(post_id)
+    # Audit log — best-effort.
+    try:
+        from backend.src.db.amphoreus_supabase import log_deletion
+        log_deletion(
+            entity_type="local_post",
+            entity_id=post_id,
+            entity_snapshot=snapshot,
+            deleted_by=deleted_by,
+            reason=reason,
+        )
+    except Exception:
+        pass
 
 
-def purge_unpushed_drafts(company: str) -> int:
+def purge_unpushed_drafts(company: str, user_id: str | None = None) -> int:
     """Delete all draft local_posts rows for a company that never reached Ordinal.
 
     Called at the start of every Stelle run so each new batch starts with a
@@ -555,27 +909,78 @@ def purge_unpushed_drafts(company: str) -> int:
     was never committed to Ordinal, so per the user's dedup model it
     "doesn't exist" and should not persist across runs.
 
+    **User scoping (2026-04-22 incident fix).** When ``user_id`` is
+    supplied, the purge is scoped to that FOC's rows plus any NULL-
+    user orphans (which belong to nobody and can safely clear out
+    alongside the user's batch). A Stelle run for one Virio FOC no
+    longer wipes every other Virio FOC's unpushed drafts. Stelle's
+    start-of-run hook always passes ``user_id`` when it's in per-FOC
+    mode (``DATABASE_USER_UUID`` env set by stelle_runner).
+
     Preserves:
       - Rows with a non-empty ordinal_post_id (pushed to Ordinal — even if
         the post later got unpublished, the Ordinal workspace still owns it)
       - Rows whose status is anything other than 'draft' (e.g. 'posted',
         'scheduled', 'failed' — those represent states the operator might
         still need to see)
+      - At per-FOC scope: OTHER FOCs' draft rows at the same company.
 
     Returns the number of rows deleted.
     """
     company = (company or "").strip()
     if not company:
         return 0
+    # Snapshot candidates BEFORE deleting so each wiped row lands in
+    # deletion_log with its content. Without this, the purge erases
+    # history we might want to replay later.
     with get_connection() as conn:
-        cur = conn.execute(
-            "DELETE FROM local_posts "
-            "WHERE company = ? "
-            "  AND status = 'draft' "
-            "  AND (ordinal_post_id IS NULL OR ordinal_post_id = '')",
-            (company,),
+        base_pred = (
+            "company = ? AND status = 'draft' "
+            "AND (ordinal_post_id IS NULL OR ordinal_post_id = '')"
         )
-        return cur.rowcount or 0
+        if user_id:
+            # Per-FOC scope: user's rows OR NULL-user orphans.
+            pred = base_pred + " AND (user_id = ? OR user_id IS NULL OR user_id = '')"
+            params = (company, user_id)
+        else:
+            pred = base_pred
+            params = (company,)
+        snapshots = [
+            {k: r[k] for k in r.keys()}
+            for r in conn.execute(
+                f"SELECT * FROM local_posts WHERE {pred}",
+                params,
+            ).fetchall()
+        ]
+        cur = conn.execute(
+            f"DELETE FROM local_posts WHERE {pred}",
+            params,
+        )
+        deleted = cur.rowcount or 0
+    # Audit every wiped draft. Done after the SQLite delete commits so
+    # the log never points to something still present.
+    try:
+        from backend.src.db.amphoreus_supabase import log_deletion
+        for snap in snapshots:
+            log_deletion(
+                entity_type="local_post",
+                entity_id=snap.get("id"),
+                entity_snapshot=snap,
+                deleted_by="system",
+                reason=(
+                    f"purge_unpushed_drafts(company={company}, user_id={user_id})"
+                    if user_id else f"purge_unpushed_drafts({company})"
+                ),
+            )
+    except Exception:
+        pass
+    # Also wipe in Amphoreus Supabase so the Posts tab stays consistent
+    # with the "fresh batch" UX — posts that Stelle replaces shouldn't
+    # linger after the run kicks off. Supabase-side wipe deliberately
+    # does NOT re-log — the SQLite path above is the authoritative
+    # audit record for a given purge.
+    _mirror_to_supabase("wipe_unpushed_drafts", company, user_id=user_id)
+    return deleted
 
 
 # --- RuanMei state helpers ---

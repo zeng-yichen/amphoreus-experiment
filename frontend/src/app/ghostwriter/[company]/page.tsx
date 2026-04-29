@@ -2307,16 +2307,25 @@ function PostsManager({
                 );
               })()}
 
-              {/* Castorice notes: why_post rationale + citation_comments.
-                  Previously invisible in the UI and only visible after
-                  push (as Ordinal thread comments). Surfaced here
-                  (2026-04-23) so the operator can review rationale +
-                  fact-check receipts BEFORE pushing. Collapsed by
-                  default so the card stays compact; operator opens
-                  when they want to audit. Null-return when both are
-                  empty — no empty expander ceremony. */}
+              {/* Three-way split (2026-04-29):
+                    1. why_post  — Castorice's strategic-fit verdict
+                       (~50 words). Visible by default — glanceable
+                       rationale the operator reads before push.
+                    2. process_notes — Stelle's audit trail. Hidden
+                       behind a "Show process notes" expander; debugging
+                       only, not review-time judgment.
+                    3. fact_check_report + citation_comments — Castorice
+                       fact-check transcript. Own collapsed expander.
+
+                    Pre-split rows have the entire mishmash in why_post
+                    and NULL on the other two columns; we just render
+                    that as-is (operator sees the long version on legacy
+                    drafts, the new short version on fresh ones). */}
               {(() => {
                 const whyPost = (post.why_post || "").trim();
+                const processNotes = (post.process_notes || "").trim();
+                const factCheckReport = (post.fact_check_report || "").trim();
+
                 let citations: string[] = [];
                 const cc = post.citation_comments;
                 if (cc) {
@@ -2335,47 +2344,71 @@ function PostsManager({
                     }
                   }
                 }
-                if (!whyPost && citations.length === 0) return null;
-                const labelBits = [
-                  whyPost ? "rationale" : "",
-                  citations.length ? `${citations.length} citation${citations.length !== 1 ? "s" : ""}` : "",
-                ].filter(Boolean).join(" · ");
+
+                if (!whyPost && !processNotes && !factCheckReport && citations.length === 0) {
+                  return null;
+                }
+
                 return (
-                  <details className="mb-3 rounded border border-stone-800 bg-stone-950/40">
-                    <summary className="cursor-pointer px-3 py-1.5 text-xs text-stone-400 hover:text-stone-200 list-none">
-                      <span className="font-medium">Castorice notes</span>
-                      {labelBits && (
-                        <span className="ml-2 text-[10px] text-stone-500">{labelBits}</span>
-                      )}
-                    </summary>
-                    <div className="space-y-3 border-t border-stone-800/70 px-3 py-2 text-xs text-stone-300">
-                      {whyPost && (
-                        <div>
-                          <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-stone-500">
-                            Why we&apos;re posting this (internal)
-                          </div>
-                          <div className="whitespace-pre-wrap">{whyPost}</div>
+                  <div className="mb-3 space-y-2">
+                    {/* Operator-facing rationale — visible by default */}
+                    {whyPost && (
+                      <div className="rounded border border-stone-800 bg-stone-950/40 px-3 py-2 text-xs text-stone-300">
+                        <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-stone-500">
+                          Why we&apos;re posting this
                         </div>
-                      )}
-                      {citations.length > 0 && (
-                        <div>
-                          <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-stone-500">
-                            Citations ({citations.length})
-                          </div>
-                          <ul className="space-y-2">
-                            {citations.map((c, i) => (
-                              <li
-                                key={i}
-                                className="rounded border border-stone-800 bg-stone-900/60 p-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap"
-                              >
-                                {c}
-                              </li>
-                            ))}
-                          </ul>
+                        <div className="whitespace-pre-wrap">{whyPost}</div>
+                      </div>
+                    )}
+
+                    {/* Audit trail — collapsed by default */}
+                    {processNotes && (
+                      <details className="rounded border border-stone-800 bg-stone-950/40">
+                        <summary className="cursor-pointer px-3 py-1.5 text-[11px] text-stone-500 hover:text-stone-300 list-none">
+                          Show process notes
+                        </summary>
+                        <div className="border-t border-stone-800/70 px-3 py-2 text-xs text-stone-400 whitespace-pre-wrap">
+                          {processNotes}
                         </div>
-                      )}
-                    </div>
-                  </details>
+                      </details>
+                    )}
+
+                    {/* Fact-check + citations — own collapsed expander */}
+                    {(factCheckReport || citations.length > 0) && (
+                      <details className="rounded border border-stone-800 bg-stone-950/40">
+                        <summary className="cursor-pointer px-3 py-1.5 text-xs text-stone-400 hover:text-stone-200 list-none">
+                          <span className="font-medium">Castorice fact-check</span>
+                          {citations.length > 0 && (
+                            <span className="ml-2 text-[10px] text-stone-500">
+                              {citations.length} citation{citations.length !== 1 ? "s" : ""}
+                            </span>
+                          )}
+                        </summary>
+                        <div className="space-y-3 border-t border-stone-800/70 px-3 py-2 text-xs text-stone-300">
+                          {factCheckReport && (
+                            <div className="whitespace-pre-wrap">{factCheckReport}</div>
+                          )}
+                          {citations.length > 0 && (
+                            <div>
+                              <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-stone-500">
+                                Citations ({citations.length})
+                              </div>
+                              <ul className="space-y-2">
+                                {citations.map((c, i) => (
+                                  <li
+                                    key={i}
+                                    className="rounded border border-stone-800 bg-stone-900/60 p-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap"
+                                  >
+                                    {c}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      </details>
+                    )}
+                  </div>
                 );
               })()}
 

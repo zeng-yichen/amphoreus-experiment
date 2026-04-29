@@ -241,8 +241,10 @@ edit on that span isn't working — escalate (rewrite the section \
 larger, or kill the angle). Cap at 12 cycles per post.
 5. Call `submit_draft` with the finished post. `submit_draft` persists \
 the draft to Amphoreus's `local_posts` for operator review and runs \
-Castorice fact-check; fact-check output lands on `why_post` where the \
-operator sees it at review time.
+Castorice fact-check + strategic-fit analysis. Castorice's strategic-fit \
+verdict is what the operator sees as the post's `why_post` at review \
+time; your `process_notes` argument (your audit trail) is hidden by \
+default behind a "Show process notes" expander.
 6. Repeat steps 2-5 for all planned posts. When every post is complete, \
 call `write_result` with the final JSON. The order of posts in the \
 `posts` array IS the publication order — put the post you want \
@@ -537,8 +539,15 @@ _TOOLS = [
             "the FOC user themselves if no AM is set.\n"
             "  publication_order (int, optional): sequencing hint when "
             "producing multiple drafts in one run (1, 2, 3…).\n"
-            "  why_post (string, optional): your rationale — why this "
-            "post, this angle, this hook. Stored as a draft_comment."
+            "  process_notes (string, optional): your audit trail — "
+            "transcript provenance, Irontomb anchor highlights, comfort "
+            "score, length-vs-IQR, decision rationale, why you rejected "
+            "the prior iteration. Hidden behind a 'Show process notes' "
+            "expander in the operator UI; useful for debugging and "
+            "post-hoc review, NOT for review-time judgment. Be terse. "
+            "Castorice writes the operator-facing why_post separately "
+            "from the latest Cyrene brief — DO NOT duplicate "
+            "strategic-fit analysis here."
         ),
         "input_schema": {
             "type": "object",
@@ -551,6 +560,10 @@ _TOOLS = [
                     "items": {"type": "string"},
                 },
                 "publication_order": {"type": "integer"},
+                # ``process_notes`` is the new home for Stelle's audit
+                # trail. ``why_post`` is also accepted for backward
+                # compatibility — the wrapper routes it to process_notes.
+                "process_notes": {"type": "string"},
                 "why_post": {"type": "string"},
             },
             "required": ["user_slug", "content"],
@@ -1018,7 +1031,7 @@ def _lineage_write_blocked_message(path: str) -> str:
         "workspace, which is READ-ONLY to Stelle (it's the client's space).\n\n"
         "Your options:\n"
         "  • FINAL drafts: call `submit_draft(user_slug, content, "
-        "scheduled_date, why_post)` — the only write tool that reaches database.\n"
+        "scheduled_date, process_notes)` — the only write tool that reaches database.\n"
         "  • Scratch / working notes / draft iterations: write to any path "
         "OUTSIDE the database mount tree. Good choices: `scratch/post1-v1.md`, "
         "`scratch/plan.md`, `notes/brainstorm.md`. Those land on your "
@@ -1260,7 +1273,17 @@ def _dispatch_submit_draft(root, args):
     draft_id = str(_uuid.uuid4())
     scheduled_date = args.get("scheduled_date") or None
     publication_order = args.get("publication_order")
+    # 2026-04-29 split: ``why_post`` is now operator-facing only
+    # (Castorice strategic_fit_note). ``process_notes`` is Stelle's audit
+    # trail (collapsed in UI). ``fact_check_report`` is Castorice's
+    # fact-check transcript (own UI expander). All three are populated by
+    # the session-level wrapper ``_stelle_submit_draft_with_castorice``;
+    # raw Stelle calls (no wrapper, e.g. tests) just see the same fields
+    # passed through.
     why_post = args.get("why_post") or None
+    process_notes = args.get("process_notes") or None
+    fact_check_report = args.get("fact_check_report") or None
+    citation_comments = args.get("citation_comments") or None
 
     # Title = first non-empty line stripped of markdown headers, max 200 chars.
     title = None
@@ -1292,6 +1315,13 @@ def _dispatch_submit_draft(root, args):
             title=title,
             status="draft",
             why_post=why_post,
+            process_notes=process_notes,
+            fact_check_report=fact_check_report,
+            citation_comments=(
+                citation_comments
+                if isinstance(citation_comments, list)
+                else None
+            ),
             scheduled_date=scheduled_date,
             publication_order=(
                 publication_order if isinstance(publication_order, int) else None
@@ -1341,7 +1371,15 @@ def _dispatch_submit_draft(root, args):
         header_lines.append(f"_publication_order: {publication_order}_")
     header_lines.append("")
     if why_post:
+        # Operator-facing rationale (Castorice strategic_fit_note).
         header_lines.extend(["## Why this post", "", why_post, ""])
+    if fact_check_report:
+        header_lines.extend(["## Castorice fact-check", "", fact_check_report, ""])
+    if process_notes:
+        # Stelle's audit trail. Kept inline in the markdown mirror — the
+        # markdown file is a debugging artefact, so the collapse-by-default
+        # logic in the UI doesn't need to apply here.
+        header_lines.extend(["## Process notes (Stelle)", "", process_notes, ""])
     header_lines.extend(["## Content", "", content])
     try:
         md_path.write_text("\n".join(header_lines), encoding="utf-8")
@@ -2565,8 +2603,8 @@ The workspace is a virtual view over the client's data source (Supabase
       retrieving their own posts
 
   Read the returned posts as REAL precedents, not prescriptions —
-  adapt form, not content. Cite them in your `why_post` rationale when
-  relevant so the operator can trace your thinking.
+  adapt form, not content. Cite them in your `process_notes` audit
+  trail when relevant so the operator can trace your thinking.
 
 - `bash` is DISABLED (the workspace is virtual, not a real filesystem).
 
@@ -2603,7 +2641,12 @@ The workspace is a virtual view over the client's data source (Supabase
         content="<final markdown>",   # the final post, plain markdown
         scheduled_date="YYYY-MM-DD",  # calendar slot (tomorrow or later)
         publication_order=1,          # 1, 2, 3… for multi-post runs
-        why_post="<rationale>",       # stored alongside the draft
+        process_notes="<audit trail>",# transcript provenance, Irontomb
+                                       # anchors, comfort score, length
+                                       # stats, decision rationale —
+                                       # hidden by default in the operator
+                                       # UI behind a "Show process notes"
+                                       # expander; useful for debugging.
       )
 
   **Where the draft lands.** ``submit_draft`` persists the draft to
@@ -2611,9 +2654,13 @@ The workspace is a virtual view over the client's data source (Supabase
   passed. The operator reviews at amphoreus.app/posts and pushes to
   Ordinal from there.
 
-  ``submit_draft`` also runs Castorice fact-check on your content before
-  persisting — the fact-check report + citations are appended to
-  ``why_post`` and visible to the operator during review.
+  ``submit_draft`` runs Castorice on your content before persisting:
+  fact-check (text correction + citations) PLUS strategic-fit analysis
+  (verdict against the latest Cyrene brief). Castorice's strategic-fit
+  verdict — NOT your process_notes — is what shows as the post's
+  ``why_post`` to the operator at review. Your process_notes is the
+  audit trail; keep it terse and informative, but DO NOT duplicate
+  strategic-fit reasoning there.
 
 - **Multi-post runs: vary angles, don't riff one topic twice.**
   When the user asks for N posts, cover N DIFFERENT angles/topics —
@@ -2727,9 +2774,14 @@ Caveats:
 the FOC user whose slug you passed. The operator reviews at
 amphoreus.app/posts and pushes to Ordinal from there.
 
-``submit_draft`` runs Castorice fact-check on your content before
-persisting. The fact-check report + citations are appended to
-``why_post`` so the operator sees them during review.
+``submit_draft`` runs Castorice on your content before persisting:
+silent fact-check + correction, plus a strategic-fit verdict against
+the latest Cyrene brief. Castorice's strategic-fit verdict is what the
+operator sees as the post's ``why_post`` at review. Your
+``process_notes`` argument is the audit trail (transcript provenance,
+Irontomb anchors, comfort score, length stats) — collapsed by default
+in the UI behind a "Show process notes" expander, useful for
+debugging, NOT for review-time judgment.
 
 ## Ingestion order at session start
 
@@ -2831,9 +2883,14 @@ The slug determines attribution — there is no separate ``author`` field.
 ``submit_draft`` persists the draft to Amphoreus's ``local_posts`` under
 the target user. The operator reviews at amphoreus.app/posts.
 
-``submit_draft`` runs Castorice fact-check on your content before
-persisting. The fact-check report + citations are appended to
-``why_post`` so the operator sees them during review.
+``submit_draft`` runs Castorice on your content before persisting:
+silent fact-check + correction, plus a strategic-fit verdict against
+the latest Cyrene brief. Castorice's strategic-fit verdict is what the
+operator sees as the post's ``why_post`` at review. Your
+``process_notes`` argument is the audit trail (transcript provenance,
+Irontomb anchors, comfort score, length stats) — collapsed by default
+in the UI behind a "Show process notes" expander, useful for
+debugging, NOT for review-time judgment.
 
 ## Ingestion order at session start
 
@@ -4076,13 +4133,26 @@ def _run_agent_loop(
 
         run_handlers["check_client_comfort"] = _stelle_check_client_comfort_handler
 
-        # Wrap submit_draft with a Castorice fact-check gate. The wrapper
-        # runs Castorice.fact_check_post on `content` first, replaces the
-        # content with the corrected post, and appends the fact-check
-        # report to why_post so the reviewer in database sees Castorice's
-        # findings in the draft_comment thread. Failures in Castorice
-        # surface as a visible error back to Stelle — she can retry or
-        # submit unchecked after acknowledging the failure.
+        # Wrap submit_draft with a Castorice fact-check + strategic-fit
+        # gate. The wrapper:
+        #   1. Runs Castorice.fact_check_post on ``content`` and replaces
+        #      the content with the corrected post.
+        #   2. Runs Castorice.analyze_strategic_fit (against the corrected
+        #      text + the latest Cyrene brief for this FOC) to produce a
+        #      ~50-word operator-facing verdict.
+        #   3. Routes each piece to its OWN field on local_posts (no more
+        #      string-concat into one mega-why_post):
+        #        - ``why_post``           = Castorice strategic_fit_note
+        #          (operator-facing, glanceable in the Posts UI).
+        #        - ``process_notes``      = Stelle's audit trail
+        #          (provenance, Irontomb anchors, comfort score, length
+        #          stats — collapsed in UI by default).
+        #        - ``fact_check_report``  = Castorice's fact-check
+        #          transcript (own UI expander).
+        #        - ``citation_comments``  = Ordinal-pushable citation
+        #          strings (own UI sub-list).
+        # Failures surface as a visible error back to Stelle — she can
+        # retry or submit unchecked after acknowledging the failure.
         _original_submit_draft = run_handlers.get("submit_draft")
 
         def _stelle_submit_draft_with_castorice(_root: Path, args: dict) -> str:
@@ -4091,41 +4161,73 @@ def _run_agent_loop(
             content = args.get("content") or ""
             if not content:
                 return "Error: content is required"
-            # Run Castorice on the clean post text before the database POST.
+
+            # Castorice fact-check — silent text correction + citation
+            # comment strings.
             try:
                 from backend.src.agents.castorice import Castorice
-                fc = Castorice().fact_check_post(company_keyword, content)
+                _castorice = Castorice()
+                fc = _castorice.fact_check_post(company_keyword, content)
                 corrected = fc.get("corrected_post") or content
                 report = fc.get("report") or ""
                 citation_comments = fc.get("citation_comments") or []
             except Exception as _e:
                 logger.warning("[Stelle] Castorice fact-check failed: %s", _e)
+                _castorice = None
                 corrected = content
                 report = f"[Castorice unavailable: {str(_e)[:200]}]"
                 citation_comments = []
 
-            # Build the enriched payload. Keep Stelle's own why_post text
-            # and append the fact-check summary so the reviewer sees both.
-            # ``pre_revision_content`` preserves the raw text Stelle
-            # passed so ``_process_result`` can dedup its write_result
-            # loop against this row without caring about non-deterministic
-            # Castorice corrections.
+            # Strategic-fit pass — separate try/except so a brief-load
+            # failure or empty-brief client doesn't lose the fact-check
+            # work. Empty result means "no brief / not analyzable" and
+            # we silently leave why_post empty (UI hides the section).
+            strategic_fit_note = ""
+            if _castorice is not None:
+                try:
+                    import os as _os
+                    _user_id = (_os.environ.get("DATABASE_USER_UUID") or "").strip() or None
+                    fit = _castorice.analyze_strategic_fit(
+                        company_keyword=company_keyword,
+                        post_content=corrected,
+                        user_id=_user_id,
+                    )
+                    strategic_fit_note = (fit.get("strategic_fit_note") or "").strip()
+                except Exception as _e:
+                    logger.warning("[Stelle] Castorice strategic-fit failed: %s", _e)
+                    strategic_fit_note = ""
+
+            # Route each piece to its own field on the create_local_post
+            # call. Stelle's audit trail can arrive in either ``process_notes``
+            # (new schema arg) or ``why_post`` (legacy arg name from the
+            # old pre-split tool schema). Either way it lands in
+            # process_notes and is hidden by default in the operator UI.
             forwarded = dict(args)
             forwarded["content"] = corrected
             forwarded["pre_revision_content"] = content
-            existing_why = forwarded.get("why_post") or ""
-            fc_summary_parts: list[str] = []
-            if existing_why:
-                fc_summary_parts.append(existing_why)
-            if report:
-                fc_summary_parts.append("## Castorice fact-check\n\n" + report)
-            if citation_comments:
-                fc_summary_parts.append(
-                    "## Citations (Castorice)\n\n"
-                    + "\n".join(f"- {c}" for c in citation_comments)
-                )
-            if fc_summary_parts:
-                forwarded["why_post"] = "\n\n---\n\n".join(fc_summary_parts)
+
+            stelle_audit_trail = (
+                forwarded.pop("process_notes", None)
+                or forwarded.pop("why_post", None)
+                or ""
+            ).strip() or None
+            forwarded["process_notes"] = stelle_audit_trail
+
+            # Castorice owns the operator-facing why_post. May be None
+            # for clients without a brief — UI hides the section in that
+            # case.
+            forwarded["why_post"] = strategic_fit_note or None
+
+            # Fact-check report → own column. Empty when Castorice ran
+            # cleanly on a post that needed no corrections.
+            forwarded["fact_check_report"] = report.strip() or None
+
+            # Citations (list[str]) — passed as a structured list, NOT
+            # concatenated into prose. The dispatcher serializes via
+            # create_local_post(citation_comments=...).
+            forwarded["citation_comments"] = (
+                citation_comments if citation_comments else None
+            )
 
             if _original_submit_draft is None:
                 return "Error: submit_draft dispatcher not wired"

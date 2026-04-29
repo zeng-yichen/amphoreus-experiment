@@ -599,7 +599,12 @@ def get_latest_cyrene_brief(
 # SQLite writes can be dropped.
 
 _LOCAL_POSTS_COLS = (
-    "id,company,user_id,content,title,status,why_post,citation_comments,"
+    "id,company,user_id,content,title,status,why_post,"
+    # 2026-04-29 split: process_notes (Stelle's audit trail, hidden by
+    # default) + fact_check_report (Castorice fact-check transcript)
+    # used to be concatenated into why_post; now own columns. Old rows
+    # may have NULL for both — UI tolerates that.
+    "process_notes,fact_check_report,citation_comments,"
     "ordinal_post_id,linked_image_id,created_at,pre_revision_content,"
     "cyrene_score,generation_metadata,scheduled_date,publication_order,"
     # Draft ↔ published pairing (set by draft_match_worker semantically
