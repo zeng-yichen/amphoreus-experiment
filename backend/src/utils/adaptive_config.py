@@ -149,53 +149,23 @@ class AdaptiveConfig(ABC):
             return None
 
     def _save_cached(self, company: str, config: dict) -> None:
-        path = self._config_path(company)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            all_configs = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except Exception:
-            all_configs = {}
-        all_configs[self.MODULE_NAME] = config
-        # Atomic write: temp file + rename prevents concurrent clobbering
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(all_configs, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.rename(path)
+        # 2026-04-29: removed fly-local cache write. Adaptive config
+        # is recomputed on each ``resolve()`` call from observations
+        # (which live in ruan_mei_state). The disk cache was an
+        # optimization; recompute is cheap.
+        return None
 
     def _invalidate_cache(self, company: str) -> None:
-        path = self._config_path(company)
-        if not path.exists():
-            return
-        try:
-            all_configs = json.loads(path.read_text(encoding="utf-8"))
-            all_configs.pop(self.MODULE_NAME, None)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(all_configs, indent=2, ensure_ascii=False), encoding="utf-8")
-            tmp.rename(path)
-        except Exception:
-            pass
+        return None
 
 
     # ------------------------------------------------------------------
-    # History log — append-only JSONL for tracking config evolution
+    # History log — REMOVED 2026-04-29 (was append-only JSONL on the
+    # fly-local volume; nothing read it back, audit-trail-only.)
     # ------------------------------------------------------------------
 
     def _log_computation(self, company: str, config: dict) -> None:
-        """Append a timestamped entry to adaptive_config_history.jsonl."""
-        path = P.memory_dir(company) / "adaptive_config_history.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Strip large nested dicts for the log (keep it compact)
-        log_config = {k: v for k, v in config.items() if not k.startswith("_")}
-        entry = {
-            "module": self.MODULE_NAME,
-            "tier": config.get("_tier", "unknown"),
-            "computed_at": config.get("_computed_at", _now()),
-            "config": log_config,
-        }
-        try:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
-        except Exception:
-            pass
+        return None
 
 
 def soft_bound(value: float, history: list[float], default: float, z_threshold: float = 3.0) -> float:

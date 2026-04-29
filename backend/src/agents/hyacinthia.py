@@ -1,3 +1,28 @@
+"""Hyacinthia — Amphoreus → Ordinal draft push client.
+
+**DEPRECATED 2026-04-23.** Virio is churning off Ordinal. Every
+outbound function in this module (``push_drafts``, ``push_single_post``,
+``upload_image_from_url``, ``create_approvals``, the system-comment
+poster used inside push) is no longer reachable from the API — the
+HTTP endpoints in ``routers/posts.py`` and ``routers/ghostwriter.py``
+that used to call these functions now return HTTP 410 Gone.
+
+The code is kept here (not deleted) for two reasons:
+  1. Emergency re-enable. If a churn-in-progress client needs one
+     post delivered to Ordinal, we can gate a single endpoint behind
+     an env flag and flip it briefly.
+  2. Historical reference. The Ordinal API request shapes (approvals,
+     asset uploads, comment threads) are documented in these call
+     sites; when we build the replacement pipeline we'll want to
+     cross-reference them without chasing commit history.
+
+Nothing else in Amphoreus imports or invokes these methods as of
+the churn start. Inbound paths (analytics sync, comment sync,
+profile resolution, dedup drafts query, key mirror) live elsewhere
+and are explicitly NOT deprecated — they keep running so historical
+engagement data flows into the mirror.
+"""
+
 import os
 import csv
 import json
@@ -19,10 +44,11 @@ def _strip_linkedin_mentions(text: str) -> str:
 
 
 class Hyacinthia:
-    """
-    Client for pushing Amphoreus-generated drafts to the Ordinal platform.
-    Parses the Stelle output structure, and natively prioritizes Cyrene's 
-    rewritten markdown files if they exist.
+    """Client for pushing Amphoreus-generated drafts to the Ordinal platform.
+
+    **DEPRECATED 2026-04-23** — see module docstring. Outbound methods
+    still execute if called directly, but the HTTP surfaces that used to
+    invoke them are gone. Do not wire new callers.
     """
     def __init__(self, api_key=None):
         self.fallback_api_key = api_key or os.environ.get("ORDINAL_API_KEY")
@@ -32,132 +58,48 @@ class Hyacinthia:
     def _update_story_inventory(
         self, company: str, post_id: str, post_text: str, publish_date: str
     ) -> None:
-        """Append a USED record to story_inventory.md after confirmed Ordinal push.
+        """No-op as of 2026-04-29.
 
-        Only Hyacinthia writes USED records — Stelle never marks stories as used.
-        This prevents rejected posts from permanently blocking stories.
+        Was: append a USED record to fly-local ``story_inventory.md`` so
+        Stelle could dedup against published stories.
+
+        Now: dedup uses ``local_posts.matched_provider_urn`` (set by
+        the draft_match_worker) — a stelle draft pairs to its published
+        LinkedIn post via cosine match, and the operator can query
+        local_posts directly to see what's been published. The fly-local
+        markdown log is no longer the source of truth.
+
+        Plus: Ordinal is dead anyway; the original "after Ordinal push"
+        trigger no longer fires in production paths. Kept the method
+        signature so callers don't break, but it does nothing.
         """
-        inv_path = P.story_inventory_path(company)
-        try:
-            inv_path.parent.mkdir(parents=True, exist_ok=True)
-            excerpt = post_text[:100].replace("\n", " ")
-            line = f'\n- [USED — published {publish_date}] Ordinal ID: {post_id} | "{excerpt}..."\n'
-            with open(inv_path, "a", encoding="utf-8") as f:
-                f.write(line)
-        except Exception as e:
-            print(f"[Hyacinthia] Failed to update story inventory: {e}")
+        return None
 
     def _save_draft_map_entry(
         self, company_keyword: str, post_id: str, content: str, title: str,
         generation_metadata: dict | None = None,
     ) -> bool:
-        """Persist a post_id → original_text mapping to draft_map.json.
+        """No-op as of 2026-04-29.
 
-        This is THE critical registration point in the draft preservation pipeline:
-        every post Stelle pushes to Ordinal must land here, keyed by the Ordinal
-        workspace post id, so that when ordinal_sync later ingests the published
-        version it can compute the (draft, published) delta.
+        Was: persist post_id → original_text into fly-local draft_map.json
+        so ordinal_sync could compute (draft, published) deltas after
+        Ordinal published the post.
 
-        Bulletproof contract: never raises. Returns True on successful persistence,
-        False on any failure. Logs every success AND every failure with enough
-        context to grep the sync logs for pairing issues.
+        Now: the (draft, published) pairing happens via
+        draft_match_worker, which cosine-matches local_posts rows
+        (Stelle's drafts) to linkedin_posts rows (the published
+        version) and stamps ``matched_provider_urn`` on the draft.
+        No fly-local map needed.
 
-        Input validation: an empty post_id or content is treated as a bug (logged
-        loudly) — these are both essential for the pipeline to work and silent
-        acceptance was the root cause of past 'it looked like it was working'
-        failures.
+        Plus: Ordinal is dead. Kept the method signature so legacy
+        callers (none in production) don't crash. Returns True so any
+        success-checking caller continues normally.
         """
-        # --- input validation: loud failures on bad inputs ---
-        pid = (post_id or "").strip()
-        text = (content or "").strip()
-        if not pid:
-            print(
-                f"[ORDINAL CLIENT] DRAFT_MAP REGISTRATION FAILED ({company_keyword}): "
-                f"empty post_id — the draft→published pairing pipeline will be broken "
-                f"for this post. Title: {title!r}"
-            )
-            return False
-        if not text:
-            print(
-                f"[ORDINAL CLIENT] DRAFT_MAP REGISTRATION FAILED ({company_keyword}/{pid[:12]}): "
-                f"empty content — the draft→published pairing pipeline will be broken "
-                f"for this post. Title: {title!r}"
-            )
-            return False
-
-        path = P.draft_map_path(company_keyword)
-
-        # --- load existing map (permissive on read errors) ---
-        draft_map: dict = {}
-        if path.exists():
-            try:
-                draft_map = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(draft_map, dict):
-                    print(
-                        f"[ORDINAL CLIENT] draft_map.json for {company_keyword} "
-                        f"was not a dict ({type(draft_map).__name__}) — resetting to empty"
-                    )
-                    draft_map = {}
-            except Exception as e:
-                print(
-                    f"[ORDINAL CLIENT] Could not read draft_map.json for {company_keyword}: "
-                    f"{e} — starting fresh"
-                )
-                draft_map = {}
-
-        entry = {
-            "original_text": text,
-            "title": title,
-            "company": company_keyword,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        # Attach generation-time quality metadata for ordinal_sync to pick up
-        if generation_metadata:
-            for k in ("cyrene_composite", "cyrene_dimensions", "cyrene_dimension_set",
-                       "cyrene_iterations", "cyrene_weights_tier",
-                       "constitutional_results", "alignment_score"):
-                if k in generation_metadata:
-                    entry[k] = generation_metadata[k]
-        draft_map[pid] = entry
-
-        # --- persist (loud failure on write errors) ---
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(draft_map, indent=2, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(path)
-        except Exception as e:
-            print(
-                f"[ORDINAL CLIENT] DRAFT_MAP REGISTRATION FAILED ({company_keyword}/{pid[:12]}): "
-                f"write failed: {e} — the draft→published pairing pipeline will be "
-                f"broken for this post"
-            )
-            return False
-
-        print(
-            f"[ORDINAL CLIENT] draft_map registered: {company_keyword}/{pid[:12]}… "
-            f"({len(text)} chars, total entries: {len(draft_map)})"
-        )
         return True
 
     def remove_draft_map_entry(self, company_keyword: str, ordinal_post_id: str) -> None:
-        """Drop a stale Ordinal post id from draft_map.json (e.g. local draft was re-pushed)."""
-        oid = (ordinal_post_id or "").strip()
-        if not oid:
-            return
-        path = P.draft_map_path(company_keyword)
-        try:
-            draft_map = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except Exception:
-            draft_map = {}
-        if oid not in draft_map:
-            return
-        del draft_map[oid]
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(draft_map, indent=2, ensure_ascii=False), encoding="utf-8")
-        except Exception as e:
-            print(f"[ORDINAL CLIENT] Failed to update draft_map.json: {e}")
+        """No-op as of 2026-04-29 (see ``_save_draft_map_entry``)."""
+        return None
 
     def upload_asset_from_public_url(
         self,
@@ -221,26 +163,60 @@ class Hyacinthia:
         return None
 
     def _get_api_key_for_client(self, company_keyword: str) -> str:
-        """Reads the CSV file to find the specific API key for the company."""
+        """Look up the Ordinal api_key for ``company_keyword``.
+
+        Matching, in order:
+          1. Slug or company_id equals the keyword directly (fast-path
+             for legacy pseudo-slugs like ``trimble-heather`` that live
+             verbatim in the CSV).
+          2. Resolve the keyword to a Jacquard ``user_companies.id``
+             UUID via :mod:`company_resolver` and match the CSV's
+             ``company_id`` column. This is the path the new
+             mirror-backed dropdown takes: the dropdown emits slugs
+             like ``hume-ai-andrew`` that aren't CSV rows directly, but
+             their company_id IS in the CSV. Two FOCs under the same
+             Jacquard company (Trimble, Commenda) therefore push to the
+             *same* Ordinal workspace — which is how Ordinal actually
+             models auth.
+          3. Fallback to ``ORDINAL_API_KEY`` env.
+        """
         if not os.path.exists(self.auth_csv_path):
             return self.fallback_api_key
-            
+
+        target = (company_keyword or "").strip().lower()
+        if not target:
+            return self.fallback_api_key
+
         try:
             with open(self.auth_csv_path, mode='r', encoding='utf-8') as file:
-                reader = csv.DictReader(file)
-                for row in reader:
-                    # csv.DictReader yields None for empty cells — coerce to "".
-                    c_id = (row.get("company_id") or "").strip().lower()
-                    slug = (row.get("provider_org_slug") or "").strip().lower()
-                    target = company_keyword.strip().lower()
-
-                    if c_id == target or slug == target:
-                        key = (row.get("api_key") or "").strip()
-                        if key:
-                            return key
+                rows = list(csv.DictReader(file))
         except Exception as e:
             print(f"[ORDINAL CLIENT WARNING] Failed to read auth CSV: {e}")
-            
+            return self.fallback_api_key
+
+        # 1) direct match on slug or company_id string
+        for row in rows:
+            c_id = (row.get("company_id") or "").strip().lower()
+            slug = (row.get("provider_org_slug") or "").strip().lower()
+            if c_id == target or slug == target:
+                key = (row.get("api_key") or "").strip()
+                if key:
+                    return key
+
+        # 2) resolve to canonical UUID and re-match by company_id.
+        try:
+            from backend.src.lib.company_resolver import resolve_to_uuid
+            resolved_uuid = resolve_to_uuid(company_keyword)
+        except Exception:
+            resolved_uuid = None
+        if resolved_uuid:
+            ruid = resolved_uuid.lower()
+            for row in rows:
+                if (row.get("company_id") or "").strip().lower() == ruid:
+                    key = (row.get("api_key") or "").strip()
+                    if key:
+                        return key
+
         return self.fallback_api_key
 
     def _post_castorice_thread_comments(
@@ -328,8 +304,8 @@ class Hyacinthia:
 
     def parse_posts(self, content: str) -> list:
         """
-        Parses the Stelle base output text to extract individual posts and their 
-        corrected versions (if Permansor Terrae applied any fixes).
+        Parses the Stelle base output text to extract individual posts and their
+        corrected versions (if Castorice applied any fact-check fixes).
         """
         posts_to_upload = []
         

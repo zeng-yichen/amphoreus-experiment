@@ -44,7 +44,8 @@ from typing import Any, Optional
 
 import anthropic
 
-from backend.src.db import vortex as P
+# (vortex import removed 2026-04-29 — Cyrene no longer touches the
+# fly-local memory tree.)
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +63,8 @@ _OUTPUT_COST_PER_MTOK = 75.0
 _CACHE_READ_COST_PER_MTOK = 1.50
 _CACHE_WRITE_COST_PER_MTOK = 18.75
 
-_BRIEF_FILENAME = "cyrene_brief.json"
-_BRIEF_HISTORY_FILENAME = "cyrene_brief_history.jsonl"
+# (Brief filenames removed 2026-04-29 — no longer reading/writing the
+# fly-local mirror. Briefs live in Amphoreus Supabase ``cyrene_briefs``.)
 
 
 # ---------------------------------------------------------------------------
@@ -1040,23 +1041,15 @@ def _query_brief_history(company: str, args: dict) -> str:
         )
         briefs = []
 
-    # --- fallback: fly-local JSONL -----------------------------------
+    # 2026-04-29: removed fly-local JSONL fallback. Brief history
+    # lives exclusively in Supabase ``cyrene_briefs``. Empty result
+    # means either first run for this client or Supabase unreachable.
     if not briefs:
-        history_path = P.memory_dir(company) / _BRIEF_HISTORY_FILENAME
-        if not history_path.exists():
-            return json.dumps({
-                "n_briefs": 0,
-                "briefs": [],
-                "note": "No brief history yet. This is the first Cyrene run for this client.",
-            })
-        try:
-            for line in history_path.read_text(encoding="utf-8").strip().splitlines():
-                if line.strip():
-                    briefs.append(json.loads(line))
-        except Exception as e:
-            return json.dumps({"error": f"failed to read brief history: {str(e)[:200]}"})
-        # Local JSONL is oldest-first; slice + reverse to match Supabase ordering.
-        briefs = briefs[-limit:][::-1]
+        return json.dumps({
+            "n_briefs": 0,
+            "briefs": [],
+            "note": "No brief history yet (first Cyrene run for this client, or Supabase read failed).",
+        })
 
     # Slim down to strategically relevant fields. New briefs (2026-04-22
     # onward) carry ``prose`` as the primary strategic payload. Legacy
@@ -2157,13 +2150,11 @@ def run_strategic_review(
         logger.warning(
             "[Cyrene] get_latest_cyrene_brief(%s) failed: %s", company, exc
         )
-    if not prev_data:
-        try:
-            prev_path = P.memory_dir(company) / _BRIEF_FILENAME
-            if prev_path.exists():
-                prev_data = json.loads(prev_path.read_text(encoding="utf-8"))
-        except Exception:
-            prev_data = None
+    # 2026-04-29: removed the fly-local fallback read. Briefs live
+    # exclusively in the Amphoreus Supabase ``cyrene_briefs`` table now;
+    # if Supabase is unreachable, prev_data stays None and Cyrene runs
+    # from scratch (acceptable degradation — better than priming with
+    # a stale local copy that may not match the latest Supabase row).
     if prev_data:
         # Pass the full previous brief through — the model decides what's
         # relevant. No lossy summary.
@@ -2309,30 +2300,17 @@ def run_strategic_review(
             company, saved.get("id"), turns_used, total_cost,
         )
     else:
-        # Supabase layer returned None — write a fly-local fallback so
-        # we don't lose the brief. When Supabase is healthy again, a
-        # future Cyrene run will overwrite the primary store.
-        try:
-            mem_dir = P.memory_dir(company)
-            mem_dir.mkdir(parents=True, exist_ok=True)
-            brief_path = mem_dir / _BRIEF_FILENAME
-            tmp = brief_path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(brief, indent=2, ensure_ascii=False, default=str),
-                encoding="utf-8",
-            )
-            tmp.rename(brief_path)
-            history_path = mem_dir / _BRIEF_HISTORY_FILENAME
-            with open(history_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(brief, ensure_ascii=False, default=str) + "\n")
-            logger.warning(
-                "[Cyrene] %s: Amphoreus Supabase unavailable — brief saved to "
-                "fly-local fallback at %s (re-run Cyrene when Supabase is "
-                "back to replace primary).",
-                company, brief_path,
-            )
-        except Exception as exc:
-            logger.error("[Cyrene] %s: brief save failed everywhere: %s", company, exc)
+        # 2026-04-29: removed fly-local fallback writes. Briefs live
+        # exclusively in Supabase. If Supabase is unreachable on save,
+        # the brief is logged but not persisted — re-run Cyrene when
+        # Supabase is back. Better to lose one brief on a Supabase
+        # outage than to accumulate stale local artifacts that drift
+        # from the primary store.
+        logger.error(
+            "[Cyrene] %s: brief save failed — Amphoreus Supabase "
+            "unavailable. Brief NOT persisted. Re-run when Supabase "
+            "returns.", company,
+        )
 
     return brief
 

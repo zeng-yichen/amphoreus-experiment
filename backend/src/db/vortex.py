@@ -34,7 +34,37 @@ except Exception:
     _settings = None
     _project_root = pathlib.Path(__file__).resolve().parents[3]
 
-MEMORY_ROOT = _project_root / "memory"
+# 2026-04-29: ``MEMORY_ROOT`` points to ephemeral tmpfs.
+#
+# Pre-2026-04-29, this resolved to ``/data/memory/`` (a Fly volume mount)
+# and accumulated dual-write artifacts: cyrene_brief.json,
+# depth_weights.json, reward_weights.json, draft_map.json,
+# story_inventory.md, feedback/, adaptive_config.json, etc. Most writers
+# had a Supabase counterpart written elsewhere; the local mirror was
+# either legacy dual-write or regenerable cache. The fly-local volume
+# became a debugging hazard — operators would purge a Supabase brief
+# but the local file would still get re-read by the next agent run,
+# leaking stale state.
+#
+# v2 redirects MEMORY_ROOT to ``/tmp/_amphoreus_legacy_memory/``. Effects:
+#   - Writers continue to work (no surgery in 14 callers needed).
+#   - State doesn't persist across container restarts.
+#   - The Fly /data/memory volume can be wiped and won't be repopulated.
+#   - Source-of-truth state lives exclusively in:
+#       * Amphoreus Supabase (cyrene_briefs, local_posts, ruan_mei_state, ...)
+#       * SQLite (/data/sqlite/amphoreus.db)
+#
+# Readers that fall back to MEMORY_ROOT files (linkedin_username,
+# ordinal_auth_csv, ICP definition, etc.) get None / empty and fall
+# through to defaults — same degradation that would happen on a
+# fresh container, by design.
+import tempfile
+_LEGACY_MEMORY_BUCKET = pathlib.Path(tempfile.gettempdir()) / "_amphoreus_legacy_memory"
+try:
+    _LEGACY_MEMORY_BUCKET.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
+MEMORY_ROOT = _LEGACY_MEMORY_BUCKET
 PRODUCTS_ROOT = _project_root / "products"
 
 
@@ -208,12 +238,31 @@ def resolve_profile_id(company: str) -> str:
     except Exception:
         return ""
 
+    # 1) Direct slug match (legacy path — CSV row's provider_org_slug
+    #    equals the incoming identifier verbatim).
     target_row = None
     for row in rows:
         slug = (row.get("provider_org_slug") or "").strip()
         if slug == company:
             target_row = row
             break
+
+    # 2) Fall back to Jacquard UUID resolution so the new mirror-backed
+    #    dropdown slugs (e.g. ``hume-ai-andrew``, which isn't a CSV row)
+    #    route to the CSV row sharing the same ``company_id``. All FOCs
+    #    under the same company therefore share one Ordinal workspace.
+    if target_row is None:
+        try:
+            from backend.src.lib.company_resolver import resolve_to_uuid
+            resolved = resolve_to_uuid(company)
+        except Exception:
+            resolved = None
+        if resolved:
+            ruid = resolved.lower()
+            for row in rows:
+                if (row.get("company_id") or "").strip().lower() == ruid:
+                    target_row = row
+                    break
 
     if target_row is None:
         return ""

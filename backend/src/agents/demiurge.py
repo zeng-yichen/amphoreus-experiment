@@ -69,6 +69,106 @@ _MIN_OBS_FOR_ADAPTIVE = 10
 _client = anthropic.Anthropic()
 
 
+def _cli_model_alias(model_id: str) -> str:
+    """Map a full ``claude-*-N-M`` id to the CLI's tier alias."""
+    low = (model_id or "").lower()
+    if "opus" in low:
+        return "opus"
+    if "haiku" in low:
+        return "haiku"
+    return "sonnet"
+
+
+def _invoke_claude(
+    *,
+    messages: list[dict],
+    model: str,
+    max_tokens: int,
+    system: Any = None,
+    temperature: float | None = None,
+    thinking: dict | None = None,
+) -> str:
+    """Unified Claude call for Demiurge — routes through Claude CLI
+    (Max subscription) when ``AMPHOREUS_USE_CLI=true``, otherwise through
+    the Anthropic API client.
+
+    Returns the concatenated text from every text block in the response.
+    Signatures match the existing Demiurge call sites so the switchover
+    is a pure drop-in: each ``_client.messages.create(...)`` becomes
+    ``_invoke_claude(messages=..., model=..., max_tokens=..., system=...)``
+    plus extracting the text from the response (also handled here).
+
+    Thinking blocks and fine-grained streaming aren't supported on the
+    CLI path — if the call asks for them, we fall back to the API
+    silently. Callers that care about thinking (none currently in
+    Demiurge as of 2026-04-21) should detect and guard themselves.
+    """
+    try:
+        from backend.src.mcp_bridge.claude_cli import use_cli as _use_cli, cli_single_shot as _cli_ss
+    except ImportError:
+        _use_cli = lambda: False  # type: ignore
+        _cli_ss = None             # type: ignore
+
+    # CLI is single-shot — no streaming, no thinking blocks. Fall back
+    # to API if caller asked for those features.
+    cli_eligible = _use_cli() and _cli_ss is not None and thinking is None
+
+    if cli_eligible:
+        # Flatten the conversation into a single prompt. Demiurge's
+        # messages are almost always [{"role":"user","content":"..."}]
+        # — a single user turn with structured text inside. Guard
+        # defensively for anything more elaborate.
+        if len(messages) != 1 or messages[0].get("role") != "user":
+            logger.debug(
+                "[demiurge] multi-turn messages; skipping CLI route "
+                "(%d messages)", len(messages),
+            )
+        else:
+            prompt = messages[0].get("content", "")
+            if isinstance(prompt, list):
+                # Structured content blocks — join text parts
+                prompt = "".join(
+                    (b.get("text", "") if isinstance(b, dict) else str(b))
+                    for b in prompt
+                )
+            system_text: str | None = None
+            if isinstance(system, str):
+                system_text = system
+            elif isinstance(system, list):
+                parts = []
+                for s in system:
+                    if isinstance(s, dict) and s.get("type") == "text":
+                        parts.append(s.get("text", ""))
+                system_text = "\n\n".join(parts) if parts else None
+            out = _cli_ss(
+                prompt,
+                system_prompt=system_text,
+                model=_cli_model_alias(model),
+                max_tokens=max_tokens,
+                timeout=180,
+            )
+            return (out or "").strip()
+
+    # API path. The one existing call pattern Demiurge uses.
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    }
+    if system is not None:
+        kwargs["system"] = system
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    if thinking is not None:
+        kwargs["thinking"] = thinking
+    resp = _client.messages.create(**kwargs)
+    raw = ""
+    for block in resp.content:
+        if getattr(block, "type", None) == "text":
+            raw += block.text
+    return raw
+
+
 # ------------------------------------------------------------------
 # Adaptive config
 # ------------------------------------------------------------------
@@ -468,12 +568,11 @@ def _discover_dimensions(company: str, n_dims: int = 7) -> list[dict] | None:
     )
 
     try:
-        resp = _client.messages.create(
+        raw = _invoke_claude(
             model="claude-opus-4-6",
             max_tokens=3000,
             messages=[{"role": "user", "content": prompt}],
-        )
-        raw = resp.content[0].text.strip()
+        ).strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -514,14 +613,9 @@ def _discover_dimensions(company: str, n_dims: int = 7) -> list[dict] | None:
         "_version": _dimension_version_counter.get(company, 0) + 1,
     }
     _dimension_version_counter[company] = cache_data["_version"]
-    try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cache_data, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.rename(cache_path)
-    except Exception:
-        pass
-
+    # 2026-04-29: removed fly-local cache write. Dimensions are
+    # recomputed each Demiurge run from observations (which live in
+    # ruan_mei_state); the file cache was only an optimization.
     logger.info(
         "[Cyrene] Discovered %d emergent dimensions for %s (v%d, from %d obs)",
         len(valid), company, cache_data["_version"], len(scored),
@@ -752,10 +846,13 @@ def _persist_quality_embedding(company: str, embedding: list[float], reward: flo
     if len(data["pairs"]) > 200:
         data["pairs"] = data["pairs"][-200:]
 
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    tmp.rename(cache_path)
+    # 2026-04-29: removed fly-local cache write. quality_embeddings was
+    # an in-memory accumulation that got persisted; without persistence
+    # the blend-weight learning resets each run, which falls back to
+    # the 0.7 default. Acceptable degradation given the file's small
+    # contribution to overall scoring; a real fix would migrate the
+    # accumulator into ruan_mei_state.
+    return None
 
 
 def _get_learned_blend_weight(company: str) -> float:
@@ -1004,13 +1101,12 @@ def critique(
     system = _build_critic_system(dim_weights, is_adaptive, custom_dimensions=custom_dims)
 
     try:
-        resp = _client.messages.create(
+        raw = _invoke_claude(
             model="claude-opus-4-6",
             max_tokens=4096,
             system=system,
             messages=[{"role": "user", "content": user_msg}],
-        )
-        raw = resp.content[0].text.strip()
+        ).strip()
 
         if raw.startswith("```"):
             raw = raw.split("```")[1]
@@ -1083,13 +1179,12 @@ def _critique_freeform(
     )
 
     try:
-        resp = _client.messages.create(
+        raw = _invoke_claude(
             model="claude-opus-4-6",
             max_tokens=4096,
             system=system,
             messages=[{"role": "user", "content": user_msg}],
-        )
-        raw = resp.content[0].text.strip()
+        ).strip()
 
         if raw.startswith("```"):
             raw = raw.split("```")[1]
@@ -1222,13 +1317,12 @@ def revise(
     )
 
     try:
-        resp = _client.messages.create(
+        revised = _invoke_claude(
             model="claude-opus-4-6",
             max_tokens=4096,
             system=_REVISER_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
-        )
-        revised = resp.content[0].text.strip()
+        ).strip()
 
         # Basic sanity: revised should be reasonable length
         if len(revised) < 200:
@@ -1505,8 +1599,17 @@ class CyreneStyleRewriter:
         image_suggestion: str = "",
         theme: str = "",
         client_context: str = "",
+        prior_feedback: list[dict] | None = None,
     ) -> dict:
-        """Rewrite a single post using Cyrene's 4-step XML framework."""
+        """Rewrite a single post using Cyrene's 4-step XML framework.
+
+        ``prior_feedback`` is a list of unresolved comment rows from
+        ``draft_feedback`` (post-wide and inline). When present, we
+        inject them into the prompt ahead of the style directive so
+        Cyrene addresses what operators flagged — the tightest
+        feedback → rewrite loop we have. Pass an empty list (or None)
+        for greenfield rewrites with no prior notes.
+        """
         system_prompt = (
             "You are Cyrene, a meticulous copyeditor. Your job is to completely rewrite a draft "
             "stylistically while maintaining 100% of the original factual payload and logical arguments."
@@ -1530,13 +1633,42 @@ class CyreneStyleRewriter:
             )
             analysis_directive = "Describe the random stylistic variations you are choosing to apply."
 
+        # Render prior feedback as a bulletted block at the top of the
+        # user prompt. Inline comments include the quoted selection so
+        # Cyrene can target the right passage; post-wide comments are
+        # plain-text notes. Keep entries compact — dozen-ish comments
+        # max before this eats context budget.
+        feedback_block = ""
+        if prior_feedback:
+            lines: list[str] = []
+            for fb in prior_feedback:
+                body = (fb.get("body") or "").strip()
+                if not body:
+                    continue
+                author = (fb.get("author_name") or fb.get("author_email") or "operator").strip()
+                sel_text = (fb.get("selected_text") or "").strip()
+                if sel_text:
+                    lines.append(
+                        f"- **{author}** on this passage: \"{sel_text[:200]}\"\n  → {body}"
+                    )
+                else:
+                    lines.append(f"- **{author}**: {body}")
+            if lines:
+                feedback_block = (
+                    "\n        ## Prior feedback on this draft\n"
+                    "        Address each of these concerns in your rewrite. "
+                    "They take precedence over the style directive when they conflict.\n\n        "
+                    + "\n        ".join(lines)
+                    + "\n"
+                )
+
         import re as _re
 
         user_prompt = f"""
         <raw_draft>
         {post_text}
         </raw_draft>
-
+{feedback_block}
         STYLE DIRECTIVE:
         {style_directive}
 
@@ -1560,13 +1692,12 @@ class CyreneStyleRewriter:
         </final_post>
         """
 
-        resp = _client.messages.create(
+        raw = _invoke_claude(
             model=self.model_name,
             max_tokens=8192,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
-        raw = resp.content[0].text
 
         def _parse_xml(text, tag):
             import re

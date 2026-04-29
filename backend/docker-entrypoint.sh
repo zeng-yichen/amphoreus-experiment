@@ -39,7 +39,12 @@ link() {
     ln -sfn "$target" "$src"
 }
 
-link "${VOLUME_ROOT}/memory"       /app/memory
+# 2026-04-29: dropped the /app/memory → /data/memory symlink. Source-of-truth
+# state lives in Amphoreus Supabase + SQLite; the legacy memory tree was
+# dual-write debris (cyrene briefs, depth_weights, draft_map, etc.). Code
+# that still references vortex.MEMORY_ROOT now resolves to ephemeral tmpfs
+# via vortex.py — see the deprecation note there. The /data/memory volume
+# itself can be wiped without breaking the runtime.
 link "${VOLUME_ROOT}/backend_data" /app/backend/data
 link "${VOLUME_ROOT}/images"       /app/backend/static/images
 link "${VOLUME_ROOT}/products"     /app/products
@@ -72,11 +77,30 @@ JSON
 fi
 touch "${AUDIT_LOG_PATH}"
 
+# Claude Code CLI config dir. The CLI stores OAuth session tokens +
+# cached state under this directory. We point it at the persistent
+# volume so the session survives machine rebuilds — otherwise every
+# Fly deploy would log us out of Max and every agent call in CLI mode
+# would fail with "not authenticated". Bootstrapping the session is a
+# one-time manual step (see DEPLOY.md "Claude CLI on Fly" section);
+# after that, the mirror of ~/.claude lives at /data/.claude and
+# AMPHOREUS_CLAUDE_CONFIG_DIR points the CLI at it (consumed by
+# backend/src/mcp_bridge/claude_cli.py::_cli_env).
+export AMPHOREUS_CLAUDE_CONFIG_DIR="${AMPHOREUS_CLAUDE_CONFIG_DIR:-${VOLUME_ROOT}/.claude}"
+mkdir -p "${AMPHOREUS_CLAUDE_CONFIG_DIR}"
+
 echo "[entrypoint] volume=${VOLUME_ROOT}"
 echo "[entrypoint] SQLITE_PATH=${SQLITE_PATH:-<unset>}"
 echo "[entrypoint] DATA_DIR=${DATA_DIR}"
 echo "[entrypoint] ACL_PATH=${ACL_PATH}"
 echo "[entrypoint] AUDIT_LOG_PATH=${AUDIT_LOG_PATH}"
+echo "[entrypoint] AMPHOREUS_USE_CLI=${AMPHOREUS_USE_CLI:-<unset>}"
+echo "[entrypoint] AMPHOREUS_CLAUDE_CONFIG_DIR=${AMPHOREUS_CLAUDE_CONFIG_DIR}"
+if command -v claude >/dev/null 2>&1; then
+    echo "[entrypoint] claude CLI: $(claude --version 2>/dev/null | head -n1)"
+else
+    echo "[entrypoint] claude CLI: NOT INSTALLED (CLI mode will fail if AMPHOREUS_USE_CLI=true)"
+fi
 echo "[entrypoint] exec: $*"
 
 exec "$@"

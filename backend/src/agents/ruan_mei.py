@@ -55,7 +55,8 @@ from typing import Optional
 import numpy as np
 import anthropic
 
-from backend.src.db import vortex as P
+# (vortex import removed 2026-04-29 — RuanMei no longer touches the
+# fly-local memory tree.)
 
 logger = logging.getLogger(__name__)
 
@@ -891,14 +892,17 @@ class RuanMei:
         return modified
 
     def _load_draft_map(self) -> dict:
-        """Load draft_map.json for this company. Returns empty dict if missing."""
-        path = P.draft_map_path(self.company)
-        if not path.exists():
-            return {}
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        """Legacy draft-map loader.
+
+        2026-04-29: returns ``{}`` unconditionally. The ordinal_post_id
+        → original-draft-text mapping was used by ``ingest_from_ordinal``
+        (now dead — Virio churned off Ordinal). The replacement source
+        of truth for (draft, published) pairings is
+        ``local_posts.matched_provider_urn`` populated by the
+        draft_match_worker. RuanMei's edit-similarity signal is computed
+        downstream from there, not from this map.
+        """
+        return {}
 
     def update_constitutional(self, post_hash: str, score: float, results: dict) -> bool:
         """Store constitutional verification results on an observation.
@@ -1073,24 +1077,19 @@ class RuanMei:
         Each component's weight is blended between its learned Spearman
         correlation weight and the prior default, proportional to the
         statistical significance of that correlation.  No hard gates.
+
+        2026-04-29: removed fly-local cache file. Recomputes from
+        observations on every call. ``observations`` lives in
+        ``ruan_mei_state`` (SQLite + Amphoreus Supabase mirror), so
+        learning state survives without /data/memory.
         """
-        cache_path = P.memory_dir(self.company) / "depth_weights.json"
         learned = None
         pvalues = None
-        if cache_path.exists():
-            try:
-                cached = json.loads(cache_path.read_text(encoding="utf-8"))
-                learned = cached.get("weights")
-                pvalues = cached.get("pvalues")
-            except Exception:
-                pass
-
-        if learned is None:
-            scored = [o for o in self._state.get("observations", []) if o.get("status") in _SCORED_STATUSES]
-            if len(scored) >= 3:
-                learned, pvalues = self._compute_and_cache_depth_weights(scored, cache_path)
-            else:
-                return dict(self._DEFAULT_DEPTH_WEIGHTS)
+        scored = [o for o in self._state.get("observations", []) if o.get("status") in _SCORED_STATUSES]
+        if len(scored) >= 3:
+            learned, pvalues = self._compute_depth_weights(scored)
+        else:
+            return dict(self._DEFAULT_DEPTH_WEIGHTS)
 
         if pvalues is None:
             return learned
@@ -1106,16 +1105,15 @@ class RuanMei:
         return blended
 
     def recompute_depth_weights(self) -> dict[str, float]:
-        """Recompute and cache depth weights. Call during ordinal_sync after scoring."""
+        """Recompute depth weights. Call during ordinal_sync after scoring."""
         scored = [o for o in self._state.get("observations", []) if o.get("status") in _SCORED_STATUSES]
         if len(scored) < 3:
             return dict(self._DEFAULT_DEPTH_WEIGHTS)
-        cache_path = P.memory_dir(self.company) / "depth_weights.json"
-        weights, _ = self._compute_and_cache_depth_weights(scored, cache_path)
+        weights, _ = self._compute_depth_weights(scored)
         return weights
 
-    def _compute_and_cache_depth_weights(
-        self, scored: list[dict], cache_path
+    def _compute_depth_weights(
+        self, scored: list[dict],
     ) -> tuple[dict[str, float], dict[str, float]]:
         """Compute depth weights via Spearman correlation with composite reward.
 
@@ -1162,24 +1160,10 @@ class RuanMei:
             n_components = len(clamped)
             weights = {k: round(v / total * n_components, 4) for k, v in clamped.items()}
 
-        try:
-            cache_data = {
-                "weights": weights,
-                "pvalues": {k: round(v, 6) for k, v in pvalues.items()},
-                "raw_correlations": {k: round(v, 4) for k, v in raw_corrs.items()},
-                "observation_count": len(rewards),
-                "computed_at": _now(),
-            }
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = cache_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(cache_data, indent=2), encoding="utf-8")
-            tmp.rename(cache_path)
-            logger.info(
-                "[RuanMei] Depth weights for %s: %s (from %d obs)",
-                self.company, weights, len(rewards),
-            )
-        except Exception:
-            pass
+        logger.info(
+            "[RuanMei] Depth weights for %s: %s (from %d obs)",
+            self.company, weights, len(rewards),
+        )
 
         return weights, pvalues
 
@@ -1188,20 +1172,12 @@ class RuanMei:
 
         Each component's Spearman p-value controls its blend between the
         learned weight and the equal-weight default.  No hard sample-size gate.
+
+        2026-04-29: removed fly-local cache. Recomputes from
+        ``_reward_history()`` (which derives from ``self._state``,
+        backed by ruan_mei_state in Supabase + SQLite).
         """
         default_w = {"depth": 0.25, "reach": 0.25, "eng_rate": 0.25, "icp": 0.25}
-
-        cache_path = P.memory_dir(self.company) / "reward_weights.json"
-        current_obs_count = len(self._reward_history())
-        if cache_path.exists():
-            try:
-                cached = json.loads(cache_path.read_text(encoding="utf-8"))
-                if cached.get("observation_count", 0) >= current_obs_count:
-                    w = cached.get("blended_weights") or cached.get("weights")
-                    if w:
-                        return w
-            except Exception:
-                pass
 
         history = self._reward_history()
         if len(history) < 3:
@@ -1254,21 +1230,6 @@ class RuanMei:
         total_blended = sum(blended.values())
         if total_blended > 0:
             blended = {k: round(v / total_blended, 4) for k, v in blended.items()}
-
-        try:
-            cache_data = {
-                "blended_weights": blended,
-                "raw_weights": {k: round(v, 4) for k, v in learned.items()},
-                "pvalues": {k: round(v, 6) for k, v in pvalues.items()},
-                "observation_count": len(history),
-                "computed_at": _now(),
-            }
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = cache_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(cache_data, indent=2), encoding="utf-8")
-            tmp.rename(cache_path)
-        except Exception:
-            pass
 
         return blended
 
