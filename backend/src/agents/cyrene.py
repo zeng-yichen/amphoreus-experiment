@@ -776,6 +776,192 @@ def _search_linkedin_corpus(company: str, args: dict) -> str:
         return json.dumps({"error": str(e)[:300]})
 
 
+def _query_cross_roster_signals(company: str, args: dict) -> str:
+    """High-engagement posts from OTHER tracked Virio creators.
+
+    The current FOC is excluded automatically. Used by Cyrene to
+    ground ``strategic_themes`` in measured outcomes elsewhere on
+    the roster — "this kind of post is landing for these creators,
+    here's the engagement evidence."
+
+    Args (all optional):
+      days       — recency window. Default 30, max 90.
+      limit      — number of posts to return. Default 10, max 25.
+      rank_by    — "absolute" (raw reactions, default) or
+                   "z_score" (within-creator log-z, surfaces
+                   relative breakthroughs at smaller-baseline
+                   creators).
+
+    Returns: list of {creator_username, post_text_preview, hook,
+    posted_at, reactions, comments, reposts, [log_z]} dicts. Cyrene
+    reads them as raw substrate and forms her own view of which
+    are relevant to the current client's positioning.
+    """
+    import os
+    from datetime import datetime, timezone, timedelta
+
+    days = max(1, min(int(args.get("days") or 30), 90))
+    limit = max(1, min(int(args.get("limit") or 10), 25))
+    rank_by = (args.get("rank_by") or "absolute").lower()
+    if rank_by not in ("absolute", "z_score"):
+        rank_by = "absolute"
+
+    # Resolve current creator's LinkedIn username so we exclude their
+    # own posts. Falls back to None (no exclusion) on resolution
+    # failure — better to over-include than fail closed.
+    user_id = (os.environ.get("DATABASE_USER_UUID") or "").strip() or None
+    exclude_username: Optional[str] = None
+    try:
+        from backend.src.services.post_bundle import (
+            _resolve_username_for_cross_filter as _resolve_xun,
+        )
+        exclude_username = _resolve_xun(company, user_id)
+    except Exception:
+        pass
+
+    url = os.environ.get("AMPHOREUS_SUPABASE_URL", "").strip()
+    key = os.environ.get("AMPHOREUS_SUPABASE_KEY", "").strip()
+    if not url or not key:
+        return json.dumps({"error": "AMPHOREUS_SUPABASE not configured"})
+
+    if rank_by == "z_score":
+        # 90-day baseline window for stable per-creator stats; the
+        # candidate window is whatever ``days`` says.
+        baseline_iso = (
+            datetime.now(timezone.utc) - timedelta(days=90)
+        ).isoformat()
+        candidate_cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        params = {
+            "select": "creator_username,hook,post_text,posted_at,total_reactions,total_comments,total_reposts,provider_urn",
+            "posted_at": f"gte.{baseline_iso}",
+            "or": "(is_company_post.is.null,is_company_post.eq.false)",
+            "reshared_post_urn": "is.null",
+            "post_text": "not.is.null",
+            "limit": "5000",
+        }
+    else:
+        since_iso = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).isoformat()
+        params = {
+            "select": "creator_username,hook,post_text,posted_at,total_reactions,total_comments,total_reposts,provider_urn",
+            "posted_at": f"gte.{since_iso}",
+            "or": "(is_company_post.is.null,is_company_post.eq.false)",
+            "reshared_post_urn": "is.null",
+            "post_text": "not.is.null",
+            "order": "total_reactions.desc",
+            "limit": str(max(limit * 4, 40)),
+        }
+        if exclude_username:
+            params["creator_username"] = f"neq.{exclude_username}"
+
+    try:
+        import httpx
+        resp = httpx.get(
+            f"{url}/rest/v1/linkedin_posts",
+            params=params,
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=20.0,
+        )
+        resp.raise_for_status()
+        rows = resp.json() or []
+    except Exception as exc:
+        return json.dumps({"error": f"cross-roster fetch failed: {str(exc)[:200]}"})
+
+    def _row_to_dict(r: dict, z: Optional[float] = None) -> dict:
+        post_text = (r.get("post_text") or "").strip()
+        out = {
+            "creator_username": r.get("creator_username") or "",
+            "hook":             (r.get("hook") or "").strip()[:200],
+            "post_text_preview": post_text[:600] + ("…" if len(post_text) > 600 else ""),
+            "posted_at":        (r.get("posted_at") or "")[:10],
+            "reactions":        r.get("total_reactions") or 0,
+            "comments":         r.get("total_comments") or 0,
+            "reposts":          r.get("total_reposts") or 0,
+        }
+        if z is not None:
+            out["log_z"] = round(z, 2)
+        return out
+
+    if rank_by == "z_score":
+        import math
+        from collections import defaultdict
+        import statistics as _stats
+
+        by_creator: dict[str, list[dict]] = defaultdict(list)
+        for r in rows:
+            cu = (r.get("creator_username") or "").strip()
+            if cu:
+                by_creator[cu].append(r)
+
+        creator_stats: dict[str, tuple[float, float]] = {}
+        for cu, posts in by_creator.items():
+            if len(posts) < 5:
+                continue
+            log_rx = [math.log((p.get("total_reactions") or 0) + 1) for p in posts]
+            try:
+                mu = _stats.mean(log_rx)
+                sd = _stats.pstdev(log_rx)
+            except _stats.StatisticsError:
+                continue
+            if sd < 0.1:
+                continue
+            creator_stats[cu] = (mu, sd)
+
+        candidates: list[tuple[float, dict]] = []
+        for r in rows:
+            cu = (r.get("creator_username") or "").strip()
+            if not cu or cu == exclude_username:
+                continue
+            if cu not in creator_stats:
+                continue
+            posted_at = r.get("posted_at") or ""
+            try:
+                posted_dt = datetime.fromisoformat(posted_at.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if posted_dt < candidate_cutoff:
+                continue
+            rx = r.get("total_reactions") or 0
+            mu, sd = creator_stats[cu]
+            z = (math.log(rx + 1) - mu) / sd
+            candidates.append((z, r))
+
+        candidates.sort(key=lambda t: t[0], reverse=True)
+        seen: set[str] = set()
+        picked: list[tuple[float, dict]] = []
+        for z, r in candidates:
+            cu = r["creator_username"]
+            if cu in seen:
+                continue
+            seen.add(cu)
+            picked.append((z, r))
+            if len(picked) >= limit:
+                break
+
+        out_rows = [_row_to_dict(r, z=z) for z, r in picked]
+    else:
+        # Absolute: dedupe one-per-creator from the desc-sorted pull
+        seen: set[str] = set()
+        out_rows: list[dict] = []
+        for r in rows:
+            cu = (r.get("creator_username") or "").strip()
+            if not cu or cu in seen:
+                continue
+            seen.add(cu)
+            out_rows.append(_row_to_dict(r))
+            if len(out_rows) >= limit:
+                break
+
+    return json.dumps({
+        "rank_by":        rank_by,
+        "days":           days,
+        "excluded_self":  exclude_username,
+        "n_returned":     len(out_rows),
+        "posts":          out_rows,
+    }, default=str)
+
+
 def _fetch_url(company: str, args: dict) -> str:
     """Resolve a URL to readable plain text.
 
@@ -1064,6 +1250,48 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "query_cross_roster_signals",
+        "description": (
+            "Recent high-engagement posts from OTHER tracked Virio creators "
+            "(the current FOC is excluded automatically). Used to ground "
+            "``strategic_themes`` in measured outcomes elsewhere on the "
+            "roster — 'this kind of post is landing for these creators, "
+            "here's the engagement evidence.' Required substrate before "
+            "claiming a strategic theme will work; without it, themes are "
+            "guesses about the form. Two ranking lenses: ``absolute`` "
+            "(raw reaction count, surfaces the biggest hits across the "
+            "roster) and ``z_score`` (within-creator log-z, surfaces "
+            "RELATIVE outliers at smaller-baseline creators that the "
+            "absolute list crowds out)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "default": 30,
+                    "description": "Recency window. Default 30, max 90.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 10,
+                    "description": "How many posts to return. Default 10, max 25.",
+                },
+                "rank_by": {
+                    "type": "string",
+                    "enum": ["absolute", "z_score"],
+                    "default": "absolute",
+                    "description": (
+                        "``absolute`` = raw reactions (the biggest hits). "
+                        "``z_score`` = within-creator log-z (relative "
+                        "outliers, catches breakthroughs at smaller-"
+                        "baseline creators). Run BOTH for a complete view."
+                    ),
+                },
+            },
+        },
+    },
+    {
         "name": "search_linkedin_corpus",
         "description": (
             "Search the 200K+ LinkedIn post corpus by keyword or semantic "
@@ -1169,33 +1397,43 @@ _TOOLS: list[dict[str, Any]] = [
             "raw transcripts at generation time. Don't write this as\n"
             "instructions to Stelle.\n"
             "\n"
-            "Six structured fields + a prose narrative:\n"
+            "Structured fields + a prose narrative:\n"
             "  - ``current_strategy_diagnosis``: THE SPINE. Three buckets —\n"
             "    what_is_working, what_is_broken, blind_spots — each\n"
             "    cited with concrete evidence. This is the answer to the\n"
             "    core question. Themes / probes below are downstream.\n"
-            "  - ``strategic_themes``: the 3-5 directions this client's\n"
-            "    public voice should develop over the next 4-8 weeks. Each\n"
-            "    cites which diagnosis bucket it addresses (`addresses`\n"
-            "    field) and is tied to engagement / ICP-exposure evidence.\n"
-            "  - ``topics_to_probe``: threads Tribbie should pull on\n"
-            "    in the next client interview to advance the strategy\n"
-            "    diagnosed above. Forward-looking: 'the diagnosis says\n"
-            "    X is broken/missing — we need the client to articulate\n"
-            "    Y on the next call to fix it.' Each entry cites which\n"
-            "    diagnosis bucket it addresses (``addresses`` field).\n"
-            "    NOT backward-looking follow-ups on already-discussed\n"
-            "    transcript material (those recycle content instead of\n"
-            "    advancing the strategy). 5-12 entries.\n"
-            "  - ``topics_exhausted``: patterns / angles the client has\n"
-            "    already posted to diminishing returns. Cite which posts.\n"
-            "    0-5 entries. Do not invent.\n"
-            "  - ``dm_targets``: warm prospects worth a direct outreach now\n"
+            "  - ``industry_context``: REQUIRED. Current real-world signals\n"
+            "    (last 30d) about this client's industry that affect\n"
+            "    positioning. Surfaced via web_search + fetch_url. Each\n"
+            "    signal has explicit relevance to THIS client. Without\n"
+            "    this field the brief is asynchronous to reality.\n"
+            "  - ``strategic_themes``: directions this client's public\n"
+            "    voice should develop over the next 4-8 weeks. Each cites\n"
+            "    which diagnosis bucket it addresses (``addresses``) and\n"
+            "    is grounded in client-side evidence. STRONGLY preferred:\n"
+            "    populate ``cross_roster_evidence`` from\n"
+            "    ``query_cross_roster_signals`` showing this kind of\n"
+            "    post / theme is measurably landing for other tracked\n"
+            "    creators — themes without cross-roster grounding are\n"
+            "    guesses about form.\n"
+            "  - ``topics_to_probe``: topical TERRITORIES Tribbie should\n"
+            "    guide the client into. Topics, not stories. Each entry\n"
+            "    requires ``unexplored_evidence`` — concrete proof the\n"
+            "    topic is absent or under-developed in the published\n"
+            "    content arc. As many as the arc actually has gaps for;\n"
+            "    empty list is valid. Story-shaped probes (the Thras.io\n"
+            "    call, the Zurich trip) belong in ``prose`` as content\n"
+            "    assets — NOT here.\n"
+            "  - ``topics_exhausted``: patterns the client has posted to\n"
+            "    fatigue. 0-5 entries. Do not invent.\n"
+            "  - ``dm_targets``: warm prospects worth direct outreach now\n"
             "    (3-8 strongest).\n"
             "  - ``next_run_trigger``: when Cyrene should run again, why.\n"
             "  - ``prose``: strategic narrative. Where is this client's\n"
-            "    journey going? What's shifting in the ICP reaction? What's\n"
-            "    the arc over the past month? 400-1200 words.\n"
+            "    journey going? What's shifting in the ICP reaction? What\n"
+            "    rich named stories from the transcripts are content\n"
+            "    assets the operator should have Stelle mine? 400-1200\n"
+            "    words.\n"
             "\n"
             "Hard rule: every ``strategic_themes``, ``topics_exhausted``,\n"
             "and ``topics_to_probe`` entry cites concrete evidence from\n"
@@ -1283,6 +1521,87 @@ _TOOLS: list[dict[str, Any]] = [
                     },
                     "required": ["what_is_working", "what_is_broken", "blind_spots"],
                 },
+                "industry_context": {
+                    "type": "object",
+                    "description": (
+                        "Current real-world signal about this client's "
+                        "industry / market / domain that affects positioning "
+                        "in the next 4-8 weeks. Pulled via web_search + "
+                        "fetch_url. WITHOUT this field, the brief is "
+                        "asynchronous to reality — frozen at the date of "
+                        "the latest transcript. Required.\n\n"
+                        "Goal: surface news, competitive moves, trending "
+                        "narratives, factual updates, recent industry "
+                        "events that this client could legitimately ride "
+                        "or push back against in their content. NOT "
+                        "general industry overview — specific signals "
+                        "with explicit relevance to THIS client's "
+                        "positioning."
+                    ),
+                    "properties": {
+                        "current_signals": {
+                            "type": "array",
+                            "minItems": 2,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "signal": {
+                                        "type": "string",
+                                        "description": (
+                                            "What's happening: news headline, "
+                                            "competitor announcement, "
+                                            "industry trend, regulatory "
+                                            "shift, etc. One sentence."
+                                        ),
+                                    },
+                                    "relevance_to_client": {
+                                        "type": "string",
+                                        "description": (
+                                            "Why THIS client should care: "
+                                            "what positioning move it "
+                                            "enables, what gap it creates, "
+                                            "what conversation it joins. "
+                                            "Specific to this FOC's role + "
+                                            "positioning, not generic."
+                                        ),
+                                    },
+                                    "source_url": {
+                                        "type": "string",
+                                        "description": (
+                                            "URL backing the signal. "
+                                            "fetch_url-readable. Empty "
+                                            "string for signals that "
+                                            "synthesize multiple sources."
+                                        ),
+                                    },
+                                    "as_of_date": {
+                                        "type": "string",
+                                        "description": "ISO date (YYYY-MM-DD) of the signal — when it broke or when you observed it.",
+                                    },
+                                },
+                                "required": ["signal", "relevance_to_client"],
+                            },
+                            "description": (
+                                "2-6 specific current signals. Drop the "
+                                "field rather than fill with stale "
+                                "generic-industry filler — empty signals "
+                                "is worse than 2 sharp ones."
+                            ),
+                        },
+                        "synthesis": {
+                            "type": "string",
+                            "description": (
+                                "1-paragraph synthesis: what's the "
+                                "current shape of this client's market "
+                                "moment? What single sentence about "
+                                "industry context should frame the "
+                                "rest of this brief? Optional but "
+                                "useful for the operator's quick scan."
+                            ),
+                        },
+                    },
+                    "required": ["current_signals"],
+                },
                 "strategic_themes": {
                     "type": "array",
                     "items": {
@@ -1307,6 +1626,26 @@ _TOOLS: list[dict[str, Any]] = [
                                 "type": "string",
                                 "description": "Why this theme now: which observations / engagers / trend numbers support steering toward it. Cite concretely.",
                             },
+                            "cross_roster_evidence": {
+                                "type": "string",
+                                "description": (
+                                    "Optional but strongly preferred: "
+                                    "a measured outcome from ``query_cross_"
+                                    "roster_signals`` showing this kind of "
+                                    "post / theme is landing for OTHER "
+                                    "tracked creators. Format example: "
+                                    "'@alexreynolds1 personal-vulnerability "
+                                    "post (Mar 17) hit 1247 reactions; "
+                                    "@heather-adkins narrative-hook post "
+                                    "(Apr 15) hit 851 — the form is "
+                                    "currently working at adjacent-persona "
+                                    "creators we work with.' Themes with "
+                                    "cross-roster evidence are weighted "
+                                    "more heavily by the operator. Themes "
+                                    "without it are guesses, even if the "
+                                    "client-side evidence is strong."
+                                ),
+                            },
                             "arc": {
                                 "type": "string",
                                 "description": "How this theme should develop over the next 4-8 weeks. Where does it start, where does it go?",
@@ -1327,14 +1666,24 @@ _TOOLS: list[dict[str, Any]] = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "thread": {
+                            "topic": {
                                 "type": "string",
                                 "description": (
-                                    "The topic / angle / story area Tribbie "
-                                    "should pull on in the next interview. "
-                                    "Forward-looking: what does this client "
-                                    "need to talk about NEXT to advance the "
-                                    "strategy diagnosed above?"
+                                    "Topical TERRITORY (a domain, theme, "
+                                    "or pattern) Tribbie should get the "
+                                    "client into on the next call. NOT a "
+                                    "specific incident the client already "
+                                    "mentioned — territories generate a "
+                                    "content series, story-drills generate "
+                                    "one post and exhaust. Examples: "
+                                    "'voice safety / deepfake risk', "
+                                    "'EQ failures in Andrew's own selling', "
+                                    "'how Hume's customers ask for X but "
+                                    "actually need Y'. Counter-examples: "
+                                    "'the Thras.io close', 'the Zurich "
+                                    "trip', 'data engineers as SEs at "
+                                    "Astronomer' — these are STORIES, not "
+                                    "topics."
                                 ),
                             },
                             "addresses": {
@@ -1344,68 +1693,74 @@ _TOOLS: list[dict[str, Any]] = [
                                     "advances. Format: "
                                     "``what_is_broken[N]`` / "
                                     "``blind_spots[N]`` / "
-                                    "``what_is_working[N]`` (where N is "
-                                    "the index in that bucket's array). "
-                                    "Each probe MUST be tied to a specific "
-                                    "diagnosis entry — if you can't say "
-                                    "which bucket it advances, it doesn't "
-                                    "belong here. Drill-deeper-on-already-"
-                                    "discussed-detail probes are only "
-                                    "valid when the diagnosis explicitly "
-                                    "flags that drill as the strategic "
-                                    "move (e.g., ``what_is_broken`` says "
-                                    "the client only mentioned topic X in "
-                                    "passing and needs to develop it)."
+                                    "``what_is_working[N]``."
                                 ),
                             },
-                            "why": {
+                            "unexplored_evidence": {
                                 "type": "string",
                                 "description": (
-                                    "Forward-looking rationale: what's "
-                                    "MISSING from the current content arc "
-                                    "that this probe would unlock? Cite "
-                                    "the specific gap (engagement signal, "
-                                    "comment thread, transcript silence, "
-                                    "ICP-segment exposure miss). NOT 'in "
-                                    "transcript X they mentioned Y, let's "
-                                    "ask more about Y' — that's "
-                                    "backward-looking. The right shape is "
-                                    "'the diagnosis says Z is broken, and "
-                                    "we need this client to articulate W "
-                                    "to fix it.'"
+                                    "PROOF the topic is currently absent "
+                                    "from this client's published content "
+                                    "arc. Cite concretely: 'searched all "
+                                    "24 published posts in last 90 days "
+                                    "for terms like X, Y, Z — zero "
+                                    "matches' OR 'topic mentioned glancingly "
+                                    "in one March post but never developed "
+                                    "as the central thesis.' If you can't "
+                                    "demonstrate the topic is absent or "
+                                    "under-developed in the existing "
+                                    "content arc, this isn't a probe — "
+                                    "it's a story-drill on something the "
+                                    "client has already said. Drop it."
+                                ),
+                            },
+                            "why_now": {
+                                "type": "string",
+                                "description": (
+                                    "Why this unexplored topic matters "
+                                    "RIGHT NOW. Tie to: (a) the diagnosis "
+                                    "(which broken pattern / blind spot "
+                                    "this fills), AND/OR (b) industry "
+                                    "context (a current market signal "
+                                    "this topic intersects with), AND/OR "
+                                    "(c) cross-roster evidence (similar "
+                                    "topical lanes landing for other "
+                                    "creators). At least one of the three."
                                 ),
                             },
                             "suggested_entry_point": {
                                 "type": "string",
-                                "description": "Optional — a specific opening question or reference point Tribbie could use to get the client into the thread.",
+                                "description": "Optional — a specific opening question or reference point Tribbie could use to get the client into the territory.",
                             },
                         },
-                        "required": ["thread", "addresses", "why"],
+                        "required": ["topic", "addresses", "unexplored_evidence", "why_now"],
                     },
                     "description": (
-                        "Threads Tribbie should pull on in the next client "
-                        "interview to advance the strategy diagnosed above. "
-                        "5-12 entries.\n\n"
-                        "FORWARD-LOOKING, NOT FOLLOW-UP. The default failure "
-                        "mode is 'in transcript X the client mentioned Y, "
-                        "let's drill deeper into Y.' That produces probes "
-                        "that recycle existing material instead of "
-                        "developing the strategy.\n\n"
-                        "Right shape: 'The diagnosis says Z is broken / "
-                        "missing / under-developed. To fix Z, we need this "
-                        "client to articulate W on the next call.' The "
-                        "``addresses`` field forces this — every probe "
-                        "must point at a specific diagnosis bucket entry. "
-                        "If the probe doesn't advance the diagnosis, it "
-                        "doesn't belong in the brief.\n\n"
-                        "Drill-deeper probes ARE valid when the diagnosis "
-                        "itself names the drill as the strategic move "
-                        "(e.g., what_is_broken says 'client only "
-                        "name-dropped topic X once, never developed the "
-                        "actual point' — then a probe to develop X is "
-                        "advancing the diagnosis, not avoiding it). "
-                        "Default mode is forward-looking; drill-deeper "
-                        "is the named exception."
+                        "Topical TERRITORIES Tribbie should guide the "
+                        "client into on the next interview. As many as "
+                        "warranted, no count constraint — if the content "
+                        "arc has only 2 real gaps, return 2; if it has "
+                        "8, return 8. Empty list is valid when the arc "
+                        "is well-developed across all diagnosis-named "
+                        "directions.\n\n"
+                        "**STRUCTURAL TEST** — if any of these is true, "
+                        "the entry doesn't belong here:\n"
+                        "  - The 'topic' names a specific incident the "
+                        "client mentioned (Thras.io call, Zurich trip).\n"
+                        "  - You can't fill ``unexplored_evidence`` with "
+                        "concrete proof the topic is absent from "
+                        "published posts.\n"
+                        "  - ``why_now`` reduces to 'because the client "
+                        "mentioned it.'\n"
+                        "\n"
+                        "Rich named stories from transcripts (Andrew's "
+                        "Zurich CTO trip, Mark's perfect-p-value-wrong-"
+                        "biology client) are CONTENT ASSETS, not probe "
+                        "targets. Note them in ``prose`` so the operator "
+                        "can mine them — DO NOT put them here. Probes "
+                        "are about topical territory the client should "
+                        "OWN; assets are stories the client has already "
+                        "produced and Stelle can extract directly."
                     ),
                 },
                 "topics_exhausted": {
@@ -1473,6 +1828,7 @@ _TOOLS: list[dict[str, Any]] = [
             },
             "required": [
                 "current_strategy_diagnosis",
+                "industry_context",
                 "strategic_themes",
                 "topics_to_probe",
                 "next_run_trigger",
@@ -1612,6 +1968,32 @@ No hand-engineered strategy frameworks. No "post 3x/week." No \
 taxonomies. Read the data, see what's working, see what's broken, \
 see what's missing, form your own view.
 
+## Mandatory: ground the brief in current reality
+
+Two grounding passes are LOAD-BEARING. A brief without both is \
+asynchronous to the world the client lives in:
+
+**Industry context (required ``industry_context`` field).** Before \
+forming the diagnosis, run ``web_search`` and ``fetch_url`` to \
+surface what's happening in this client's industry / market / \
+domain in the last 30 days. News, competitive moves, regulatory \
+shifts, trending narratives, factual updates this client could \
+legitimately ride or push back against. Specific signals with \
+explicit relevance to THIS client's positioning — not general \
+industry overview. Without current signals, the brief is frozen at \
+the date of the latest transcript. Fill ``industry_context`` with \
+2-6 specific signals; drop the field rather than fill with stale \
+generic-industry filler.
+
+**Cross-roster grounding (required for strategic_themes).** Use \
+``query_cross_roster_signals`` to see what kinds of posts are \
+currently landing for OTHER tracked Virio creators. When you \
+propose a strategic theme, ask: is this kind of post measurably \
+working elsewhere on the roster, or am I guessing? When you can \
+ground a theme in measured cross-creator outcomes, populate \
+``cross_roster_evidence`` on that theme. (LinkedIn-wide grounding \
+is deferred — for now, the roster is the comparison universe.)
+
 ## Structured shape of the answer
 
 Two downstream consumers read your brief: the **operator** (long-term \
@@ -1633,20 +2015,23 @@ The four most important:
     (`addresses` field: e.g. "what_is_broken[0]"). Critique → fix \
     link is explicit. Not tactics, not next-post instructions — \
     strategic direction over 4-8 weeks.
-  - ``topics_to_probe`` (5-12) — threads for Tribbie's next \
-    interview, derived FROM THE DIAGNOSIS YOU JUST WROTE. Forward-\
-    looking: "the diagnosis says X is broken/missing — we need the \
-    client to articulate Y on the next call to fix it." Each probe \
-    cites which diagnosis bucket entry it advances (``addresses`` \
-    field, same shape as ``strategic_themes``). \
-    \
-    Standard failure mode: backward-looking probes that drill into \
-    transcript material already covered ("in interview 3 they \
-    mentioned topic Z, let's ask more about Z"). That recycles \
-    existing content instead of moving the strategy. Drill-deeper \
-    probes are valid ONLY when the diagnosis itself names the drill \
-    as the strategic move — otherwise default to forward-looking \
-    new-territory probes that fill diagnosis gaps.
+  - ``topics_to_probe`` — topical TERRITORIES Tribbie should guide \
+    the client into on the next call. Topics, not stories. As many \
+    as the content arc actually has gaps for; empty is valid when \
+    the arc is well-developed.\n\n
+    Each probe must (a) name a topical TERRITORY (not a specific \
+    incident), (b) cite which diagnosis bucket it addresses, AND \
+    (c) supply ``unexplored_evidence`` — concrete proof the topic \
+    is absent or under-developed in the client's published posts. \
+    If you can't show the topic is missing from the content arc, \
+    it's not a probe; it's a story-drill on something already said. \
+    Drop it.\n\n
+    Rich named stories that surface in transcripts (Andrew's Zurich \
+    CTO trip, the FAANG weekend, Mark's wrong-biology client) are \
+    CONTENT ASSETS. Note them in ``prose`` so the operator can mine \
+    them — they do NOT belong in topics_to_probe. Probes are about \
+    topical territory the client should OWN going forward; assets \
+    are material Stelle can extract directly from existing transcripts.
   - ``topics_exhausted`` (0-5), ``dm_targets`` (3-8), \
     ``next_run_trigger``, ``prose`` (400-1200 words) — supporting \
     structure. ``prose`` ties the diagnosis to the prescription \
@@ -1678,6 +2063,7 @@ _TOOL_DISPATCH: dict[str, Any] = {
     "query_engagement_trajectories": _query_engagement_trajectories,
     "execute_python": _execute_python,
     "search_linkedin_corpus": _search_linkedin_corpus,
+    "query_cross_roster_signals": _query_cross_roster_signals,
     "web_search": _web_search,
     "fetch_url": _fetch_url,
     "query_brief_history": _query_brief_history,
