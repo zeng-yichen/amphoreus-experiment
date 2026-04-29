@@ -256,6 +256,34 @@ def _handle_get_reader_reaction(args: dict) -> str:
     draft = args.get("draft_text", "")
     if not draft:
         return json.dumps({"_error": "draft_text is required"})
+
+    # 2026-04-29: per-run draft-hash cache.
+    #
+    # Irontomb's verdicts are stochastic — the same draft critiqued
+    # twice can return contradictory line-level reactions ("Vibes."
+    # called "that's the line" on iter N, "every AI post does this"
+    # on iter N+1). Stelle iterating on minor closer tweaks would
+    # trigger fresh critic calls on a substantially-unchanged draft
+    # and get whipsawed by contradictory feedback, sometimes
+    # abandoning a draft her FIRST critique had rated positively
+    # (Andrew Track 3 / voice-AI / Appen weekend, run f5158db7).
+    #
+    # Memoize on the exact draft hash. If Stelle calls
+    # get_reader_reaction with the SAME text twice in a session,
+    # return the cached verdict. ~10 LOC fix; no taxonomy change;
+    # any actual edit to the draft yields a fresh verdict because
+    # the hash changes.
+    from backend.src.agents.irontomb import _draft_hash as _hash_draft
+    _dh_in = _hash_draft(draft)
+    for prior in _simulate_results:
+        if prior.get("draft_hash") == _dh_in:
+            cached = dict(prior.get("result") or {})
+            cached["_cache_hit"] = True
+            # Re-emit as enriched response (trajectory built below path
+            # is bypassed — cached hit means Stelle didn't actually edit
+            # the draft, so the trajectory is the same as last time).
+            return json.dumps(cached, default=str)
+
     try:
         from backend.src.mcp_bridge.claude_cli import use_cli
         if _USE_CLI_IRONTOMB and use_cli():
