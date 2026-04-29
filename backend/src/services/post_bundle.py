@@ -625,6 +625,41 @@ def build_post_bundle_with_stats(
     parts.append("")
     parts.append("=== END POSTS ===")
 
+    # Cross-roster ambient awareness — recent high-performers from
+    # OTHER creators we work with. Stelle reads this for "what's
+    # landing on LinkedIn right now," NOT as exemplars to mimic. Pure
+    # data + reaction counts; no labels, no archetype clusters, no
+    # prescription. The model decides what (if anything) to take from
+    # them. Surfaces patterns Stelle wouldn't otherwise see — Alex's
+    # outlier post on Anthropic is invisible to Hensley's bundle
+    # without this section, even though both creators benefit from
+    # exposure to the live cross-roster signal.
+    try:
+        cross_lines = _fetch_cross_roster_winners(
+            exclude_username=_resolve_username_for_cross_filter(company, user_id),
+            days=30,
+            limit=10,
+        )
+        if cross_lines:
+            parts.append("")
+            parts.append("=== RECENT HIGH-PERFORMERS ACROSS ROSTER (last 30d) ===")
+            parts.append("")
+            parts.append(
+                "Highest-reaction posts from OTHER creators we work with, "
+                "posted in the last 30 days (one post per creator, sorted "
+                "desc). Read for ambient awareness of what's landing right "
+                "now across the roster — NOT as exemplars to mimic, NOT "
+                "as archetype patterns to fit. The model decides what (if "
+                "anything) to take from them. Reaction counts are absolute, "
+                "not creator-baseline-normalized."
+            )
+            parts.append("")
+            parts.extend(cross_lines)
+            parts.append("")
+            parts.append("=== END HIGH-PERFORMERS ===")
+    except Exception as exc:
+        logger.debug("[post_bundle] cross-roster winners section failed: %s", exc)
+
     # Structured stats log — grep-friendly so a downstream audit
     # script (``neighbor_signal_audit``) can aggregate bundle builds
     # without parsing free-text log lines. Keys match the returned
@@ -850,6 +885,119 @@ def _filter_ordinal_posts_to_foc(
         "(display_name=%r, linkedin_username=%r)",
         len(posts), len(out), user_id, display_name, linkedin_username,
     )
+    return out
+
+
+def _resolve_username_for_cross_filter(
+    company: str, user_id: Optional[str],
+) -> Optional[str]:
+    """Get the LinkedIn handle for the current creator so we can
+    exclude their own posts from the cross-roster section.
+
+    Returns None if it can't resolve — the caller treats that as
+    "don't filter," which is a safe degradation: the worst case is
+    that Stelle sees one of her own client's recent posts in the
+    cross-roster section, which doesn't hurt anything.
+    """
+    try:
+        from backend.src.agents.stelle import _resolve_linkedin_username
+        return _resolve_linkedin_username(company, user_id=user_id) or None
+    except Exception:
+        return None
+
+
+def _fetch_cross_roster_winners(
+    *,
+    exclude_username: Optional[str],
+    days: int = 30,
+    limit: int = 10,
+) -> list[str]:
+    """Top-N highest-reaction posts from other creators we track,
+    posted in the last ``days``. One post per creator (max), sorted
+    by total_reactions desc.
+
+    Returns rendered lines ready to extend into the bundle; never
+    raises (returns [] on any error).
+
+    Why one-per-creator: a single high-engagement creator with 4
+    big posts in a month would otherwise dominate the list. Cross-
+    creator diversity is the point — exposure to MORE creators is
+    better signal than depth on one.
+
+    Why absolute reactions, not within-creator z-score: the user's
+    motivating example was Alex's "Anthropic..." 1k+ rx post —
+    they care that BIG-IN-ABSOLUTE posts surface. Within-creator
+    z-normalization would surface 8σ outliers from low-baseline
+    creators (Hensley's 97-rx post would beat Alex's 1247-rx post),
+    which is a different signal worth, but not what was asked for.
+    Future iteration: add a second sub-list ranked by z-score so
+    Stelle sees both lenses.
+    """
+    import os
+    url = os.environ.get("AMPHOREUS_SUPABASE_URL", "").strip()
+    key = os.environ.get("AMPHOREUS_SUPABASE_KEY", "").strip()
+    if not url or not key:
+        return []
+    since_iso = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        # Pull more than ``limit`` so we can dedupe by creator and
+        # still return ``limit`` distinct creators.
+        params = {
+            "select": "creator_username,hook,post_text,posted_at,total_reactions",
+            "posted_at": f"gte.{since_iso}",
+            # Same pollution filters the bundle uses — exclude
+            # company posts (announcement-shaped, team-mobilized
+            # reactions inflate counts) and exclude reshares (not
+            # the creator's voice).
+            "or": "(is_company_post.is.null,is_company_post.eq.false)",
+            "reshared_post_urn": "is.null",
+            "post_text": "not.is.null",
+            "order": "total_reactions.desc",
+            "limit": str(max(limit * 4, 40)),  # buffer for dedup
+        }
+        if exclude_username:
+            params["creator_username"] = f"neq.{exclude_username}"
+        resp = httpx.get(
+            f"{url}/rest/v1/linkedin_posts",
+            params=params,
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        rows = resp.json() or []
+    except Exception as exc:
+        logger.debug("[post_bundle] cross-roster winners fetch failed: %s", exc)
+        return []
+
+    # Dedupe to one post per creator, preserving descending
+    # reaction order (since the result is already sorted desc, the
+    # first row per creator is their highest in the window).
+    seen_creators: set[str] = set()
+    picked: list[dict] = []
+    for r in rows:
+        creator = (r.get("creator_username") or "").strip()
+        if not creator or creator in seen_creators:
+            continue
+        seen_creators.add(creator)
+        picked.append(r)
+        if len(picked) >= limit:
+            break
+
+    if not picked:
+        return []
+
+    out: list[str] = []
+    for r in picked:
+        rx = r.get("total_reactions") or 0
+        date = (r.get("posted_at") or "")[:10]
+        creator = (r.get("creator_username") or "?")
+        # Hook first, fall back to first line of body. Cap at
+        # ~120 chars so 10 lines stay under ~2KB total.
+        hook = (r.get("hook") or "").strip()
+        if not hook:
+            hook = (r.get("post_text") or "").split("\n", 1)[0].strip()
+        hook = hook[:120]
+        out.append(f"  [{date}] @{creator:<26}  {rx:>5} rx   \"{hook}\"")
     return out
 
 
