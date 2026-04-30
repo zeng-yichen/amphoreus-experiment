@@ -925,14 +925,31 @@ def _build_system_prompt(
         "image actually moved your reader-state — positive OR "
         "negative — that phrase goes here, paired with the local "
         "reaction it triggered. Each entry:\n"
-        "    quote    — 3-15 words verbatim from the draft (the trigger)\n"
-        "    reaction — your under-15-word reaction to that moment\n\n"
+        "    quote                — 3-15 words verbatim from the draft (the trigger)\n"
+        "    reaction             — your under-15-word reaction to that moment\n"
+        "    calibration_evidence — verbatim 3-15 word quote from a "
+        "calibration triple or transcript that GROUNDS the reaction. "
+        "Empty string ONLY for purely structural reactions; any "
+        "generalization ('this audience scrolls on rule-of-three' / "
+        "'this kind of opener lands') MUST cite a calibration quote "
+        "showing the pattern's actual outcome for THIS client.\n\n"
 
-        "  Examples of an anchor:\n"
-        "    {\"quote\": \"two hundred Fridays\", \"reaction\": \"oof, that math hit\"}\n"
-        "    {\"quote\": \"isn't a software problem\", \"reaction\": \"ugh, didactic, scrolled\"}\n"
-        "    {\"quote\": \"He never asked us for an agent\", \"reaction\": \"okay that line stays\"}\n"
-        "    {\"quote\": \"Not predicting the future\", \"reaction\": \"Not X. Not Y. — eyeroll\"}\n\n"
+        "  Examples of a grounded anchor:\n"
+        "    {\n"
+        "      \"quote\": \"two hundred Fridays\",\n"
+        "      \"reaction\": \"oof, that math hit\",\n"
+        "      \"calibration_evidence\": \"calibration[7]: '300 Tuesdays of standup' hit 89 reactions — concrete-time-math lands\"\n"
+        "    }\n"
+        "    {\n"
+        "      \"quote\": \"isn't a software problem\",\n"
+        "      \"reaction\": \"ugh, didactic, scrolled\",\n"
+        "      \"calibration_evidence\": \"calibration[12] published version cut a similar 'isn't X, it's Y' line — they don't ship that shape\"\n"
+        "    }\n"
+        "    {\n"
+        "      \"quote\": \"He never asked us for an agent\",\n"
+        "      \"reaction\": \"okay that line stays\",\n"
+        "      \"calibration_evidence\": \"\"  # structural — first-person specificity, no need to cite\n"
+        "    }\n\n"
 
         "## The split — how to know which goes where\n\n"
 
@@ -1240,8 +1257,26 @@ _SUBMIT_REACTION_TOOL: dict[str, Any] = {
                                 "Same register as the gestalt reaction."
                             ),
                         },
+                        "calibration_evidence": {
+                            "type": "string",
+                            "description": (
+                                "Verbatim 3-15 word quote from a "
+                                "calibration-block triple (this client's "
+                                "real past post text) or transcript that "
+                                "GROUNDS your reaction — concrete proof "
+                                "this audience has reacted similarly to "
+                                "this pattern before. Empty string is "
+                                "ALLOWED only when the reaction is purely "
+                                "structural (e.g., the closer doesn't "
+                                "connect to the opener); anything that's "
+                                "a generalization about 'what LinkedIn "
+                                "audiences do' MUST be backed by a "
+                                "calibration quote, otherwise it's a "
+                                "prior, not a signal."
+                            ),
+                        },
                     },
-                    "required": ["quote", "reaction"],
+                    "required": ["quote", "reaction", "calibration_evidence"],
                 },
             },
         },

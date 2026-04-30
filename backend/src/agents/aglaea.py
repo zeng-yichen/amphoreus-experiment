@@ -527,12 +527,21 @@ no explanation outside the JSON:
       {
         "quote":      "<verbatim substring of the draft, ≤200 chars>",
         "reason":     "<why this line risks an edit, ≤200 chars>",
-        "suggestion": "<concrete rewrite, ≤200 chars>"
+        "suggestion": "<concrete rewrite, ≤200 chars>",
+        "substrate_evidence": "<verbatim 3-30 word quote from TRANSCRIPTS / VOICE_POSTS / FEEDBACK / EDIT_DELTAS that grounds the flag, OR empty string if the flag is purely structural>"
       }
     ]
   }
 
 If the draft is on-voice enough to ship, ``flagged_spans`` MAY be empty.
+
+The ``substrate_evidence`` field is REQUIRED on every flag. Empty
+string is allowed ONLY when the flag is structural (e.g., "the closer
+doesn't connect to the opener" — no substrate needed). Any flag that
+generalizes about "the user wouldn't say this" / "this isn't their
+voice" / "they'd soften this" MUST cite a concrete substrate quote
+showing how the user actually talks. A flag without grounding is a
+prior, not a signal — the operator can't act on it.
 """
 
 
