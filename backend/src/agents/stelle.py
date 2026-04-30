@@ -205,10 +205,27 @@ same core insight — if yes, kill one and replace with a genuinely \
 different angle. Topic overlap is fine; insight overlap is not.
 2. Pick the next unwritten topic from the plan. Identify the specific \
 source material (transcript file + timestamps) you'll draw from.
-3. Draft in-context or in `scratch/post-N.md`. After each paragraph \
-with a factual claim, add a citation comment: \
-`<!-- [filename, timestamp] "quote" -->`. Read it back aloud.
-4. Call `get_reader_reaction` on the draft. The response is a gestalt \
+3. **Generate K=3 candidate drafts before iterating.** \
+For each topic, write THREE candidate drafts that you'd consider \
+plausible attempts at the post. Each candidate is your own — vary \
+whatever you think is worth varying (shape, voice, opening, framing, \
+length, structure). No required differentiation, no enumerated \
+shape buckets to fill, no rule that they must be different from \
+each other. The point is search: more candidates = wider exploration \
+of the space, and Irontomb's calibration data is the arbiter of \
+which one fits this client's audience best.\n\n
+Run `get_reader_reaction` on EACH candidate. Pick the candidate with \
+the strongest gestalt + highest anchor positivity ratio. That's your \
+working draft. Iterate from there. The other candidates can stay in \
+scratch as failed attempts; don't try to merge them.\n\n
+Why three: one candidate gives Irontomb only one signal — you're \
+forced to either ship-or-kill that single attempt, and a slightly-\
+weak first draft becomes a hill to climb. Three candidates gives \
+search width without exploding compute. Add citation comments \
+(`<!-- [filename, timestamp] "quote" -->`) after each factual claim \
+in your chosen working draft.
+4. Call `get_reader_reaction` on iterations of the chosen working \
+draft. The response is a gestalt \
 `reaction` plus a list of inline `anchors`, each carrying a `quote` \
 field (verbatim trigger phrase from the draft) and a `reaction` \
 field (short reader-voice response to that span). You are looking \
@@ -238,7 +255,8 @@ from this session with each draft's first line + length + every \
 prior anchor, so you can track trajectory across iterations. If \
 the SAME anchor span keeps reading negative across two cycles, your \
 edit on that span isn't working — escalate (rewrite the section \
-larger, or kill the angle). Cap at 12 cycles per post.
+larger, or kill the angle). Total budget per post: K=3 candidates \
++ up to 12 iteration cycles on the winning candidate.
 5. Call `submit_draft` with the finished post. `submit_draft` persists \
 the draft to Amphoreus's `local_posts` for operator review and runs \
 Castorice fact-check + strategic-fit analysis. Castorice's strategic-fit \
@@ -2621,16 +2639,32 @@ The workspace is a virtual view over the client's data source (Supabase
     Those land on your fly-local SandboxFs, persist for the run, and
     you can ``read_file``/``list_directory`` them back normally.
 
-- **Use scratch for draft iteration.** Classic pattern still works:
+- **Use scratch for candidates + draft iteration.** Pattern:
 
-      write_file("scratch/post1-v1.md", <draft>)
-      → get_reader_reaction(draft_text=<draft>)
-      → interpret reaction
-      → write_file("scratch/post1-v2.md", <revised>)
+      # Stage 1 — generate K=3 candidate drafts (different attempts)
+      write_file("scratch/post1-cand-A.md", <candidate A>)
+      write_file("scratch/post1-cand-B.md", <candidate B>)
+      write_file("scratch/post1-cand-C.md", <candidate C>)
+      → get_reader_reaction(draft_text=<candidate A>)
+      → get_reader_reaction(draft_text=<candidate B>)
+      → get_reader_reaction(draft_text=<candidate C>)
+      → pick the one with the strongest gestalt + most positive anchors
+
+      # Stage 2 — iterate the winning candidate
+      write_file("scratch/post1-v2.md", <revised winner>)
       → get_reader_reaction(draft_text=<revised>)
       → … iterate until the reader stops complaining.
 
-  You can also keep drafts purely in-context if you prefer —
+  Why three candidates, not one: a single first-shot draft locks you
+  into one shape — analyst-voice vs founder-voice, story vs commentary,
+  long vs tight. Three candidates let Irontomb's calibration data
+  pick which shape this client's audience responds to, instead of you
+  guessing on the first draft. Vary whatever you think is worth
+  varying — shape, voice, opener, framing, length. No required
+  differentiation across the three; the selector is Irontomb's
+  rating, not a diversity rule.
+
+  You can also keep candidates purely in-context if you prefer —
   ``get_reader_reaction`` takes the full draft text directly, so a
   file round-trip is never required. Use whichever feels natural.
 
@@ -2694,14 +2728,28 @@ files) is your own fly-local SandboxFs — read, write, edit, list freely.
   the shared ``conversations/``, ``slack/``, ``tasks/``, ``.pi/``.
 - Scratch paths (fly-local, read/write): anything else.
 
-Classic iteration pattern — two-critic loop:
+Iteration pattern — K=3 candidates, then two-critic loop on the winner:
 
-    write_file("scratch/post1-v1.md", <draft>)
-    → get_reader_reaction(draft_text=<draft>)      # will readers engage?
-    → check_client_comfort(draft_text=<draft>)     # will the FOC user ship this?
-    → write_file("scratch/post1-v2.md", <revised>)
+    # Stage 1 — generate K=3 candidate drafts, each a different attempt.
+    write_file("scratch/post1-cand-A.md", <candidate A>)
+    write_file("scratch/post1-cand-B.md", <candidate B>)
+    write_file("scratch/post1-cand-C.md", <candidate C>)
+    → get_reader_reaction on each
+    → pick the candidate with the strongest gestalt + most positive anchors
+
+    # Stage 2 — iterate the winning candidate against both critics
+    write_file("scratch/post1-v2.md", <revised winner>)
+    → get_reader_reaction(draft_text=<revised>)    # will readers engage?
+    → check_client_comfort(draft_text=<revised>)   # will the FOC user ship this?
+    → write_file("scratch/post1-v3.md", <revised>)
     → repeat both …
     → … until BOTH critics pass, then submit_draft.
+
+Why K=3 candidates first: a single first-draft locks you into one
+shape (analyst vs founder voice, story vs commentary). Three candidates
+let Irontomb's calibration data pick which shape this client's audience
+actually responds to, rather than you guessing. Vary whatever you
+think is worth varying — no required differentiation rules.
 
 The two critics optimise different axes — pass both:
   * Irontomb (`get_reader_reaction`) — engagement / reader stickiness.
