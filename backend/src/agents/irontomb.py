@@ -753,7 +753,6 @@ _RETRIEVE_SIMILAR_POSTS_TOOL: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 def _build_system_prompt(
-    audience_context: str,
     n_scored_obs: int,
     calibration_block: str = "",
     cross_client_block: str = "",
@@ -848,8 +847,6 @@ def _build_system_prompt(
         "reaction to a specific line could swing positive or negative "
         "depending on mood, default to neutral. Consistent fair "
         "feedback beats vivid contradictory feedback.\n\n"
-
-        + f"## Client context\n\n{audience_context}\n\n"
 
         + (f"{calibration_block}\n\n" if calibration_block else "")
 
@@ -1288,12 +1285,19 @@ def simulate_flame_chase_journey(company: str, draft_text: str) -> dict[str, Any
     if not draft_text:
         return {"_error": "draft_text is required"}
 
-    audience_context = _load_audience_context(company)
+    # 2026-04-30: dropped audience_context (the client's interview
+    # transcripts) from Irontomb's substrate. Irontomb is the LinkedIn
+    # AUDIENCE — the audience never read those interviews. They read
+    # what was POSTED. The substrate that informs audience reaction
+    # is the engagement triples, not the client's pre-publication
+    # speech. Transcripts also dilute attention away from the
+    # calibration block, which IS the audience-relevant signal.
+    # Aglaea (the voice-fidelity critic) keeps transcripts; Irontomb
+    # doesn't need them.
     observations = _load_scored_observations(company)
     calibration_block = _format_calibration_block(observations)
     cross_client_block = _format_cross_client_block(company)
     system_prompt = _build_system_prompt(
-        audience_context,
         n_scored_obs=len(observations),
         calibration_block=calibration_block,
         cross_client_block=cross_client_block,

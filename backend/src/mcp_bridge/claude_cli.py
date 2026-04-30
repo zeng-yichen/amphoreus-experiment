@@ -298,7 +298,6 @@ def simulate_flame_chase_journey_cli(
         _draft_hash,
         _format_calibration_block,
         _format_cross_client_block,
-        _load_audience_context,
         _load_scored_observations,
         _IRONTOMB_MAX_TURNS,
     )
@@ -309,13 +308,15 @@ def simulate_flame_chase_journey_cli(
 
     t0 = time.time()
 
-    # Build the same context that the API path uses
-    audience_context = _load_audience_context(company)
+    # Build the same context that the API path uses. Transcripts
+    # (audience_context) were dropped 2026-04-30 — Irontomb is the
+    # audience, not the client; the audience never reads interview
+    # transcripts. Only engagement triples + cross-client substrate
+    # are audience-relevant.
     observations = _load_scored_observations(company)
     calibration_block = _format_calibration_block(observations)
     cross_client_block = _format_cross_client_block(company)
     system_prompt = _build_system_prompt(
-        audience_context,
         n_scored_obs=len(observations),
         calibration_block=calibration_block,
         cross_client_block=cross_client_block,
@@ -1235,13 +1236,13 @@ def run_cyrene_cli(
     # Pull max turns from Cyrene constants to stay in sync.
     from backend.src.agents.cyrene import _CYRENE_MAX_TURNS
 
-    # Model selection — env-configurable so bulk refreshes can route
-    # around UPP refusals on Opus by switching to Sonnet without a
-    # code change. The CLI's UPP error message itself recommends this:
-    # "try running /model claude-sonnet-4-20250514 to switch models".
-    # Default sonnet-4-5 — strong enough for Cyrene's analysis and
-    # currently does not refuse the same engagement-data patterns.
-    _cyrene_model = (os.environ.get("CYRENE_CLI_MODEL") or "sonnet").strip() or "sonnet"
+    # Model selection — Opus by default. Cyrene's brief is the
+    # strategic spine of the operation; degrading it to Sonnet to dodge
+    # transient Opus UPP refusals (seen during 2026-04-29 bulk refresh)
+    # was a stopgap, not a policy. ``CYRENE_CLI_MODEL`` env override is
+    # kept so a one-off bulk refresh can route around a fresh refusal
+    # without a redeploy.
+    _cyrene_model = (os.environ.get("CYRENE_CLI_MODEL") or "opus").strip() or "opus"
 
     try:
         cmd = [
