@@ -43,11 +43,13 @@ from typing import Awaitable, Callable
 import jwt
 from fastapi import HTTPException, Request, status
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
 from backend.src.auth.acl import Acl
 from backend.src.auth.cf_access import ANONYMOUS_DEV_USER, AuthedUser, CfAccessVerifier
+from backend.src.auth.supabase_auth import SupabaseAuthVerifier
 from backend.src.usage.context import set_request_attribution
 
 logger = logging.getLogger("amphoreus.auth")
@@ -74,13 +76,36 @@ def _is_exempt(path: str) -> bool:
 
 
 def _extract_token(request: Request) -> str:
-    """Pull a JWT out of header/cookie/Authorization, in that order."""
+    """Pull a CF Access JWT out of header/cookie/Authorization, in that order.
+
+    Used by the CF Access middleware. CF proxies set the
+    ``cf-access-jwt-assertion`` header on every origin request; we
+    prefer it over the cookie because it's more reliable through
+    Fly's edge.
+    """
     tok = request.headers.get("cf-access-jwt-assertion")
     if tok:
         return tok.strip()
     tok = request.cookies.get("CF_Authorization")
     if tok:
         return tok.strip()
+    authz = request.headers.get("authorization", "")
+    if authz.lower().startswith("bearer "):
+        return authz[7:].strip()
+    return ""
+
+
+def _extract_supabase_token(request: Request) -> str:
+    """Extract the caller's Supabase session access token.
+
+    Only looks at ``Authorization: Bearer <jwt>``. Deliberately ignores
+    CF Access headers/cookies — during the migration window
+    (Cloudflare Access still in front of Amphoreus, Supabase Auth
+    validating the app-level session), both tokens arrive on the
+    same request and we must NOT try to validate the CF JWT against
+    Supabase (which would 401 every request and redirect-loop the
+    browser).
+    """
     authz = request.headers.get("authorization", "")
     if authz.lower().startswith("bearer "):
         return authz[7:].strip()
@@ -171,20 +196,6 @@ class CfAccessAuthMiddleware(BaseHTTPMiddleware):
                 content={"error": "auth_error", "detail": "internal"},
             )
 
-        # Ban check — takes priority over ACL.
-        if self._acl.is_banned(user.email):
-            logger.warning("Banned user %s attempted access", user.email)
-            return JSONResponse(
-                status_code=status.HTTP_403_FORBIDDEN,
-                content={
-                    "error": "banned",
-                    "detail": (
-                        f"Your account ({user.email}) has been temporarily suspended. "
-                        "Contact your admin to restore access."
-                    ),
-                },
-            )
-
         # ACL gate — user must be known (admin or scoped) to proceed.
         if not self._acl.is_known(user.email):
             logger.warning("Authenticated user %s not in ACL file", user.email)
@@ -195,6 +206,109 @@ class CfAccessAuthMiddleware(BaseHTTPMiddleware):
                     "detail": (
                         f"{user.email} is allow-listed in Cloudflare Access but not in the "
                         "server ACL file. Ask an admin to add you."
+                    ),
+                },
+            )
+
+        request.state.user = user
+        request.state.user_is_admin = self._acl.is_admin(user.email)
+        with set_request_attribution(user.email, _company_from_path(request)):
+            return await call_next(request)
+
+
+class SupabaseAuthMiddleware(BaseHTTPMiddleware):
+    """Verifies every request carries a valid Supabase-issued access token.
+
+    Drop-in replacement for ``CfAccessAuthMiddleware``. The frontend
+    attaches the user's Supabase session access token as
+    ``Authorization: Bearer <jwt>``; we hand it to ``SupabaseAuthVerifier``
+    and let it round-trip validation through Supabase's ``/auth/v1/user``
+    endpoint (cached 5 min on our side).
+
+    The downstream contract is identical to the CF Access middleware:
+    ``request.state.user`` is populated with an ``AuthedUser``-shaped
+    object, ``request.state.user_is_admin`` is True/False, and the
+    request is attributed for usage logging. The ACL gate uses the
+    same ``Acl.is_known`` / ``Acl.is_admin`` checks because email
+    identity is stable across providers.
+    """
+
+    def __init__(self, app: ASGIApp, verifier: SupabaseAuthVerifier, acl: Acl):
+        super().__init__(app)
+        self._verifier = verifier
+        self._acl = acl
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        if request.method == "OPTIONS" or _is_exempt(request.url.path):
+            return await call_next(request)
+
+        # Local-dev bypass — verifier disabled means no Supabase config
+        # in the environment (single-tenant amphoreus.app standalone).
+        if not self._verifier.enabled:
+            request.state.user = ANONYMOUS_DEV_USER
+            request.state.user_is_admin = True
+            with set_request_attribution(
+                ANONYMOUS_DEV_USER.email,
+                _company_from_path(request),
+            ):
+                return await call_next(request)
+
+        token = _extract_supabase_token(request)
+        if not token:
+            # Debug — log what headers we DID get so we can tell whether
+            # the frontend just isn't sending Authorization, or whether
+            # Next.js rewrites / Fly / CF are stripping it.
+            header_names = sorted(
+                k for k in request.headers.keys()
+                if k.lower() in {
+                    "authorization", "cf-access-jwt-assertion",
+                    "cookie", "x-forwarded-for", "host",
+                }
+            )
+            logger.warning(
+                "[supabase-auth] no bearer token on %s %s — headers seen: %s",
+                request.method, request.url.path, header_names,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"error": "unauthorized", "detail": "missing Supabase session"},
+            )
+
+        try:
+            user = self._verifier.verify(token)
+        except ValueError as e:
+            logger.warning(
+                "[supabase-auth] token rejected on %s %s: %s (token prefix: %s…)",
+                request.method, request.url.path, e, token[:20],
+            )
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"error": "unauthorized", "detail": str(e)[:200]},
+            )
+        except Exception:
+            logger.exception("Unexpected Supabase auth failure")
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": "auth_error", "detail": "internal"},
+            )
+
+        # ACL allowlist. Equal-access model: anyone in the ACL file
+        # (admins or scoped-users maps) is accepted; the granular
+        # per-client scoping is kept live for future use but doesn't
+        # gate sign-in.
+        if not self._acl.is_known(user.email):
+            logger.warning("Authenticated user %s not in ACL file", user.email)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "error": "forbidden",
+                    "detail": (
+                        f"{user.email} signed in via Google but isn't on the "
+                        "Amphoreus access list. Ask yichen to add you."
                     ),
                 },
             )
@@ -244,23 +358,30 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 # ---------------------------------------------------------------- FastAPI deps
 
 
-def require_client_from_path(request: Request) -> None:
+def require_client_from_path(conn: HTTPConnection) -> None:
     """Global dependency: if the route has a ``{company}`` path param, enforce ACL.
 
     Admins pass through. Non-admins get 403 if the path's ``company`` slug isn't
     in their allowlist. Routes without a ``company`` path param are no-ops here.
+
+    2026-04-30: parameter typed as ``HTTPConnection`` (Starlette base of both
+    ``Request`` and ``WebSocket``) so this works as a global dependency on
+    BOTH HTTP and WebSocket routes. Previously typed as ``Request``, which
+    crashed with ``TypeError`` whenever FastAPI tried to inject it into a
+    WebSocket-scope handler — broke ``/api/interview/audio/{job_id}``
+    mid-interview.
     """
-    user: AuthedUser | None = getattr(request.state, "user", None)
+    user: AuthedUser | None = getattr(conn.state, "user", None)
     if user is None:
         # Middleware already handled unauth; this branch only hits during dev bypass
-        # where request.state.user is always set. Defensive fallthrough.
+        # where conn.state.user is always set. Defensive fallthrough.
         return
-    if getattr(request.state, "user_is_admin", False):
+    if getattr(conn.state, "user_is_admin", False):
         return
-    company = request.path_params.get("company")
+    company = conn.path_params.get("company")
     if not company:
         return
-    acl: Acl = request.app.state.acl
+    acl: Acl = conn.app.state.acl
     decision = acl.check(user.email, company)
     if not decision.allowed:
         raise HTTPException(
