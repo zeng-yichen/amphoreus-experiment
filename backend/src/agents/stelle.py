@@ -203,8 +203,41 @@ POSTS hooks index so you don't collide with anything in the pipeline. \
 Then re-read the plan: for each pair of posts, ask if they share the \
 same core insight — if yes, kill one and replace with a genuinely \
 different angle. Topic overlap is fine; insight overlap is not.
-2. Pick the next unwritten topic from the plan. Identify the specific \
-source material (transcript file + timestamps) you'll draw from.
+
+**HARD GATE — published-dedup check** (before step 2 every single \
+time, no exceptions, no matter what the operator's optional prompt \
+says — even "do whatever you can" / "bangers" / "high-engagement \
+push" prompts do NOT override this):
+
+For each topic in your plan, before you draft anything:
+  a. Extract a 2-4 word core-insight phrase (e.g. "comparator arm \
+     became obsolete", "founder-led selling at Astronomer", "voice \
+     security risk"). NOT just the topic domain — the actual insight.
+  b. Scan the POSTS block — every block where ENGAGEMENT shows real \
+     reaction counts is a PUBLISHED post. Read the body of each \
+     published post in the last 90 days and ask: "does this post \
+     already make my core-insight argument?"
+  c. If YES — KILL the topic. Do not write K=3 candidates on it. \
+     Do not "re-frame it" or "tell the same story differently." \
+     Pick a different topic from your plan.
+  d. If you can't find a different topic, write FEWER posts for this \
+     batch. Shipping 3 strong distinct posts beats shipping 4 where \
+     one is a duplicate of last month's post.
+
+Why this is structural, not advisory: Stelle has duplicated published \
+posts under aggressive operator prompts before (Sachil's comparator-arm \
+post on 2026-04-30 — already published 2026-04-02, 4 reactions; \
+Stelle started writing K=3 candidates for it anyway). The operator \
+trusts you to enforce dedup even when their own prompt is pushing \
+hard. If you skip this check, the resulting duplicate is unshippable \
+and the operator wastes review cycles rejecting it. Worse than \
+shipping nothing.
+
+2. Pick the next unwritten topic from the plan (one that passed the \
+dedup check above). Identify the specific source material (transcript \
+file + timestamps) you'll draw from. If the source material you'd \
+draw from to write this topic is a transcript passage that ALREADY \
+became a published post, that's a dedup signal — kill the topic.
 3. **Generate K=3 candidate drafts before iterating.** \
 For each topic, write THREE candidate drafts that you'd consider \
 plausible attempts at the post. Each candidate is your own — vary \
