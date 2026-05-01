@@ -347,6 +347,23 @@ For each post, generate 2-3 alternative opening lines (`hook_variants` in \
 the output JSON). The client picks the best one. Make each variant a \
 genuinely different angle on the same post — not just word swaps.
 
+The test for a hook isn't whether it's specific — it's whether it pulls \
+the reader IN. A specific number, an unexpected fact, or a weird detail \
+stops the scroll for CURIOSITY ("wait what") — the reader will glance, \
+then move on. What drives reactions is RECOGNITION — a hook that names \
+a feeling people are already carrying around so they want to forward \
+it, dunk on it, or like it visibly so their network sees they agree. \
+Aim for recognition, not just curiosity.
+
+When Irontomb anchors a hook as "specific but flat — stopped the scroll, \
+didn't pull me in," that hook is dead on arrival even though it passed \
+the 5-second window. Iterate until the hook anchor reads as felt-\
+recognition ("yeah I felt that," "that's exactly it," "gonna forward \
+this"), not as polite acknowledgement. The calibration data shows what \
+shape of recognition hook lands for THIS client's audience — pattern-\
+match against the high-engagement hooks at the top of the POSTS block, \
+not generic LinkedIn-rally tropes.
+
 ## LinkedIn feed
 
 On mobile, only ~140 characters are visible before the "see more" fold. \
