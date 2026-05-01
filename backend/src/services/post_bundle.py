@@ -486,45 +486,63 @@ def build_post_bundle_with_stats(
     #       in the operator's review pile.
     # Post-Ordinal-churn this is the dominant class; the Pass 1 loop
     # above will be empty for any FOC that never pushed to Ordinal.
+    # 2026-05-01: queued drafts (Stelle-generated, sitting in the
+    # operator's review pile, not yet paired with a published LinkedIn
+    # post) are DEDUP-ONLY substrate. We render the topic/hook so
+    # Stelle knows "this angle is already in the queue, don't re-write
+    # it" — but we deliberately omit the BODY so Stelle does not
+    # pattern-match on speculative, never-shipped, unvalidated text.
+    # Voice/calibration signal must come exclusively from posts with
+    # real engagement (Pass 3 below — the linkedin_posts mirror).
+    #
+    # The label "Queued" replaces the legacy "InFlight" — Ordinal is
+    # dead, nothing is in flight TO anywhere anymore; these are
+    # drafts queued in the operator's review pile.
     for lp in local_posts_by_id.values():
         status = (lp.get("status") or "").strip().lower()
         if status != "draft":
             continue
         if (lp.get("ordinal_post_id") or "").strip():
             continue  # covered by Pass 1 (Ordinal-side status governs)
-        # 2026-05-01: read from ``stelle_content`` (the immutable
-        # Stelle-final draft) for ingestion, NOT from ``content`` which
-        # drifts via operator Edit Save / Rewrite. Stelle's NEXT batch
-        # pattern-matches against this; if an operator edit/rewrite
-        # leaks into the bundle, future generations drift toward
-        # operator voice instead of Stelle voice.
-        # Fallback chain for legacy rows where stelle_content is NULL:
-        #   stelle_content → pre_revision_content → content
-        body = (
+        # Dedup hook — title if set, else the first line of the
+        # immutable Stelle-original content. NOT shown for voice;
+        # it's just enough for "this topic is already queued."
+        title = (lp.get("title") or "").strip()
+        stelle_text = (
             (lp.get("stelle_content") or "").strip()
             or (lp.get("pre_revision_content") or "").strip()
             or (lp.get("content") or "").strip()
         )
-        title = (lp.get("title") or "").strip()
-        if not body and not title:
+        hook = title or stelle_text.split("\n", 1)[0][:160]
+        if not hook:
             continue
         date_str = _local_post_date(lp)
         comments = feedback_by_draft.get(lp.get("id"), [])
-        delta = _build_delta(lp)
-        published_delta = _build_published_delta(lp, linkedin_posts_by_urn)
-        neighbors = _draft_neighbors(body)
-        block = _render_block(
-            status="InFlight",
-            title=title,
-            body=body,
-            date_str=date_str,
-            engagement=None,          # never shipped
-            delta=delta,
-            published_delta=published_delta,
-            comments=comments,
-            neighbors=neighbors,
-        )
-        _append_block(block, bool(neighbors), is_rejected=False)
+        # Compact dedup-only block. No body, no neighbors, no engagement,
+        # no delta. Just the topic + operator comments (which are
+        # explicit instruction-shaped guidance, NOT voice signal).
+        lines = [
+            f"### Queued draft — {date_str}".rstrip(" —"),
+            f"TOPIC: {hook}",
+            "(body intentionally omitted — queued drafts are dedup-only "
+            "substrate; voice signal comes from published posts only)",
+        ]
+        if comments:
+            lines.append("")
+            lines.append("OPERATOR COMMENTS ON THIS QUEUED DRAFT:")
+            for c in comments:
+                body_txt = (c.get("body") or "").strip()
+                if not body_txt:
+                    continue
+                sel = (c.get("selected_text") or "").strip()
+                tag = "inline" if sel else "post-wide"
+                resolved = " (resolved)" if c.get("resolved") else ""
+                if sel:
+                    lines.append(f'  - [{tag}{resolved}] on "{sel[:80]}": {body_txt[:300]}')
+                else:
+                    lines.append(f'  - [{tag}{resolved}]: {body_txt[:300]}')
+        block = "\n".join(lines)
+        _append_block(block, has_neighbors=False, is_rejected=False)
 
     # -- Pass 3: Jacquard LinkedIn posts not already covered via Ordinal URN
     for urn, lp_row in linkedin_posts_by_urn.items():
@@ -638,11 +656,21 @@ def build_post_bundle_with_stats(
         "not 're-mine an already-published story.' Shipping 3 strong",
         "distinct posts beats shipping 4 where one is a duplicate.",
         "",
-        "Posts with `ENGAGEMENT: — (not yet published)` are sitting in",
-        "the operator's Amphoreus review pile; same dedup rule applies",
-        "— don't re-write the same angle. Pay close attention to any",
-        "inline/post-wide comments below each one — those are the",
-        "operator's guidance.",
+        "Blocks marked `### Queued draft` are drafts sitting in the",
+        "operator's review pile, NOT yet paired with a published",
+        "LinkedIn post. Their bodies are intentionally OMITTED — only",
+        "the topic/hook is shown. Reason: queued drafts are speculative",
+        "(never published, no engagement, not validated). Pattern-",
+        "matching on their bodies would bias your generation toward",
+        "your own un-validated patterns. They're surfaced HERE solely",
+        "for dedup: don't write a post that re-makes the angle of",
+        "any queued draft. Voice signal comes from published posts",
+        "only (the blocks above with real reaction counts).",
+        "",
+        "Operator comments on queued drafts ARE shown (under each",
+        "queued block) — those are explicit instruction-shaped",
+        "guidance, not voice samples; treat as 'address these notes",
+        "if/when this draft ships.'",
         "",
         "Each block may also carry a NEAREST CREATOR POSTS section —",
         "the most semantically-similar posts from this creator's own",
