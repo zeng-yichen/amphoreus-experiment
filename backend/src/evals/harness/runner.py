@@ -106,10 +106,17 @@ def _execute_agent(case: EvalCase) -> str:
         ) or ""
 
     elif agent_name == "cyrene":
-        from backend.src.agents.demiurge import Cyrene
-        cyrene = Cyrene()
-        result = cyrene.rewrite_single_post(
+        # 2026-05-01: was demiurge.CyreneStyleRewriter (single-shot);
+        # now uses the Stelle-grade rewrite loop (voice substrate +
+        # Irontomb iteration + Aglaea check). The "cyrene" agent name
+        # in eval cases is preserved for backward compat — it now
+        # exercises the full critic-grounded rewrite path.
+        from backend.src.agents.stelle_rewrite import rewrite_post_via_stelle_loop
+        result = rewrite_post_via_stelle_loop(
+            company=case.context.get("company", "test"),
+            user_id=case.context.get("user_id"),
             post_text=case.context.get("post_text", case.prompt),
+            prior_feedback=case.context.get("prior_feedback") or [],
             style_instruction=case.context.get("style", ""),
         )
         return result.get("final_post", "")

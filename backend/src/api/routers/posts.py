@@ -408,23 +408,32 @@ async def reject_post(post_id: str, request: Request, body: RejectRequest | None
 
 @router.post("/{post_id}/rewrite")
 async def rewrite_post(post_id: str, req: RewriteRequest):
-    """Rewrite a post via the Cyrene rewriter (Cyrene.rewrite_single_post
-    in demiurge.py — different class than the strategic-brief Cyrene).
+    """Rewrite a post via the Stelle-grade critic loop.
 
-    Pulls unresolved feedback from ``draft_feedback`` and hands it to
-    the rewriter so the rewrite actually addresses what operators
-    flagged — the highest-leverage consumption point for the comments
-    system.
+    2026-05-01: replaced ``demiurge.CyreneStyleRewriter`` (single-shot
+    Opus call with chain-of-thought XML, no voice substrate, no
+    critic check) with ``stelle_rewrite.rewrite_post_via_stelle_loop``
+    — voice-grounded against this client's published-post bundle,
+    Irontomb-iterated up to N cycles, Aglaea-gated.
 
-    2026-05-01: auto-saves the rewrite back to ``local_posts.content``
-    so the operator-facing card body updates immediately. This used
-    to be reverted to ephemeral over a "what feeds ingestion?" worry,
-    but ingestion is now structurally locked to ``stelle_content``
-    (immutable Stelle-original) and ``linkedin_posts`` (paired
-    published version) — neither of which is touched by rewrites.
-    The mutable ``content`` column is operator-facing display only;
-    bundle, Aglaea, RuanMei never read it. So persistence is safe
-    and just makes the UI feel useful.
+    Flow:
+      1. Pull unresolved draft_feedback (inline + post-wide comments)
+         for this post. Forward as the rewriter's instruction set.
+      2. Resolve company + user_id from the existing local_posts row
+         so the rewriter can scope the bundle / Aglaea per-FOC.
+      3. Run rewrite_post_via_stelle_loop:
+           - bundle (engagement-desc published posts, transcripts)
+             as voice substrate
+           - Opus generates the rewrite, grounded
+           - Irontomb iterates up to 3 cycles, refining flagged spans
+           - Aglaea final voice-fidelity check
+      4. Persist the rewrite to ``content`` (the mutable, operator-
+         facing display column). Ingestion (bundle, Aglaea
+         edit_deltas, RuanMei) reads ``stelle_content`` (immutable),
+         which is unchanged — rewrite never leaks into Stelle's
+         next-generation substrate.
+      5. Return the rewrite + Irontomb reactions + Aglaea verdict so
+         the operator can see critic provenance.
     """
     prior_feedback: list[dict] = []
     try:
@@ -446,24 +455,37 @@ async def rewrite_post(post_id: str, req: RewriteRequest):
     except Exception as exc:
         logger.debug("[posts/rewrite] feedback fetch failed (non-fatal): %s", exc)
 
-    from backend.src.agents.demiurge import Cyrene
-    cyrene = Cyrene()
-    result = cyrene.rewrite_single_post(
+    # Resolve (company_slug, user_id) from the existing local_posts row
+    # so the rewriter can scope its substrate per-FOC. The request
+    # body's ``company`` field is used as a fallback.
+    company_for_rewrite = req.company
+    user_id_for_rewrite: str | None = None
+    try:
+        from backend.src.db.local import get_local_post
+        existing = get_local_post(post_id)
+        if existing:
+            company_for_rewrite = existing.get("company") or req.company
+            user_id_for_rewrite = (existing.get("user_id") or "").strip() or None
+    except Exception as exc:
+        logger.debug("[posts/rewrite] post lookup failed: %s", exc)
+
+    from backend.src.agents.stelle_rewrite import rewrite_post_via_stelle_loop
+    result = rewrite_post_via_stelle_loop(
+        company=company_for_rewrite,
+        user_id=user_id_for_rewrite,
         post_text=req.post_text,
-        style_instruction=req.style_instruction,
-        client_context=req.client_context,
         prior_feedback=prior_feedback,
+        style_instruction=req.style_instruction,
     )
 
     # Persist the rewrite to ``content`` so the operator's card body
     # updates immediately. Ingestion (bundle / Aglaea / RuanMei) reads
     # ``stelle_content`` which is immutable, so the rewrite never
-    # leaks into Stelle's next-generation substrate. Pure display
-    # convenience.
+    # leaks into Stelle's next-generation substrate.
     try:
         rewritten = (result or {}).get("final_post") or ""
         if rewritten.strip():
-            from backend.src.db.local import get_local_post, update_local_post
+            from backend.src.db.local import update_local_post
             if get_local_post(post_id):
                 update_local_post(
                     post_id,

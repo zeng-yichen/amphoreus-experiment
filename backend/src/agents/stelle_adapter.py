@@ -85,7 +85,17 @@ def run_inline_edit(
         result = inline_edit(company, post_text, instruction, event_callback=event_callback)
         return result or ""
     except (ImportError, AttributeError):
-        from backend.src.agents.demiurge import Cyrene
-        cyrene = Cyrene()
-        result = cyrene.rewrite_single_post(post_text, instruction)
+        # 2026-05-01: fallback was demiurge.CyreneStyleRewriter; now
+        # uses the Stelle-grade rewrite loop (bundle + Irontomb +
+        # Aglaea). user_id is None on this path because the inline-
+        # edit caller doesn't carry one — Aglaea will operate
+        # company-wide which is the documented degraded mode.
+        from backend.src.agents.stelle_rewrite import rewrite_post_via_stelle_loop
+        result = rewrite_post_via_stelle_loop(
+            company=company,
+            user_id=None,
+            post_text=post_text,
+            prior_feedback=None,
+            style_instruction=instruction or "",
+        )
         return result.get("final_post", "")
