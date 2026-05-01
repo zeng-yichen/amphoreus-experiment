@@ -2679,20 +2679,21 @@ function PostsManager({
                 >
                   {copiedPostId === post.id ? "Copied!" : "Copy"}
                 </button>
-                {/* Rewrite button temporarily disabled (2026-04-20) —
-                    the behavior was surprising (silently commits content
-                    without a visible LLM pass). Re-enable once the
-                    handler is clearly gated on an explicit confirm
-                    and the LLM call is observable in the UI. */}
-                {false && (
-                  <button
-                    onClick={() => handleRewrite(post)}
-                    disabled={actionInProgress === post.id}
-                    className="rounded bg-stone-800 px-2.5 py-1 text-xs text-stone-300 hover:bg-stone-700 disabled:opacity-50"
-                  >
-                    {actionInProgress === post.id ? "..." : "Rewrite"}
-                  </button>
-                )}
+                {/* Rewrite — pulls every UNRESOLVED inline + post-wide
+                    comment on this post and feeds them to the rewrite
+                    agent (Cyrene.rewrite_single_post). The backend
+                    persists the new content as a revision with source
+                    "rewrite_with_feedback" and returns the rewrite to
+                    the UI, which opens the edit panel pre-filled so
+                    the operator can refine further before final save. */}
+                <button
+                  onClick={() => handleRewrite(post)}
+                  disabled={actionInProgress === post.id}
+                  title="Rewrite this draft using every unresolved inline + post-wide comment as guidance. Saves the rewrite as a new revision; the edit panel opens with the new text so you can refine before approving."
+                  className="rounded bg-stone-800 px-2.5 py-1 text-xs text-stone-300 hover:bg-stone-700 disabled:opacity-50"
+                >
+                  {actionInProgress === post.id ? "..." : "Rewrite"}
+                </button>
                 <button
                   onClick={() => handleFactCheck(post)}
                   disabled={actionInProgress === post.id}
@@ -2700,13 +2701,22 @@ function PostsManager({
                 >
                   {actionInProgress === post.id ? "..." : "Fact-check"}
                 </button>
-                <button
-                  onClick={() => handleGenerateImage(post)}
-                  disabled={generatingImageFor === post.id || actionInProgress === post.id}
-                  className="rounded bg-stone-800 px-2.5 py-1 text-xs text-amber-400 hover:bg-stone-700 disabled:opacity-50"
-                >
-                  {generatingImageFor === post.id ? "Generating..." : "Generate Image"}
-                </button>
+                {/* Generate Image — deprecated 2026-05-01. The image-
+                    generation pipeline runs but the resulting images
+                    aren't being used downstream (Ordinal churn closed
+                    the publishing path that consumed them). The
+                    handler + backend stay in place so re-enabling is
+                    a one-line `{false &&` flip if/when image attach
+                    on the next publishing surface lands. */}
+                {false && (
+                  <button
+                    onClick={() => handleGenerateImage(post)}
+                    disabled={generatingImageFor === post.id || actionInProgress === post.id}
+                    className="rounded bg-stone-800 px-2.5 py-1 text-xs text-amber-400 hover:bg-stone-700 disabled:opacity-50"
+                  >
+                    {generatingImageFor === post.id ? "Generating..." : "Generate Image"}
+                  </button>
+                )}
                 {/* Per-post "Push to Ordinal" + "Push Original" buttons
                     removed 2026-04-23 — Virio churning off Ordinal.
                     Backend returns 410 Gone on any remaining caller.
