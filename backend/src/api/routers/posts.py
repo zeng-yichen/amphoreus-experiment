@@ -414,35 +414,17 @@ async def rewrite_post(post_id: str, req: RewriteRequest):
     Pulls unresolved feedback from ``draft_feedback`` and hands it to
     the rewriter so the rewrite actually addresses what operators
     flagged — the highest-leverage consumption point for the comments
-    system. If the feedback fetch fails (pre-migration, mirror
-    unreachable, etc.) the rewrite still runs without prior feedback
-    — degraded but functional.
+    system.
 
-    2026-05-01: rewrite is EPHEMERAL by design. The endpoint returns
-    the rewritten text but does NOT persist it to ``local_posts`` and
-    does NOT record a revision. The frontend displays the rewrite in
-    the edit panel for operator review; the operator commits via the
-    existing Edit Save flow if they choose to keep it.
-
-    Why ephemeral: the canonical (Stelle-original-draft, published-
-    LinkedIn-version) pair is the learning gradient. Auto-persisting
-    rewrites would forks the draft state — RuanMei's observations
-    stay frozen at generation time so they're unaffected, but the
-    bundle's InFlight section starts showing operator-rewritten text
-    as "this creator's recent voice," which biases the next Stelle
-    generation toward operator voice instead of Stelle voice. Worse,
-    operators end up with no clean way to A/B which version the
-    rewrite produced vs which they actually wanted to keep.
-
-    With rewrites ephemeral, the contract is:
-      - Stelle generates → ``local_posts.content`` is frozen as
-        Stelle's draft (modulo Castorice corrections at creation)
-      - Operator clicks Rewrite → frontend gets the rewritten text,
-        displays it in the edit panel, NOTHING is persisted yet
-      - Operator hits Save → existing Edit Save flow commits the
-        chosen text (rewrite, further edits, or whatever) and
-        records the revision normally
-      - Cancel → original stays untouched
+    2026-05-01: auto-saves the rewrite back to ``local_posts.content``
+    so the operator-facing card body updates immediately. This used
+    to be reverted to ephemeral over a "what feeds ingestion?" worry,
+    but ingestion is now structurally locked to ``stelle_content``
+    (immutable Stelle-original) and ``linkedin_posts`` (paired
+    published version) — neither of which is touched by rewrites.
+    The mutable ``content`` column is operator-facing display only;
+    bundle, Aglaea, RuanMei never read it. So persistence is safe
+    and just makes the UI feel useful.
     """
     prior_feedback: list[dict] = []
     try:
@@ -472,6 +454,24 @@ async def rewrite_post(post_id: str, req: RewriteRequest):
         client_context=req.client_context,
         prior_feedback=prior_feedback,
     )
+
+    # Persist the rewrite to ``content`` so the operator's card body
+    # updates immediately. Ingestion (bundle / Aglaea / RuanMei) reads
+    # ``stelle_content`` which is immutable, so the rewrite never
+    # leaks into Stelle's next-generation substrate. Pure display
+    # convenience.
+    try:
+        rewritten = (result or {}).get("final_post") or ""
+        if rewritten.strip():
+            from backend.src.db.local import get_local_post, update_local_post
+            if get_local_post(post_id):
+                update_local_post(
+                    post_id,
+                    content=rewritten,
+                    revision_source="rewrite_with_feedback" if prior_feedback else "operator_edit",
+                )
+    except Exception:
+        logger.debug("[posts/rewrite] post-update skipped", exc_info=True)
 
     return {"result": result, "prior_feedback_count": len(prior_feedback)}
 
