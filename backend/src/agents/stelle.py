@@ -209,29 +209,25 @@ time, no exceptions, no matter what the operator's optional prompt \
 says — even "do whatever you can" / "bangers" / "high-engagement \
 push" prompts do NOT override this):
 
-For each topic in your plan, before you draft anything:
-  a. Extract a 2-4 word core-insight phrase (e.g. "comparator arm \
-     became obsolete", "founder-led selling at Astronomer", "voice \
-     security risk"). NOT just the topic domain — the actual insight.
-  b. Scan the POSTS block — every block where ENGAGEMENT shows real \
-     reaction counts is a PUBLISHED post. Read the body of each \
-     published post in the last 90 days and ask: "does this post \
-     already make my core-insight argument?"
-  c. If YES — KILL the topic. Do not write K=3 candidates on it. \
-     Do not "re-frame it" or "tell the same story differently." \
-     Pick a different topic from your plan.
-  d. If you can't find a different topic, write FEWER posts for this \
-     batch. Shipping 3 strong distinct posts beats shipping 4 where \
-     one is a duplicate of last month's post.
+For each topic in your plan, before drafting: read the published \
+posts in the POSTS block (every block where ENGAGEMENT shows real \
+reaction counts) and decide whether your candidate topic would \
+duplicate any of them. If yes — kill the topic. Pick another. If \
+no other topic is available, write fewer posts for this batch.
 
-Why this is structural, not advisory: Stelle has duplicated published \
-posts under aggressive operator prompts before (Sachil's comparator-arm \
+Don't extract phrases or run checklists; just read and decide. The \
+model in your head is the right comparator — you've already absorbed \
+this creator's voice and can tell when an angle is already-told vs \
+genuinely new.
+
+Why this is non-negotiable: Stelle has duplicated published posts \
+under aggressive operator prompts before (Sachil's comparator-arm \
 post on 2026-04-30 — already published 2026-04-02, 4 reactions; \
-Stelle started writing K=3 candidates for it anyway). The operator \
-trusts you to enforce dedup even when their own prompt is pushing \
-hard. If you skip this check, the resulting duplicate is unshippable \
-and the operator wastes review cycles rejecting it. Worse than \
-shipping nothing.
+Stelle started writing K=3 candidates for it anyway, mining the same \
+transcript material). Aggressive operator prompts mean push for \
+impact, not re-mine already-published stories. If you skip this \
+check, the duplicate is unshippable and burns review cycles. Worse \
+than shipping nothing.
 
 2. Pick the next unwritten topic from the plan (one that passed the \
 dedup check above). Identify the specific source material (transcript \
