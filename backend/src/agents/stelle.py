@@ -270,6 +270,26 @@ but", or any anchor reading `"fuck off"` / `"scrolled"` / \
 gate is absolute: any negative anchor or negative gestalt = do NOT \
 ship. No exceptions.**
 
+**HOOK GATE — separate from the ship gate above.** The first anchor in \
+Irontomb's response is typically her reaction to your hook (the first \
+1-2 sentences). Hook anchors that read as CURIOSITY — `"okay, weird, \
+I'm in"`, `"thumb paused"`, `"specific number, kept reading"`, \
+`"weird ask, kept reading"`, `"hmm interesting"` — are NOT enough. \
+Curiosity stops the scroll for a beat; recognition is what actually \
+drives reactions. Iterate the hook until the first anchor reads as \
+RECOGNITION-grade — `"yeah, exactly"`, `"felt that immediately"`, \
+`"I've thought that before"`, `"recognition click"`, `"gonna forward \
+this"`, `"that's the line"`. \
+\
+A post can survive a curiosity-grade hook IF the body anchors are \
+strongly recognition-coded AND the gestalt is positive. But \
+recognition-grade body without recognition-grade hook is a \
+high-risk ship — the audience reads past the curiosity hook in 1.5 \
+seconds and never reaches the body. Default behavior: iterate hooks \
+until the FIRST anchor is recognition. Don't accept "kept reading" \
+as a hook verdict; that's the audience reading politely, not pulling \
+themselves IN.
+
 Use anchors as a LOCALIZED GRADIENT. Two options when feedback is \
 mixed: (a) surgical edit ONLY the spans the reader anchored \
 negatively — leave spans they anchored positively or didn't anchor \
@@ -1179,6 +1199,99 @@ def _dispatch_mention_resolve(root, args):
     if _lfs.is_database_mode():
         return _lfs.exec_mention_resolve(root, args)
     return "Error: mention_resolve is only available in database mode"
+
+
+def apply_castorice_to_submit_args(
+    company_keyword: str, args: dict
+) -> dict:
+    """Run Castorice fact-check + strategic-fit on a submit_draft args dict
+    and return a forwarded args dict where:
+      - ``content`` is the fact-check-corrected text
+      - ``pre_revision_content`` is the original (pre-correction) text
+      - ``process_notes`` is Stelle's own audit trail (whatever she
+        passed in either ``process_notes`` or the legacy ``why_post`` slot)
+      - ``why_post`` is Castorice's strategic_fit_note, grounded in the
+        latest Cyrene brief for this FOC (or None when no brief exists)
+      - ``fact_check_report`` is Castorice's fact-check transcript
+      - ``citation_comments`` is the list of source-citation strings
+
+    Shared between the native API path (the per-run wrapper in
+    ``stelle.py``) and the CLI MCP path (``stelle_server.py``'s
+    ``_handle_submit_draft``). Pre-2026-05-01 the CLI path bypassed
+    Castorice entirely — Stelle's why_post arg went straight through
+    unchanged, and operators saw Stelle-style audit text (mentioning
+    Aglaea/Irontomb results) in the operator-facing why_post field
+    instead of Castorice's Cyrene-brief-grounded strategic-fit
+    verdict. Wiring the CLI path through here closes that gap.
+
+    Never raises — failures fall through to graceful degradation
+    (uncorrected content, empty strategic_fit_note, etc.) so submit
+    doesn't 500 on Castorice hiccups.
+    """
+    content = args.get("content") or ""
+    if not content:
+        # Caller checks; we just bail with the args unchanged.
+        return dict(args)
+
+    # Castorice fact-check
+    try:
+        from backend.src.agents.castorice import Castorice
+        _castorice = Castorice()
+        fc = _castorice.fact_check_post(company_keyword, content)
+        corrected = fc.get("corrected_post") or content
+        report = fc.get("report") or ""
+        citation_comments = fc.get("citation_comments") or []
+    except Exception as _e:
+        logger.warning("[Stelle] Castorice fact-check failed: %s", _e)
+        _castorice = None
+        corrected = content
+        report = f"[Castorice unavailable: {str(_e)[:200]}]"
+        citation_comments = []
+
+    # Strategic-fit pass
+    strategic_fit_note = ""
+    if _castorice is not None:
+        try:
+            import os as _os
+            _user_id = (_os.environ.get("DATABASE_USER_UUID") or "").strip() or None
+            fit = _castorice.analyze_strategic_fit(
+                company_keyword=company_keyword,
+                post_content=corrected,
+                user_id=_user_id,
+            )
+            strategic_fit_note = (fit.get("strategic_fit_note") or "").strip()
+        except Exception as _e:
+            logger.warning("[Stelle] Castorice strategic-fit failed: %s", _e)
+            strategic_fit_note = ""
+
+    # Route each piece to its own field. Stelle's audit trail can
+    # arrive in either ``process_notes`` (new schema arg) or
+    # ``why_post`` (legacy arg name) — both land in process_notes
+    # which is hidden by default in the operator UI.
+    forwarded = dict(args)
+    forwarded["content"] = corrected
+    forwarded["pre_revision_content"] = content
+
+    stelle_audit_trail = (
+        forwarded.pop("process_notes", None)
+        or forwarded.pop("why_post", None)
+        or ""
+    ).strip() or None
+    forwarded["process_notes"] = stelle_audit_trail
+
+    # Castorice owns the operator-facing why_post. None when no brief
+    # exists — the UI hides the section in that case.
+    forwarded["why_post"] = strategic_fit_note or None
+
+    # Fact-check report → own column. Empty when Castorice ran cleanly.
+    forwarded["fact_check_report"] = report.strip() or None
+
+    # Citations (list[str]) — passed as a structured list.
+    forwarded["citation_comments"] = (
+        citation_comments if citation_comments else None
+    )
+
+    return forwarded
 
 
 def _dispatch_submit_draft(root, args):
@@ -4256,72 +4369,7 @@ def _run_agent_loop(
             if not content:
                 return "Error: content is required"
 
-            # Castorice fact-check — silent text correction + citation
-            # comment strings.
-            try:
-                from backend.src.agents.castorice import Castorice
-                _castorice = Castorice()
-                fc = _castorice.fact_check_post(company_keyword, content)
-                corrected = fc.get("corrected_post") or content
-                report = fc.get("report") or ""
-                citation_comments = fc.get("citation_comments") or []
-            except Exception as _e:
-                logger.warning("[Stelle] Castorice fact-check failed: %s", _e)
-                _castorice = None
-                corrected = content
-                report = f"[Castorice unavailable: {str(_e)[:200]}]"
-                citation_comments = []
-
-            # Strategic-fit pass — separate try/except so a brief-load
-            # failure or empty-brief client doesn't lose the fact-check
-            # work. Empty result means "no brief / not analyzable" and
-            # we silently leave why_post empty (UI hides the section).
-            strategic_fit_note = ""
-            if _castorice is not None:
-                try:
-                    import os as _os
-                    _user_id = (_os.environ.get("DATABASE_USER_UUID") or "").strip() or None
-                    fit = _castorice.analyze_strategic_fit(
-                        company_keyword=company_keyword,
-                        post_content=corrected,
-                        user_id=_user_id,
-                    )
-                    strategic_fit_note = (fit.get("strategic_fit_note") or "").strip()
-                except Exception as _e:
-                    logger.warning("[Stelle] Castorice strategic-fit failed: %s", _e)
-                    strategic_fit_note = ""
-
-            # Route each piece to its own field on the create_local_post
-            # call. Stelle's audit trail can arrive in either ``process_notes``
-            # (new schema arg) or ``why_post`` (legacy arg name from the
-            # old pre-split tool schema). Either way it lands in
-            # process_notes and is hidden by default in the operator UI.
-            forwarded = dict(args)
-            forwarded["content"] = corrected
-            forwarded["pre_revision_content"] = content
-
-            stelle_audit_trail = (
-                forwarded.pop("process_notes", None)
-                or forwarded.pop("why_post", None)
-                or ""
-            ).strip() or None
-            forwarded["process_notes"] = stelle_audit_trail
-
-            # Castorice owns the operator-facing why_post. May be None
-            # for clients without a brief — UI hides the section in that
-            # case.
-            forwarded["why_post"] = strategic_fit_note or None
-
-            # Fact-check report → own column. Empty when Castorice ran
-            # cleanly on a post that needed no corrections.
-            forwarded["fact_check_report"] = report.strip() or None
-
-            # Citations (list[str]) — passed as a structured list, NOT
-            # concatenated into prose. The dispatcher serializes via
-            # create_local_post(citation_comments=...).
-            forwarded["citation_comments"] = (
-                citation_comments if citation_comments else None
-            )
+            forwarded = apply_castorice_to_submit_args(company_keyword, args)
 
             if _original_submit_draft is None:
                 return "Error: submit_draft dispatcher not wired"

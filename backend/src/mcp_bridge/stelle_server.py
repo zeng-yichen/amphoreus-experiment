@@ -49,6 +49,13 @@ _USE_CLI_IRONTOMB = os.environ.get("STELLE_USE_CLI_IRONTOMB", "1") in ("1", "tru
 _simulate_call_count = 0
 _simulate_results: list[dict] = []
 
+# Aglaea (check_client_comfort) calls keyed by draft hash. Used by the
+# submit_draft gate (2026-05-01) to refuse persistence when no comfort
+# call has fired on the EXACT content being submitted. Forces Stelle to
+# run one final voice-fidelity check on whatever she's actually
+# shipping, even if she ran comfort on an earlier iteration.
+_comfort_results: dict[str, dict] = {}
+
 # Pre-load scored observations on startup
 _scored_observations: list[dict] = []
 _client_median_engagement: float | None = None
@@ -434,21 +441,72 @@ server.register(
 # CLI-mode Stelle needs parity with native-mode Stelle's submit_draft tool.
 # Without this, posts generated under AMPHOREUS_USE_CLI never land in the
 # local_posts table and the Posts tab on amphoreus.app stays empty.
-# Thin wrapper over the shared _dispatch_submit_draft handler so the CLI and
-# native paths use identical persistence logic (Castorice fact-check still
-# runs in native-mode via the per-run wrapper; in CLI mode the raw handler
-# persists without Castorice to keep this addition strictly additive —
-# Castorice wiring for CLI is a follow-up).
+#
+# 2026-05-01: Castorice is now wired into the CLI path (was bypassed
+# previously — Stelle's why_post arg went straight through and operators
+# saw Stelle-style audit text in the operator-facing why_post field
+# instead of Castorice's Cyrene-brief-grounded strategic-fit verdict).
+# Both native and CLI paths now run through the same
+# ``apply_castorice_to_submit_args`` helper, which maps:
+#   args.why_post / args.process_notes  → forwarded.process_notes
+#   Castorice strategic_fit_note         → forwarded.why_post
+#   Castorice fact-check report          → forwarded.fact_check_report
+#   Castorice citation strings           → forwarded.citation_comments
 def _handle_submit_draft(args: dict) -> str:
     if not _COMPANY:
         return "Error: STELLE_COMPANY env var not set"
     from pathlib import Path as _Path
-    from backend.src.agents.stelle import _dispatch_submit_draft
+    from backend.src.agents.stelle import (
+        _dispatch_submit_draft,
+        apply_castorice_to_submit_args,
+    )
+
+    args = args or {}
+    content = (args.get("content") or "").strip()
+    if not content:
+        return "Error: content is required"
+
+    # 2026-05-01: Aglaea gate. submit_draft refuses to persist unless
+    # check_client_comfort has fired on this EXACT content this session.
+    # Reason: prior runs shipped 4-of-6 posts with zero comfort checks
+    # because Stelle's prompt instruction ("until BOTH critics pass")
+    # was advisory; she'd skip Aglaea under time pressure or after
+    # Irontomb passed. Now structurally enforced.
+    #
+    # The hash is on the FINAL content the operator will see, so an
+    # earlier comfort call on iter-2 doesn't satisfy a submit on iter-3.
+    # Stelle has to run comfort on whatever she's actually shipping.
+    try:
+        from backend.src.agents.irontomb import _draft_hash as _hash_draft
+        _dh = _hash_draft(content)
+    except Exception:
+        _dh = None
+
+    if _dh and _dh not in _comfort_results:
+        return (
+            "Error: submit_draft REFUSED — no check_client_comfort call "
+            "has fired on this exact draft text this session. Run "
+            "check_client_comfort(draft_text=<final content>) first, "
+            "then retry submit_draft. Aglaea's voice-fidelity check is "
+            "non-optional; the operator-facing review surface depends "
+            "on it. Earlier comfort calls on prior iterations don't "
+            "count — the gate hashes the FINAL content."
+        )
+
+    try:
+        forwarded = apply_castorice_to_submit_args(_COMPANY, args)
+    except Exception as e:
+        # apply_castorice never raises by design, but guard anyway —
+        # if Castorice itself fails fully, fall through to raw dispatch
+        # so the draft still persists.
+        logger.warning("[stelle_server] Castorice wrap failed: %s", e)
+        forwarded = dict(args)
+
     # The native dispatcher pulls company from env (STELLE_COMPANY_KEYWORD /
     # DATABASE_COMPANY_ID), so we just forward args + a workspace root.
     # Root is only used for the markdown mirror path; CWD-relative is fine.
     try:
-        return _dispatch_submit_draft(_Path("."), args or {})
+        return _dispatch_submit_draft(_Path("."), forwarded)
     except Exception as e:
         return f"Error: submit_draft failed: {e}"
 
@@ -506,6 +564,18 @@ def _handle_check_client_comfort(args: dict) -> str:
             user_slug=user_slug,
             company_slug=company,
         )
+        # Track this call for the submit_draft gate. Hash the exact
+        # draft text so submit_draft can verify comfort fired on
+        # *this* content (not a stale earlier iteration).
+        try:
+            from backend.src.agents.irontomb import _draft_hash as _hash_draft
+            _comfort_results[_hash_draft(draft)] = {
+                "result": result,
+                "draft_first_line": draft.split("\n", 1)[0][:80],
+                "draft_len": len(draft),
+            }
+        except Exception:
+            pass
         # Fire-and-forget convergence log. See services/convergence_log.py
         # for the dataset-building rationale. Never raises; the critic's
         # return value is unchanged regardless of whether this succeeds.
