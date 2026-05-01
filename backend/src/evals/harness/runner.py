@@ -106,20 +106,18 @@ def _execute_agent(case: EvalCase) -> str:
         ) or ""
 
     elif agent_name == "cyrene":
-        # 2026-05-01: was demiurge.CyreneStyleRewriter (single-shot);
-        # now uses the Stelle-grade rewrite loop (voice substrate +
-        # Irontomb iteration + Aglaea check). The "cyrene" agent name
-        # in eval cases is preserved for backward compat — it now
-        # exercises the full critic-grounded rewrite path.
-        from backend.src.agents.stelle_rewrite import rewrite_post_via_stelle_loop
-        result = rewrite_post_via_stelle_loop(
-            company=case.context.get("company", "test"),
-            user_id=case.context.get("user_id"),
-            post_text=case.context.get("post_text", case.prompt),
-            prior_feedback=case.context.get("prior_feedback") or [],
-            style_instruction=case.context.get("style", ""),
+        # 2026-05-01: removed. The "cyrene" eval slot used to test the
+        # rewriter (demiurge.CyreneStyleRewriter then stelle_rewrite,
+        # both deleted). Rewrites are now just Stelle generations with
+        # operator-provided context — the "stelle" eval slot covers
+        # them. If you want to bench the rewrite use case specifically,
+        # construct a Stelle case with a "rewrite the post starting
+        # with X" prompt.
+        raise NotImplementedError(
+            "The 'cyrene' eval slot was removed 2026-05-01 along with "
+            "the rewriter. Use the 'stelle' agent slot with a "
+            "rewrite-flavored prompt instead."
         )
-        return result.get("final_post", "")
 
     elif agent_name == "castorice":
         from backend.src.agents.castorice import Castorice

@@ -80,22 +80,14 @@ def run_inline_edit(
 ) -> str:
     """Run Stelle inline edit with optional SSE streaming."""
     event_callback = _make_event_callback(job_id) if job_id else None
-    try:
-        from backend.src.agents.stelle import inline_edit
-        result = inline_edit(company, post_text, instruction, event_callback=event_callback)
-        return result or ""
-    except (ImportError, AttributeError):
-        # 2026-05-01: fallback was demiurge.CyreneStyleRewriter; now
-        # uses the Stelle-grade rewrite loop (bundle + Irontomb +
-        # Aglaea). user_id is None on this path because the inline-
-        # edit caller doesn't carry one — Aglaea will operate
-        # company-wide which is the documented degraded mode.
-        from backend.src.agents.stelle_rewrite import rewrite_post_via_stelle_loop
-        result = rewrite_post_via_stelle_loop(
-            company=company,
-            user_id=None,
-            post_text=post_text,
-            prior_feedback=None,
-            style_instruction=instruction or "",
-        )
-        return result.get("final_post", "")
+    # 2026-05-01: fallback chain trimmed. inline_edit is the canonical
+    # path (uses Pi sessions for fine-grained span edits). Previous
+    # fallbacks (demiurge.CyreneStyleRewriter, then stelle_rewrite)
+    # are gone — both were duplicate critic stacks that should never
+    # have existed. If inline_edit isn't importable, the operator
+    # gets an error and can either retry or use the optional-prompt
+    # box on the next Stelle run to express the edit as a generation
+    # task ("rewrite the post starting with X to address Y").
+    from backend.src.agents.stelle import inline_edit
+    result = inline_edit(company, post_text, instruction, event_callback=event_callback)
+    return result or ""

@@ -130,11 +130,7 @@ class PatchPostRequest(BaseModel):
     linked_image_id: str | None = None
 
 
-class RewriteRequest(BaseModel):
-    company: str
-    post_text: str
-    style_instruction: str = ""
-    client_context: str = ""
+# RewriteRequest removed 2026-05-01 — see /rewrite endpoint deletion below.
 
 
 class FactCheckRequest(BaseModel):
@@ -406,96 +402,31 @@ async def reject_post(post_id: str, request: Request, body: RejectRequest | None
 # ---------------------------------------------------------------------------
 
 
-@router.post("/{post_id}/rewrite")
-async def rewrite_post(post_id: str, req: RewriteRequest):
-    """Rewrite a post via the Stelle-grade critic loop.
-
-    2026-05-01: replaced ``demiurge.CyreneStyleRewriter`` (single-shot
-    Opus call with chain-of-thought XML, no voice substrate, no
-    critic check) with ``stelle_rewrite.rewrite_post_via_stelle_loop``
-    — voice-grounded against this client's published-post bundle,
-    Irontomb-iterated up to N cycles, Aglaea-gated.
-
-    Flow:
-      1. Pull unresolved draft_feedback (inline + post-wide comments)
-         for this post. Forward as the rewriter's instruction set.
-      2. Resolve company + user_id from the existing local_posts row
-         so the rewriter can scope the bundle / Aglaea per-FOC.
-      3. Run rewrite_post_via_stelle_loop:
-           - bundle (engagement-desc published posts, transcripts)
-             as voice substrate
-           - Opus generates the rewrite, grounded
-           - Irontomb iterates up to 3 cycles, refining flagged spans
-           - Aglaea final voice-fidelity check
-      4. Persist the rewrite to ``content`` (the mutable, operator-
-         facing display column). Ingestion (bundle, Aglaea
-         edit_deltas, RuanMei) reads ``stelle_content`` (immutable),
-         which is unchanged — rewrite never leaks into Stelle's
-         next-generation substrate.
-      5. Return the rewrite + Irontomb reactions + Aglaea verdict so
-         the operator can see critic provenance.
-    """
-    prior_feedback: list[dict] = []
-    try:
-        from backend.src.db.amphoreus_supabase import _get_client, is_configured
-        if is_configured():
-            sb = _get_client()
-            if sb is not None:
-                prior_feedback = (
-                    sb.table("draft_feedback")
-                      .select("body, author_email, author_name, selected_text, source")
-                      .eq("draft_id", post_id)
-                      .eq("resolved", False)
-                      .order("created_at", desc=False)
-                      .limit(50)
-                      .execute()
-                      .data
-                    or []
-                )
-    except Exception as exc:
-        logger.debug("[posts/rewrite] feedback fetch failed (non-fatal): %s", exc)
-
-    # Resolve (company_slug, user_id) from the existing local_posts row
-    # so the rewriter can scope its substrate per-FOC. The request
-    # body's ``company`` field is used as a fallback.
-    company_for_rewrite = req.company
-    user_id_for_rewrite: str | None = None
-    try:
-        from backend.src.db.local import get_local_post
-        existing = get_local_post(post_id)
-        if existing:
-            company_for_rewrite = existing.get("company") or req.company
-            user_id_for_rewrite = (existing.get("user_id") or "").strip() or None
-    except Exception as exc:
-        logger.debug("[posts/rewrite] post lookup failed: %s", exc)
-
-    from backend.src.agents.stelle_rewrite import rewrite_post_via_stelle_loop
-    result = rewrite_post_via_stelle_loop(
-        company=company_for_rewrite,
-        user_id=user_id_for_rewrite,
-        post_text=req.post_text,
-        prior_feedback=prior_feedback,
-        style_instruction=req.style_instruction,
-    )
-
-    # Persist the rewrite to ``content`` so the operator's card body
-    # updates immediately. Ingestion (bundle / Aglaea / RuanMei) reads
-    # ``stelle_content`` which is immutable, so the rewrite never
-    # leaks into Stelle's next-generation substrate.
-    try:
-        rewritten = (result or {}).get("final_post") or ""
-        if rewritten.strip():
-            from backend.src.db.local import update_local_post
-            if get_local_post(post_id):
-                update_local_post(
-                    post_id,
-                    content=rewritten,
-                    revision_source="rewrite_with_feedback" if prior_feedback else "operator_edit",
-                )
-    except Exception:
-        logger.debug("[posts/rewrite] post-update skipped", exc_info=True)
-
-    return {"result": result, "prior_feedback_count": len(prior_feedback)}
+# 2026-05-01: /rewrite endpoint REMOVED.
+#
+# Rewrites used to be a separate code path with their own rewriter
+# module (demiurge.CyreneStyleRewriter, then stelle_rewrite). Turned
+# out to be unnecessary architectural duplication of Stelle:
+#
+#   - Stelle already has the bundle (voice substrate)
+#   - Stelle already has the K=3 candidates + Irontomb + Aglaea +
+#     Castorice critic stack
+#   - Stelle already has the post-bundle dedup awareness
+#   - Stelle already produces an immutable ``stelle_content`` per
+#     generation, vs the rewriter mutating ``content`` in place and
+#     forking the row away from its frozen Stelle-original
+#
+# The "rewrite" use case is just "Stelle generation with operator-
+# provided context about what to fix." Operator types into the
+# optional-prompt box: "Rewrite the post starting with X to address
+# the comment about Y." Stelle runs her full loop and produces a new
+# draft alongside the old one. Operator deletes the worse one.
+#
+# Net effect: one code path (Stelle generates posts), no duplicate
+# critic loops, no mutable-content drift, and rewrites get the full
+# Stelle-grade treatment instead of a stripped-down side-path.
+#
+# RewriteRequest pydantic model also removed (see top of file).
 
 
 @router.post("/{post_id}/fact-check")

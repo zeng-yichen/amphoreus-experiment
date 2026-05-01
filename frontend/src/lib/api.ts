@@ -358,11 +358,9 @@ export const postsApi = {
   // ``published_posted_at``, ``published_reactions``, etc.) on the
   // GET /api/posts response.
 
-  rewrite: (postId: string, company: string, postText: string, styleInstruction?: string) =>
-    apiFetch<{ result: any }>(`/api/posts/${postId}/rewrite`, {
-      method: "POST",
-      body: JSON.stringify({ company, post_text: postText, style_instruction: styleInstruction }),
-    }),
+  // rewrite() removed 2026-05-01 — backend endpoint deleted with the
+  // rest of the rewriter stack. Rewrites are now expressed as normal
+  // Stelle generations via the optional-prompt box.
 
   factCheck: (postId: string, company: string, postText: string) =>
     apiFetch<{

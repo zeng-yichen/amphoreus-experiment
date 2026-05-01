@@ -1240,29 +1240,9 @@ function PostsManager({
   // inline in the Posts tab via the ``published_post_text`` field
   // returned by GET /api/posts (see PublishedVersion expander below).
 
-  async function handleRewrite(post: any) {
-    onAction(post.id);
-    try {
-      const res = await postsApi.rewrite(post.id, company, post.content);
-      // 2026-05-01: rewrite is EPHEMERAL by design — backend no longer
-      // persists. We get the rewritten text back, drop it into the
-      // edit panel, and let the operator decide whether to Save
-      // (commits via the existing Edit Save flow → update_local_post)
-      // or Cancel (original stays untouched). The post body in the
-      // card view does NOT change until the operator hits Save —
-      // the rewrite lives only in the edit textarea until then.
-      const rewritten =
-        typeof res.result === "string"
-          ? res.result
-          : (res.result?.final_post || res.result?.content || "");
-      if (rewritten) {
-        setEditingId(post.id);
-        setEditText(rewritten);
-      }
-    } finally {
-      onAction(null);
-    }
-  }
+  // handleRewrite removed 2026-05-01 — rewrites are now expressed as
+  // normal Stelle generations via the optional-prompt box. See the
+  // comment on the (deleted) Rewrite button.
 
   async function handleFactCheck(post: any) {
     onAction(post.id);
@@ -2689,21 +2669,16 @@ function PostsManager({
                 >
                   {copiedPostId === post.id ? "Copied!" : "Copy"}
                 </button>
-                {/* Rewrite — pulls every UNRESOLVED inline + post-wide
-                    comment on this post and feeds them to the rewrite
-                    agent (Cyrene.rewrite_single_post). The backend
-                    persists the new content as a revision with source
-                    "rewrite_with_feedback" and returns the rewrite to
-                    the UI, which opens the edit panel pre-filled so
-                    the operator can refine further before final save. */}
-                <button
-                  onClick={() => handleRewrite(post)}
-                  disabled={actionInProgress === post.id}
-                  title="Rewrite this draft using every unresolved inline + post-wide comment as guidance. Saves the rewrite as a new revision; the edit panel opens with the new text so you can refine before approving."
-                  className="rounded bg-stone-800 px-2.5 py-1 text-xs text-stone-300 hover:bg-stone-700 disabled:opacity-50"
-                >
-                  {actionInProgress === post.id ? "..." : "Rewrite"}
-                </button>
+                {/* Rewrite button removed 2026-05-01.
+                    Rewrites are now expressed as normal Stelle generations
+                    with operator-provided context. To "rewrite this
+                    post," type into the optional-prompt box on the
+                    Stelle Run dialog: "Rewrite the post starting with
+                    'first 80 chars' to address the comment about X."
+                    Stelle's full critic stack (K=3 candidates,
+                    Irontomb, Aglaea, Castorice) runs and produces a
+                    new draft alongside the old one. Operator deletes
+                    the worse one. */}
                 <button
                   onClick={() => handleFactCheck(post)}
                   disabled={actionInProgress === post.id}
