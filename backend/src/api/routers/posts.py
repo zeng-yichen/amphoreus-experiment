@@ -408,19 +408,41 @@ async def reject_post(post_id: str, request: Request, body: RejectRequest | None
 
 @router.post("/{post_id}/rewrite")
 async def rewrite_post(post_id: str, req: RewriteRequest):
-    """Rewrite a post via Cyrene.
+    """Rewrite a post via the Cyrene rewriter (Cyrene.rewrite_single_post
+    in demiurge.py — different class than the strategic-brief Cyrene).
 
     Pulls unresolved feedback from ``draft_feedback`` and hands it to
-    :meth:`Cyrene.rewrite_single_post` so the rewrite actually addresses
-    what operators flagged — the highest-leverage consumption point for
-    the comments system. If the feedback fetch fails (pre-migration,
-    mirror unreachable, etc.) the rewrite still runs without prior
-    feedback — degraded but functional.
+    the rewriter so the rewrite actually addresses what operators
+    flagged — the highest-leverage consumption point for the comments
+    system. If the feedback fetch fails (pre-migration, mirror
+    unreachable, etc.) the rewrite still runs without prior feedback
+    — degraded but functional.
 
-    When the rewrite succeeds AND we have a post in ``local_posts`` for
-    this id, we also persist the new content back through
-    ``update_local_post`` with ``revision_source='rewrite_with_feedback'``
-    so the revision history slices cleanly in eval.
+    2026-05-01: rewrite is EPHEMERAL by design. The endpoint returns
+    the rewritten text but does NOT persist it to ``local_posts`` and
+    does NOT record a revision. The frontend displays the rewrite in
+    the edit panel for operator review; the operator commits via the
+    existing Edit Save flow if they choose to keep it.
+
+    Why ephemeral: the canonical (Stelle-original-draft, published-
+    LinkedIn-version) pair is the learning gradient. Auto-persisting
+    rewrites would forks the draft state — RuanMei's observations
+    stay frozen at generation time so they're unaffected, but the
+    bundle's InFlight section starts showing operator-rewritten text
+    as "this creator's recent voice," which biases the next Stelle
+    generation toward operator voice instead of Stelle voice. Worse,
+    operators end up with no clean way to A/B which version the
+    rewrite produced vs which they actually wanted to keep.
+
+    With rewrites ephemeral, the contract is:
+      - Stelle generates → ``local_posts.content`` is frozen as
+        Stelle's draft (modulo Castorice corrections at creation)
+      - Operator clicks Rewrite → frontend gets the rewritten text,
+        displays it in the edit panel, NOTHING is persisted yet
+      - Operator hits Save → existing Edit Save flow commits the
+        chosen text (rewrite, further edits, or whatever) and
+        records the revision normally
+      - Cancel → original stays untouched
     """
     prior_feedback: list[dict] = []
     try:
@@ -450,24 +472,6 @@ async def rewrite_post(post_id: str, req: RewriteRequest):
         client_context=req.client_context,
         prior_feedback=prior_feedback,
     )
-
-    # If Cyrene produced a rewrite AND this post exists in local_posts,
-    # persist it so the operator's next "Rewrite" doesn't see stale
-    # text, and the revision history captures the rewrite provenance.
-    # The frontend may additionally PATCH the post after showing the
-    # diff to the user — that's fine, the extra revision row is harmless.
-    try:
-        rewritten = (result or {}).get("final_post") or ""
-        if rewritten.strip():
-            from backend.src.db.local import get_local_post, update_local_post
-            if get_local_post(post_id):
-                update_local_post(
-                    post_id,
-                    content=rewritten,
-                    revision_source="rewrite_with_feedback" if prior_feedback else "operator_edit",
-                )
-    except Exception:
-        logger.debug("[posts/rewrite] post-update skipped", exc_info=True)
 
     return {"result": result, "prior_feedback_count": len(prior_feedback)}
 

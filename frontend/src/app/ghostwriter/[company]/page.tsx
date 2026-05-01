@@ -1244,10 +1244,20 @@ function PostsManager({
     onAction(post.id);
     try {
       const res = await postsApi.rewrite(post.id, company, post.content);
-      onRefresh();
-      if (res.result) {
+      // 2026-05-01: rewrite is EPHEMERAL by design — backend no longer
+      // persists. We get the rewritten text back, drop it into the
+      // edit panel, and let the operator decide whether to Save
+      // (commits via the existing Edit Save flow → update_local_post)
+      // or Cancel (original stays untouched). The post body in the
+      // card view does NOT change until the operator hits Save —
+      // the rewrite lives only in the edit textarea until then.
+      const rewritten =
+        typeof res.result === "string"
+          ? res.result
+          : (res.result?.final_post || res.result?.content || "");
+      if (rewritten) {
         setEditingId(post.id);
-        setEditText(typeof res.result === "string" ? res.result : res.result.content || "");
+        setEditText(rewritten);
       }
     } finally {
       onAction(null);
