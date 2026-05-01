@@ -492,7 +492,19 @@ def build_post_bundle_with_stats(
             continue
         if (lp.get("ordinal_post_id") or "").strip():
             continue  # covered by Pass 1 (Ordinal-side status governs)
-        body = (lp.get("content") or "").strip()
+        # 2026-05-01: read from ``stelle_content`` (the immutable
+        # Stelle-final draft) for ingestion, NOT from ``content`` which
+        # drifts via operator Edit Save / Rewrite. Stelle's NEXT batch
+        # pattern-matches against this; if an operator edit/rewrite
+        # leaks into the bundle, future generations drift toward
+        # operator voice instead of Stelle voice.
+        # Fallback chain for legacy rows where stelle_content is NULL:
+        #   stelle_content → pre_revision_content → content
+        body = (
+            (lp.get("stelle_content") or "").strip()
+            or (lp.get("pre_revision_content") or "").strip()
+            or (lp.get("content") or "").strip()
+        )
         title = (lp.get("title") or "").strip()
         if not body and not title:
             continue

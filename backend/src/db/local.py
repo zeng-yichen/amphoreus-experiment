@@ -136,6 +136,24 @@ CREATE TABLE IF NOT EXISTS local_posts (
     -- multi-section concatenation of Stelle's prose + Castorice's verdict
     -- + fact-check report; new rows hold ONLY Castorice's verdict.
     why_post TEXT,
+    -- 2026-05-01: IMMUTABLE post-creation. The Stelle-final draft as
+    -- it was ready to ship at the moment of submit_draft (post-
+    -- Castorice fact-check, pre any operator edits or rewrites). This
+    -- is the canonical record of "what the agent generated" for
+    -- learning ingestion.
+    --
+    -- ``content`` can drift via operator Edit Save and the Rewrite
+    -- flow; ``stelle_content`` does not. Future ingestion (bundle's
+    -- InFlight section, Aglaea edit_deltas, RuanMei observation
+    -- back-fills, cross-roster substrate, etc.) reads stelle_content,
+    -- never content. Operator-facing display continues to use content
+    -- so they see the latest edited state.
+    --
+    -- Legacy rows where this is NULL: fall back to
+    -- pre_revision_content (which holds Stelle-pre-Castorice text on
+    -- rows where Castorice corrected something), then to content as
+    -- a last resort. Forward-only invariant.
+    stelle_content TEXT,
     -- Stelle's audit trail: provenance, Irontomb anchor highlights,
     -- comfort score, length stats, decision rationale. Hidden behind a
     -- "Show process notes" expander in the UI; useful for debugging,
@@ -269,6 +287,8 @@ def _migrate_local_posts_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE local_posts ADD COLUMN linked_image_id TEXT")
     if "pre_revision_content" not in cols:
         conn.execute("ALTER TABLE local_posts ADD COLUMN pre_revision_content TEXT")
+    if "stelle_content" not in cols:
+        conn.execute("ALTER TABLE local_posts ADD COLUMN stelle_content TEXT")
     if "cyrene_score" not in cols:
         conn.execute("ALTER TABLE local_posts ADD COLUMN cyrene_score REAL")
     if "generation_metadata" not in cols:
@@ -518,6 +538,7 @@ def create_local_post(
     publication_order: int | None = None,
     scheduled_date: str | None = None,
     user_id: str | None = None,
+    stelle_content: str | None = None,
 ) -> dict:
     """Insert a draft row.
 
@@ -532,11 +553,18 @@ def create_local_post(
     """
     cc_json = json.dumps(citation_comments) if citation_comments else None
     gen_meta_json = json.dumps(generation_metadata) if generation_metadata else None
+    # 2026-05-01: ``stelle_content`` is the immutable Stelle-final draft
+    # for ingestion. If caller didn't pass it explicitly, default to
+    # ``content`` at creation time (the post-Castorice corrected Stelle
+    # text) — captures the ingestion-canonical version BEFORE any
+    # subsequent edits or rewrites can drift it.
+    if stelle_content is None:
+        stelle_content = content
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO local_posts (id, company, user_id, content, title, status, why_post, process_notes, fact_check_report, citation_comments, ordinal_post_id, linked_image_id, pre_revision_content, cyrene_score, generation_metadata, publication_order, scheduled_date) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)",
-            (post_id, company, user_id, content, title, status, why_post, process_notes, fact_check_report, cc_json, pre_revision_content, cyrene_score, gen_meta_json, publication_order, scheduled_date),
+            "INSERT INTO local_posts (id, company, user_id, content, title, status, why_post, process_notes, fact_check_report, citation_comments, ordinal_post_id, linked_image_id, pre_revision_content, stelle_content, cyrene_score, generation_metadata, publication_order, scheduled_date) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)",
+            (post_id, company, user_id, content, title, status, why_post, process_notes, fact_check_report, cc_json, pre_revision_content, stelle_content, cyrene_score, gen_meta_json, publication_order, scheduled_date),
         )
     # Mirror to Amphoreus Supabase (Posts tab + Hyacinthia source of truth).
     _mirror_to_supabase(
@@ -555,6 +583,7 @@ def create_local_post(
             "ordinal_post_id": None,
             "linked_image_id": None,
             "pre_revision_content": pre_revision_content,
+            "stelle_content": stelle_content,
             "cyrene_score": cyrene_score,
             "generation_metadata": gen_meta_json,
             "publication_order": publication_order,

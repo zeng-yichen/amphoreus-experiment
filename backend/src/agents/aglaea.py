@@ -374,22 +374,37 @@ def _fetch_edit_deltas(
     user_id: Optional[str],
     user_email: Optional[str],
 ) -> list[dict[str, Any]]:
-    """Past (pre_revision, published) pairs from this user's drafts.
+    """Past (Stelle-original, what-actually-shipped) pairs.
 
-    The implicit "a human softened this" signal. We return up to
-    ``_MAX_EDIT_DELTAS`` of the most recent drafts where both
-    ``pre_revision_content`` and ``content`` are set and differ.
+    The implicit "a human softened this" signal. Pairs the immutable
+    Stelle-final draft (``stelle_content``) with whatever's in
+    ``content`` for paired-and-published drafts only — by the time
+    a draft is paired (``matched_provider_urn`` set), the ``content``
+    field reflects either the operator's final commit or the
+    LinkedIn-published version, whichever is newer.
+
+    2026-05-01: reads ``stelle_content`` (immutable post-creation)
+    instead of ``pre_revision_content`` (Stelle-pre-Castorice). The
+    pair is now (post-Castorice Stelle draft, what shipped) which
+    isolates the human-side delta. ``content`` remains the
+    "what shipped" side because the bundle path that surfaces this
+    Aglaea signal already feeds her the linkedin-published text via
+    matched_provider_urn separately; the local_posts.content side
+    holds whatever the operator committed.
+
+    Fallback for legacy rows where stelle_content is NULL: use
+    pre_revision_content (the Stelle-pre-Castorice text on rows where
+    Castorice corrected something).
     """
     if not user_id:
         return []
     try:
         rows = (
             sb.table("local_posts")
-              .select("content, pre_revision_content, created_at")
+              .select("content, pre_revision_content, stelle_content, created_at")
               .eq("user_id", user_id)
-              .not_.is_("pre_revision_content", "null")
               .order("created_at", desc=True)
-              .limit(_MAX_EDIT_DELTAS * 3)  # over-pull then filter for real deltas
+              .limit(_MAX_EDIT_DELTAS * 4)  # over-pull then filter for real deltas
               .execute()
               .data
             or []
@@ -399,7 +414,10 @@ def _fetch_edit_deltas(
         return []
     out = []
     for r in rows:
-        pre = (r.get("pre_revision_content") or "").strip()
+        pre = (
+            (r.get("stelle_content") or "").strip()
+            or (r.get("pre_revision_content") or "").strip()
+        )
         post = (r.get("content") or "").strip()
         if not pre or not post or pre == post:
             continue

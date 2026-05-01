@@ -606,6 +606,13 @@ _LOCAL_POSTS_COLS = (
     # may have NULL for both — UI tolerates that.
     "process_notes,fact_check_report,citation_comments,"
     "ordinal_post_id,linked_image_id,created_at,pre_revision_content,"
+    # 2026-05-01: ``stelle_content`` is the immutable Stelle-final
+    # draft for ingestion. ``content`` can drift via operator Edit
+    # Save and the Rewrite flow; stelle_content does not. Bundle's
+    # InFlight rendering + Aglaea edit_deltas read stelle_content
+    # (with fallback to pre_revision_content / content for legacy
+    # rows where stelle_content is NULL).
+    "stelle_content,"
     "cyrene_score,generation_metadata,scheduled_date,publication_order,"
     # Draft ↔ published pairing (set by draft_match_worker semantically
     # or by /api/posts/{id}/set-publish-date manually). Read by

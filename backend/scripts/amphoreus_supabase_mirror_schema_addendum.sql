@@ -254,6 +254,34 @@ alter table if exists local_posts
     add column if not exists fact_check_report  text;
 
 
+-- ---------------------------------------------------------------- local_posts: stelle_content (immutable post-create) (2026-05-01)
+--
+-- ``content`` is mutable — operator Edit Save and the Rewrite flow
+-- both update it. ``stelle_content`` is the immutable Stelle-final
+-- draft, populated once at create_local_post time and never touched
+-- again by edits or rewrites.
+--
+-- Why split: ingestion paths (bundle's InFlight section, Aglaea
+-- edit_deltas, RuanMei observation back-fills, cross-roster
+-- substrate) need the canonical "what the agent generated" record.
+-- Reading from ``content`` corrupts that signal whenever an operator
+-- edits — Stelle's NEXT generation pattern-matches on operator-edited
+-- voice instead of her own.
+--
+-- Operator-facing display continues to read ``content`` so the
+-- review surface shows the latest edited state.
+--
+-- For legacy rows where this is NULL, consumers fall back to
+-- pre_revision_content (Stelle-pre-Castorice when Castorice changed
+-- something) and finally to content. Forward-only invariant — no
+-- backfill attempted because for rows whose content has already
+-- drifted via operator edits, the original is permanently lost.
+--
+-- Safe to re-run.
+alter table if exists local_posts
+    add column if not exists stelle_content text;
+
+
 -- ---------------------------------------------------------------- linkedin_posts: Amphoreus-owned scrape marker
 --
 -- Added by backend/src/services/amphoreus_linkedin_scrape.py, the
