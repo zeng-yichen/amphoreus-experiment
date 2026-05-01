@@ -810,7 +810,11 @@ def run_stelle_cli(
         # (2026-04-23 Virio incident — 758 posts, 1.2 MB argv).
         import os as _os
         _bundle_user_uuid = (_os.environ.get("DATABASE_USER_UUID") or "").strip() or None
-        existing_posts_context = build_post_bundle(company_keyword, user_id=_bundle_user_uuid)
+        # sort_by='engagement' — match the API path so Stelle's CLI
+        # invocations also see proven high-engagement posts first.
+        existing_posts_context = build_post_bundle(
+            company_keyword, user_id=_bundle_user_uuid, sort_by="engagement",
+        )
     except Exception:
         pass
 

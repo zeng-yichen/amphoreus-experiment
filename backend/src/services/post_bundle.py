@@ -202,6 +202,7 @@ def build_post_bundle(
     *,
     window_days: int = _WINDOW_DAYS,
     user_id: Optional[str] = None,
+    sort_by: str = "posted_at",
 ) -> str:
     """Return the full markdown bundle block for a company.
 
@@ -223,7 +224,7 @@ def build_post_bundle(
     logic, tuple return.
     """
     bundle, _stats = build_post_bundle_with_stats(
-        company, window_days=window_days, user_id=user_id,
+        company, window_days=window_days, user_id=user_id, sort_by=sort_by,
     )
     return bundle
 
@@ -233,6 +234,7 @@ def build_post_bundle_with_stats(
     *,
     window_days: int = _WINDOW_DAYS,
     user_id: Optional[str] = None,
+    sort_by: str = "posted_at",
 ) -> tuple[str, dict[str, Any]]:
     """Same as :func:`build_post_bundle` but also returns a stats dict.
 
@@ -304,7 +306,9 @@ def build_post_bundle_with_stats(
         # Without it, _resolve_linkedin_username bails when a company
         # has >1 FOC, returning empty engagement → no neighbors → no
         # NEAREST CREATOR POSTS block on any rendered post. 2026-04-23.
-        linkedin_posts_by_urn = _fetch_linkedin_engagement(company, user_id=user_id)
+        linkedin_posts_by_urn = _fetch_linkedin_engagement(
+            company, user_id=user_id, sort_by=sort_by,
+        )
         feedback_by_draft     = _fetch_feedback(local_posts_by_id.keys())
         trajectories_by_urn   = _fetch_recent_trajectories(linkedin_posts_by_urn)
     except Exception:
@@ -1192,7 +1196,9 @@ def _fetch_cross_roster_z_outliers(
 
 
 def _fetch_linkedin_engagement(
-    company: str, user_id: Optional[str] = None,
+    company: str,
+    user_id: Optional[str] = None,
+    sort_by: str = "posted_at",
 ) -> dict[str, dict]:
     """Return ``{provider_urn: linkedin_post_row}`` for this creator's
     recent posts. Provides engagement numbers + fallback body text for
@@ -1232,6 +1238,18 @@ def _fetch_linkedin_engagement(
     if not url or not key:
         return {}
 
+    # Map ``sort_by`` to a PostgREST order clause. Default is
+    # chronological (recency-desc, the historical behavior); Stelle
+    # passes "engagement" so the highest-reaction posts appear FIRST
+    # in the bundle, fixing the primacy-bias failure mode where Stelle
+    # pattern-matched the most recent (often-underperforming) posts as
+    # "this creator's voice" instead of the proven high-engagement
+    # posts that actually landed.
+    if sort_by == "engagement":
+        order_clause = "total_reactions.desc"
+    else:
+        order_clause = "posted_at.desc"
+
     def _fetch(days: int) -> list[dict]:
         since_iso = (
             datetime.now(timezone.utc) - timedelta(days=days)
@@ -1261,7 +1279,7 @@ def _fetch_linkedin_engagement(
                     "reshared_post_urn": "is.null",
                     "post_text":         "not.is.null",
                     "posted_at":         f"gte.{since_iso}",
-                    "order":             "posted_at.desc",
+                    "order":             order_clause,
                     "limit":             "200",
                 },
                 headers={

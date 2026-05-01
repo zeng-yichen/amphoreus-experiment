@@ -5282,8 +5282,15 @@ def generate_one_shot(
         # it here prevents the bundle from loading every sibling FOC's
         # drafts (2026-04-23 Virio ARG_MAX incident).
         _bundle_user_uuid = (os.environ.get("DATABASE_USER_UUID") or "").strip() or None
+        # sort_by='engagement': order the POSTS block by reaction-count
+        # desc so Stelle reads the actually-working high-engagement
+        # posts FIRST. Recency-desc (the default) buried the proven
+        # framework posts under the most recent (often underperforming)
+        # drafts and Stelle pattern-matched the wrong voice. Each post
+        # still carries posted_at; chronological signal is recoverable
+        # from the per-post timestamps.
         existing_posts_context, _bundle_stats = build_post_bundle_with_stats(
-            company_keyword, user_id=_bundle_user_uuid,
+            company_keyword, user_id=_bundle_user_uuid, sort_by="engagement",
         )
     except Exception as _e:
         logger.debug("[Stelle] post bundle build skipped: %s", _e)
